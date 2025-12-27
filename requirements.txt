@@ -1,26 +1,21 @@
-# --- 核心框架 ---
-Django>=4.2,<5.0                 # 建议使用 LTS (长期支持) 版本
-djangorestframework>=3.14.0      # 构建 Web API 的核心库
+Django>=4.2,<5.0
+djangorestframework>=3.14.0
 
-# --- 认证与安全 ---
-djangorestframework-simplejwt>=5.3.0  # JWT Token 认证 (适合跨端开发)
-django-cors-headers>=4.2.0            # 解决前端跨域请求问题
+djangorestframework-simplejwt>=5.3.0
+django-cors-headers>=4.2.0
 
-# --- 数据库 ---
-psycopg2-binary>=2.9.7           # PostgreSQL 适配器 (推荐生产环境用 PG)
-# 如果你暂时只想用 SQLite 开发，可以忽略上面这一行，但建议装上
 
-# --- 异步任务与定时调度 (用于违约检查、黑名单自动解除) ---
-celery>=5.3.0                    # 分布式任务队列
-redis>=5.0.0                     # Celery 的消息中间件 (需要本地安装 Redis)
-django-celery-beat>=2.5.0        # 数据库驱动的定时任务调度器
+celery>=5.3.0
+redis>=5.0.0
+django-celery-beat>=2.5.0
 
-# --- 工具与辅助 ---
-django-filter>=23.2              # API 强大的过滤功能 (按时间、空间搜索)
-python-dotenv>=1.0.0             # 管理环境变量 (数据库密码等不应硬编码)
-Pillow>=10.0.0                   # 图片处理 (空间图片上传需要)
-markdown>=3.4.4                  # 浏览 API 文档需要
-django-extensions>=3.2.3         # 一些开发辅助工具 (如 shell_plus)
+django-filter>=23.2
+python-dotenv>=1.0.0
+Pillow>=10.0.0
+markdown>=3.4.4
+django-extensions>=3.2.3
 
 python-decouple
 mysqlclient
+
+drf-spectacular

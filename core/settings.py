@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'django_filters',              # 高级过滤
     'django_celery_beat',          # 定时任务调度
 
+    'drf_spectacular',
     # --- 自定义业务模块 ---
     'users.apps.UsersConfig',
     'spaces.apps.SpacesConfig',
@@ -169,6 +170,10 @@ REST_FRAMEWORK = {
     ],
     'DATETIME_FORMAT': '%Y-%m-%d %H:%M:%S',
     'DATE_FORMAT': '%Y-%m-%d',
+    'EXCEPTION_HANDLER': 'core.utils.error_handler.custom_exception_handler',
+
+    # 添加 OpenAPI Schema 渲染器 (用于 drf-spectacular)
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
 # ==============================================================================
@@ -223,3 +228,95 @@ CELERY_TIMEZONE = TIME_ZONE
 # ==============================================================================
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ==============================================================================
+# 12. DRF Spectacular (OpenAPI/Swagger) 配置
+# ==============================================================================
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': '公共空间预订管理系统 API',
+    'DESCRIPTION': '毕业设计项目：高性能、可扩展的公共空间预订管理系统后端 API 文档。',
+    'VERSION': '1.0.0',
+    # 其他设置，如认证方案
+    'SERVE_INCLUDE_SCHEMA': False, # 不将schema文件本身添加到UI中
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'persistAuthorization': True,
+        'displayOperationId': False,
+        'displayRequestDuration': True,
+    },
+    'CONTACT': {
+        'name': '你的名字/团队名称',
+        'email': '你的邮箱',
+    },
+    'LICENSE': {
+        'name': '自定义许可证', # 或 'MIT', 'Apache-2.0'
+    },
+}
+
+# ==============================================================================
+# 13. 日志配置 (Logging)
+# ==============================================================================
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO' if DEBUG else 'WARNING', # 调试模式显示INFO及以上，生产模式只显示WARNING及以上
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs/debug.log', # 日志文件路径
+            'formatter': 'verbose',
+        },
+        'error_file': {
+            'level': 'ERROR',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs/error.log', # 错误日志文件路径
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'core': { # 为你的 core 应用定义一个 logger
+            'handlers': ['console', 'file', 'error_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # 为其他应用如 users, spaces 等也定义类似的 logger
+        # 'users': {
+        #     'handlers': ['console', 'file', 'error_file'],
+        #     'level': 'INFO',
+        #     'propagate': False,
+        # },
+        # ...
+        '': { # 根 logger，捕获所有未指定 logger 的消息
+            'handlers': ['console', 'file', 'error_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+
+# 确保日志目录存在
+LOG_DIR = BASE_DIR / 'logs'
+if not LOG_DIR.exists():
+    LOG_DIR.mkdir()
