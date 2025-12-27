@@ -60,12 +60,14 @@ class CustomUser(AbstractUser):
 
     major = models.CharField(
         max_length=100,
+        null=True,
         blank=True,
         verbose_name="专业",
         help_text="用户所属的专业"
     )
     student_class = models.CharField(
         max_length=50,
+        null=True,
         blank=True,
         verbose_name="班级",
         help_text="用户所属的班级"
