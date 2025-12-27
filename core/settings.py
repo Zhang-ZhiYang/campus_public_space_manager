@@ -2,7 +2,7 @@
 Django settings for core project.
 Enhanced for SpaceRes Analysis System.
 """
-
+import os
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
@@ -67,7 +67,7 @@ ROOT_URLCONF = 'core.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [os.path.join(BASE_DIR, 'core', 'templates')], # <-- 添加这一行
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Profile</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f8; }
+        .container { max-width: 600px; margin: 0 auto; padding: 25px; background-color: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; margin-bottom: 25px; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 6px; font-weight: bold; color: #555; }
+        input[type="text"], input[type="email"], input[type="tel"], select {
+            width: calc(100% - 24px);
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+            font-size: 1em;
+            color: #333;
+        }
+        select {
+             width: 100%; /* Adjust select width to match others */
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #28a745; /* Green for save */
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #218838;
+        }
+        #message-container {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: inherit;
+            font-size: 0.95em;
+        }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .loading { background-color: #e0f2f7; color: #0c5460; border: 1px solid #bee5eb; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>我的个人资料</h1>
+        <form id="profileForm">
+            <div class="form-group">
+                <label for="username">用户名:</label>
+                <input type="text" id="username" name="username" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="firstName">名:</label>
+                <input type="text" id="firstName" name="first_name">
+            </div>
+
+            <div class="form-group">
+                <label for="lastName">姓:</label>
+                <input type="text" id="lastName" name="last_name">
+            </div>
+
+            <div class="form-group">
+                <label for="email">电子邮件:</label>
+                <input type="email" id="email" name="email">
+            </div>
+
+            <div class="form-group">
+                <label for="phoneNumber">手机号:</label>
+                <input type="tel" id="phoneNumber" name="phone_number">
+            </div>
+
+            <div class="form-group">
+                <label for="workId">工号/学号:</label>
+                <input type="text" id="workId" name="work_id" readonly>
+            </div>
+
+            <div class="form-group">
+                <label for="major">专业:</label>
+                <input type="text" id="major" name="major">
+            </div>
+
+            <div class="form-group">
+                <label for="studentClass">班级:</label>
+                <input type="text" id="studentClass" name="student_class">
+            </div>
+
+            <div class="form-group">
+                <label for="gender">性别:</label>
+                <select id="gender" name="gender">
+                    <option value="U">未知</option>
+                    <option value="M">男</option>
+                    <option value="F">女</option>
+                </select>
+            </div>
+
+            <button type="submit">保存修改</button>
+        </form>
+
+        <div id="message-container"></div>
+    </div>
+
+    <script>
+        const profileForm = document.getElementById('profileForm');
+        const messageContainer = document.getElementById('message-container');
+
+        // currentUserId 不再需要全局变量，直接从 localStorage 获取
+        // let currentUserId = null;
+
+        function displayMessage(message, type) {
+            messageContainer.textContent = message;
+            messageContainer.className = `message-container ${type}`;
+        }
+
+        async function fetchUserProfile() {
+            const accessToken = localStorage.getItem('access_token');
+            const userId = localStorage.getItem('user_id'); // <--- 从 localStorage 获取用户ID
+
+            if (!accessToken || !userId) {
+                displayMessage('请先登录', 'error');
+                // 如果没有 token 或用户ID，重定向到登录页
+                window.location.href = '/login-test/';
+                return;
+            }
+
+            displayMessage('正在加载个人资料...', 'loading');
+
+            try {
+                // 使用从 localStorage 获取的用户 ID
+                const userResponse = await fetch(`/api/v1/users/profile/${userId}/`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const userData = await userResponse.json();
+
+                if (userResponse.ok && userData.success) {
+                    const userProfile = userData.data;
+                    document.getElementById('username').value = userProfile.username || '';
+                    document.getElementById('firstName').value = userProfile.first_name || '';
+                    document.getElementById('lastName').value = userProfile.last_name || '';
+                    document.getElementById('email').value = userProfile.email || '';
+                    document.getElementById('phoneNumber').value = userProfile.phone_number || '';
+                    document.getElementById('workId').value = userProfile.work_id || '';
+                    document.getElementById('major').value = userProfile.major || '';
+                    document.getElementById('studentClass').value = userProfile.student_class || '';
+                    document.getElementById('gender').value = userProfile.gender || 'U';
+
+                    displayMessage('个人资料加载成功', 'success');
+                } else if (userResponse.status === 403 || userResponse.status === 401) {
+                     displayMessage('无权访问或登录已过期，请重新登录。', 'error');
+                     localStorage.removeItem('access_token');
+                     localStorage.removeItem('refresh_token');
+                     localStorage.removeItem('user_id'); // 清除存储的 ID
+                     localStorage.removeItem('username');
+                     window.location.href = '/login-test/';
+                }
+                else {
+                    displayMessage(`加载个人资料失败: ${userData.message || '未知错误'}`, 'error');
+                    console.error('Failed to fetch user profile:', userData);
+                }
+            } catch (error) {
+                displayMessage(`网络错误: ${error.message}`, 'error');
+                console.error('Fetch error:', error);
+            }
+        }
+
+        profileForm.addEventListener('submit', async function(event) {
+            event.preventDefault();
+
+            const accessToken = localStorage.getItem('access_token');
+            const userId = localStorage.getItem('user_id'); // <--- 从 localStorage 获取用户ID
+
+            if (!accessToken || !userId) {
+                displayMessage('请先登录', 'error');
+                window.location.href = '/login-test/';
+                return;
+            }
+
+            displayMessage('正在保存修改...', 'loading');
+
+            const profileData = {
+                first_name: document.getElementById('firstName').value,
+                last_name: document.getElementById('lastName').value,
+                email: document.getElementById('email').value,
+                phone_number: document.getElementById('phoneNumber').value,
+                major: document.getElementById('major').value,
+                student_class: document.getElementById('studentClass').value,
+                gender: document.getElementById('gender').value,
+            };
+
+            try {
+                // 使用从 localStorage 获取的用户 ID
+                const response = await fetch(`/api/v1/users/profile/${userId}/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(profileData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    displayMessage('个人资料更新成功！', 'success');
+                    // 重新加载以确保显示最新数据
+                    fetchUserProfile();
+                } else if (response.status === 403 || response.status === 401) {
+                     displayMessage('无权操作或登录已过期，请重新登录。', 'error');
+                     localStorage.removeItem('access_token');
+                     localStorage.removeItem('refresh_token');
+                     localStorage.removeItem('user_id'); // 清除存储的 ID
+                     localStorage.removeItem('username');
+                     window.location.href = '/login-test/';
+                }
+                else {
+                    displayMessage(`更新失败: ${data.message || '未知错误'}`, 'error');
+                    console.error('Failed to update profile:', data);
+                }
+            } catch (error) {
+                displayMessage(`网络错误: ${error.message}`, 'error');
+                console.error('Fetch error:', error);
+            }
+        });
+
+        window.addEventListener('load', fetchUserProfile);
+    </script>
+</body>
+</html>
