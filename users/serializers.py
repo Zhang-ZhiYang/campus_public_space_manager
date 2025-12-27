@@ -32,7 +32,7 @@ class CustomUserSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'username', 'email', 'first_name', 'last_name',
             'total_violation_count', 'phone_number',
-            'student_id', 'major', 'student_class', 'gender', 'gender_display',
+            'work_id', 'major', 'student_class', 'gender', 'gender_display',
             'is_active', 'is_staff', 'is_superuser',
             'date_joined', 'last_login',
             'role', 'role_id' # 添加 role 字段 (read-only) 和 role_id (write-only)
@@ -55,29 +55,29 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         fields = (
             'username', 'email', 'phone_number', 'password', 'password2',
             'first_name', 'last_name',
-            'student_id', 'major', 'student_class', 'gender'
+            'work_id', 'major', 'student_class', 'gender'
             # 注册时不再包含 'role' 字段，将在 create 方法中默认分配
         )
         extra_kwargs = {
             'username': {'required': True},
             'email': {'required': True},
             'phone_number': {'required': True},
-            'student_id': {'required': True},
+            'work_id': {'required': True},
         }
 
     def validate(self, attrs):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({"password": "Password fields didn't match."})
 
-        temp_user_data = {k: v for k, v in attrs.items() if k not in ['password', 'password2', 'email', 'username', 'gender', 'phone_number', 'student_id']}
+        temp_user_data = {k: v for k, v in attrs.items() if k not in ['password', 'password2', 'email', 'username', 'gender', 'phone_number', 'work_id']}
 
         try:
             validate_password(attrs['password'], user=CustomUser(**temp_user_data))
         except DjangoValidationError as e:
             raise serializers.ValidationError({'password': list(e.messages)})
 
-        if CustomUser.objects.filter(student_id=attrs.get('student_id')).exists():
-            raise serializers.ValidationError({"student_id": "Student ID already exists."})
+        if CustomUser.objects.filter(work_id=attrs.get('work_id')).exists():
+            raise serializers.ValidationError({"work_id": "Student ID already exists."})
         if CustomUser.objects.filter(phone_number=attrs.get('phone_number')).exists():
             raise serializers.ValidationError({"phone_number": "Phone number already exists."})
         if CustomUser.objects.filter(email=attrs.get('email')).exists():

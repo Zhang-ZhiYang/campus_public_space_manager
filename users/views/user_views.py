@@ -43,8 +43,8 @@ class UserRegisterView(generics.CreateAPIView):
                     raise ConflictException(detail="Email already registered.", code="email_exists")
                 elif 'phone_number' in str(e):
                     raise ConflictException(detail="Phone number already registered.", code="phone_number_exists")
-                elif 'student_id' in str(e):
-                    raise ConflictException(detail="Student ID already registered.", code="student_id_exists")
+                elif 'work_id' in str(e):
+                    raise ConflictException(detail="Student ID already registered.", code="work_id_exists")
             raise
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
