@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f8; }
+        .container { max-width: 500px; margin: 0 auto; padding: 25px; background-color: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; margin-bottom: 25px; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 6px; font-weight: bold; color: #555; }
+        input[type="text"], input[type="password"], input[type="email"], input[type="tel"] {
+            width: calc(100% - 24px);
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+            font-size: 1em;
+            color: #333;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #message-container {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: inherit;
+            font-size: 0.95em;
+            text-align: center;
+        }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .loading { background-color: #e0f2f7; color: #0c5460; border: 1px solid #bee5eb; }
+        .back-to-login { display: block; text-align: center; margin-top: 20px; color: #007bff; text-decoration: none; }
+        .back-to-login:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>用户注册</h1>
+        <form id="registerForm">
+            <div class="form-group">
+                <label for="username">用户名:</label>
+                <input type="text" id="username" name="username" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password">密码:</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password2">确认密码:</label>
+                <input type="password" id="password2" name="password2" required>
+            </div>
+
+            <div class="form-group">
+                <label for="fullName">姓名 (可选):</label>
+                <input type="text" id="fullName" name="full_name">
+            </div>
+
+            <div class="form-group">
+                <label for="email">电子邮件 (可选):</label>
+                <input type="email" id="email" name="email">
+            </div>
+
+            <div class="form-group">
+                <label for="phoneNumber">手机号 (可选):</label>
+                <input type="tel" id="phoneNumber" name="phone_number">
+            </div>
+
+            <div class="form-group">
+                <label for="workId">工号/学号:</label>
+                <input type="text" id="workId" name="work_id" required>
+            </div>
+
+            <div class="form-group">
+                <label for="major">专业 (可选):</label>
+                <input type="text" id="major" name="major">
+            </div>
+
+            <div class="form-group">
+                <label for="studentClass">班级 (可选):</label>
+                <input type="text" id="studentClass" name="student_class">
+            </div>
+
+            <button type="submit">注册</button>
+        </form>
+
+        <div id="message-container"></div>
+        <a href="/login-test/" class="back-to-login">已有账号？去登录</a>
+    </div>
+
+    <script>
+        const registerForm = document.getElementById('registerForm');
+        const messageContainer = document.getElementById('message-container');
+
+        function displayMessage(message, type) {
+            messageContainer.textContent = message;
+            messageContainer.className = `message-container ${type}`;
+        }
+
+        // === 新增辅助函数：格式化错误信息 ===
+        function formatApiErrors(errorObject) {
+            if (!errorObject || typeof errorObject !== 'object') {
+                return "未知错误。";
+            }
+            let errorMessages = [];
+            for (const field in errorObject) {
+                if (Object.hasOwnProperty.call(errorObject, field)) {
+                    const messages = errorObject[field];
+                    // 尝试将下划线分隔的字段名转换为更友好的格式，例如 "work_id" -> "工号/学号"
+                    let displayField;
+                    switch (field) {
+                        case 'username': displayField = '用户名'; break;
+                        case 'password': displayField = '密码'; break;
+                        case 'password2': displayField = '确认密码'; break;
+                        case 'full_name': displayField = '姓名'; break;
+                        case 'email': displayField = '电子邮件'; break;
+                        case 'phone_number': displayField = '手机号'; break;
+                        case 'work_id': displayField = '工号/学号'; break;
+                        case 'major': displayField = '专业'; break;
+                        case 'student_class': displayField = '班级'; break;
+                        case 'gender': displayField = '性别'; break;
+                        default: displayField = field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' '); break;
+                    }
+
+                    if (Array.isArray(messages)) {
+                        errorMessages.push(`${displayField}: ${messages.join(' ')}`);
+                    } else {
+                        errorMessages.push(`${displayField}: ${messages}`);
+                    }
+                }
+            }
+            return errorMessages.join('; ') || "未知错误。";
+        }
+        // ============================================
+
+        registerForm.addEventListener('submit', async function(event) {
+            event.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const password2 = document.getElementById('password2').value;
+            const fullName = document.getElementById('fullName').value;
+            const email = document.getElementById('email').value;
+            const phoneNumber = document.getElementById('phoneNumber').value;
+            const workId = document.getElementById('workId').value;
+            const major = document.getElementById('major').value;
+            const studentClass = document.getElementById('studentClass').value;
+
+            if (password !== password2) {
+                displayMessage('两次输入的密码不一致！', 'error');
+                return;
+            }
+
+            displayMessage('正在注册...', 'loading');
+
+            const registrationData = {
+                username: username,
+                password: password,
+                password2: password2,
+                work_id: workId,
+                full_name: fullName || undefined,
+                email: email || undefined,
+                phone_number: phoneNumber || undefined,
+                major: major || undefined,
+                student_class: studentClass || undefined,
+            };
+
+            for (const key in registrationData) {
+                if (registrationData[key] === '') {
+                    delete registrationData[key];
+                }
+            }
+
+            try {
+                const response = await fetch('/api/v1/users/register/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(registrationData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    displayMessage('注册成功！正在跳转到登录页面...', 'success');
+                    setTimeout(() => {
+                        window.location.href = '/login-test/';
+                    }, 3000);
+                } else {
+                    // === 关键修改：使用 formatApiErrors 处理具体错误 ===
+                    const errorDetails = data.error ? formatApiErrors(data.error) : (data.message || '未知错误');
+                    displayMessage(`注册失败: ${errorDetails}`, 'error');
+                    console.error("Registration failed:", data);
+                }
+            } catch (error) {
+                displayMessage(`网络错误: ${error.message}`, 'error');
+                console.error("Fetch error:", error);
+            }
+        });
+    </script>
+</body>
+</html>

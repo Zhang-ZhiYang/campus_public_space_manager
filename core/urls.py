@@ -31,6 +31,7 @@ urlpatterns = [
     path('api/v1/token/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     path('api/v1/token/blacklist/', CustomTokenBlacklistView.as_view(), name='token_blacklist'),
 
+    path('register-test/', TemplateView.as_view(template_name='register_test.html'), name='register_test'),  # <-- 新增
     path('profile-page/', TemplateView.as_view(template_name='profile_page.html'), name='profile_page'),  # <-- 新增这一行
     path('login-test/', TemplateView.as_view(template_name='login_test.html'), name='login_test'),  # <-- 新增
 ]
