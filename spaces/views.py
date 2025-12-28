@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from core.utils.response import success_response, error_response
 from core.utils.exceptions import CustomAPIException
 from core.utils.constants import HTTP_200_OK, HTTP_201_CREATED, HTTP_204_NO_CONTENT, MSG_SUCCESS, MSG_CREATED, \
-    MSG_NO_CONTENT, MSG_VALIDATION_ERROR
+    MSG_NO_CONTENT, MSG_VALIDATION_ERROR, MSG_FORBIDDEN
 
 from spaces.models import Amenity, Space
 from spaces.serializers import (

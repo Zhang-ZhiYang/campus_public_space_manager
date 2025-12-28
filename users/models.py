@@ -91,31 +91,43 @@ class CustomUser(AbstractUser):
         verbose_name_plural = verbose_name
         swappable = 'AUTH_USER_MODEL'
 
-    # ================================================================
-    # 新增辅助方法，根据 role 字段判断用户权限
-    # ================================================================
+    @property
+    def is_super_admin(self):
+        # 超级管理员就是is_superuser
+        return self.is_superuser
+
+    @property
+    def is_admin(self):  # 系统管理员
+        # 系统管理员包括超级管理员，以及角色明确为系统管理员的用户
+        return self.is_super_admin or \
+            (self.role and self.role.name == ROLE_ADMIN)
+
+    @property
+    def is_space_manager(self):
+        # 空间管理员包括超级管理员、系统管理员，以及角色明确为空间管理员的用户
+        # 这样确保了层级关系：is_super_admin -> is_admin -> is_space_manager
+        return self.is_super_admin or self.is_admin or \
+            (self.role and self.role.name == ROLE_SPACE_MANAGER)
+
+    # 仅作演示，实际可能用不到
     @property
     def is_student(self):
         return self.role and self.role.name == ROLE_STUDENT
 
-    @property
-    def is_space_manager(self):
-        return self.is_superuser or (self.role and self.role.name == ROLE_SPACE_MANAGER)
-
-    @property
-    def is_admin(self):  # 系统管理员
-        return self.is_superuser or (self.role and self.role.name == ROLE_ADMIN)
-
-    @property
-    def is_super_admin(self):  # 超级管理员
-        return self.is_superuser
-
     # ================================================================
-    # 关键修改: 重写 CustomUser 的 save 方法，在保存前清理空字符串为 None
+    # 关键：重写 CustomUser 的 save 方法，同步 is_staff 状态
     # ================================================================
     def save(self, *args, **kwargs):
         if self.email == '':
             self.email = None
+
+        # 任何有管理权限的角色都应该能登录 Admin
+        should_be_staff = self.is_super_admin or self.is_admin or self.is_space_manager
+
+        # 只在 is_staff 状态需要改变时才更新，防止不必要的数据库写入
+        if self.is_staff != should_be_staff:
+            self.is_staff = should_be_staff
+
         super().save(*args, **kwargs)
 
     def __str__(self):
