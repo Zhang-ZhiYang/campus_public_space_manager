@@ -5,33 +5,28 @@ from django.db import transaction
 # 确保所有模型都被导入以供使用和类型检查
 from spaces.models import Amenity, Space, SpaceType, BookableAmenity
 
-# 导入 CustomUser 和 Booking 用于权限检查和删除逻辑
+# 导入 CustomUser 和 Booking 用于类型检查和删除逻辑
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from users.models import CustomUser
     from bookings.models import Booking
 
-# 导入自定义权限辅助函数
-from core.utils.admin_permissions import (
-    has_global_admin_privileges,
-    has_space_management_privileges
-)
+# 不需要再导入 custom admin permissions functions 了
 
 # 用于运行时安全导入及模拟
 try:
     from users.models import CustomUser
     from bookings.models import Booking
 except ImportError:
-    class CustomUser:
+    class CustomUser:  # Mock CustomUser
         is_authenticated = False
-        is_super_admin = False
-        is_admin = False
-        is_space_manager = False
+        is_staff = False  # 必须为False才能模拟无权限
+        has_perm = lambda self, perm_name, obj=None: False  # 模拟无权限
         username = "mock_user"
 
 
-    class Booking:
+    class Booking:  # Mock Booking
         @staticmethod
         def objects_filter_space_exists(space_obj): return False
 
@@ -44,7 +39,7 @@ except ImportError:
 
 
 # ====================================================================
-# SpaceType Admin (空间类型管理) - 全局管理员权限
+# SpaceType Admin (空间类型管理) - 完全基于 Django 权限
 # ====================================================================
 @admin.register(SpaceType)
 class SpaceTypeAdmin(admin.ModelAdmin):
@@ -70,28 +65,25 @@ class SpaceTypeAdmin(admin.ModelAdmin):
         }),
     )
 
-    def _has_permission(self, request, obj=None):
-        # 封装一下，保持代码简洁
-        return has_global_admin_privileges(request.user)
-
+    # 权限：所有方法都直接使用 request.user.has_perm
     def has_module_permission(self, request):
-        return self._has_permission(request)
+        return request.user.is_staff and request.user.has_perm('spaces.view_spacetype')
 
     def has_view_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.view_spacetype', obj)
 
     def has_add_permission(self, request):
-        return self._has_permission(request)
+        return request.user.has_perm('spaces.add_spacetype')
 
     def has_change_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.change_spacetype', obj)
 
     def has_delete_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.delete_spacetype', obj)
 
 
 # ====================================================================
-# Amenity Admin (设施类型管理) - 全局管理员权限
+# Amenity Admin (设施类型管理) - 完全基于 Django 权限
 # ====================================================================
 @admin.register(Amenity)
 class AmenityAdmin(admin.ModelAdmin):
@@ -100,50 +92,44 @@ class AmenityAdmin(admin.ModelAdmin):
     list_filter = ('is_bookable_individually',)
     fields = ('name', 'description', 'is_bookable_individually')
 
-    def _has_permission(self, request, obj=None):
-        return has_global_admin_privileges(request.user)
-
     def has_module_permission(self, request):
-        return self._has_permission(request)
+        return request.user.is_staff and request.user.has_perm('spaces.view_amenity')
 
     def has_view_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.view_amenity', obj)
 
     def has_add_permission(self, request):
-        return self._has_permission(request)
+        return request.user.has_perm('spaces.add_amenity')
 
     def has_change_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.change_amenity', obj)
 
     def has_delete_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.delete_amenity', obj)
 
 
 # ====================================================================
-# BookableAmenity Inline (作为 Space 的内联显示) - 空间管理权限
+# BookableAmenity Inline (作为 Space 的内联显示) - 完全基于 Django 权限
 # ====================================================================
 class BookableAmenityInline(admin.TabularInline):
     model = BookableAmenity
     extra = 1
     fields = ('amenity', 'quantity', 'is_bookable', 'is_active')
 
-    def _has_permission(self, request, obj=None):
-        return has_space_management_privileges(request.user)
-
-    # Inline 不直接有 has_module_permission 或 has_view_permission
-    # 它的可见性和权限通常与其父级 ModelAdmin 绑定
+    # Inline 的权限通常依赖于其父级 ModelAdmin 的权限，
+    # 但我们让它检查自身的权限，以提供更细粒度的控制。
     def has_add_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.add_bookableamenity')
 
     def has_change_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.change_bookableamenity', obj)
 
     def has_delete_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.delete_bookableamenity', obj)
 
 
 # ====================================================================
-# Space Admin (空间管理) - 空间管理权限
+# Space Admin (空间管理) - 完全基于 Django 权限
 # ====================================================================
 @admin.register(Space)
 class SpaceAdmin(admin.ModelAdmin):
@@ -157,8 +143,7 @@ class SpaceAdmin(admin.ModelAdmin):
     )
     search_fields = ('name', 'location', 'description')
     date_hierarchy = 'created_at'
-    # 修复：raw_id_fields 应该用于外键而非 ManyToManyField，且名称要与模型字段匹配
-    raw_id_fields = ('parent_space',)  # SpaceType 是外键，但通常以选择框形式更好
+    raw_id_fields = ('parent_space',)
 
     inlines = [BookableAmenityInline]
 
@@ -167,10 +152,9 @@ class SpaceAdmin(admin.ModelAdmin):
             'fields': ('name', 'location', 'description', 'image',)
         }),
         ('层级与类型', {
-            'fields': ('space_type', 'parent_space', 'is_container',)  # 引用正确字段
+            'fields': ('space_type', 'parent_space', 'is_container',)
         }),
         ('预订设置', {
-            # 修复：Space 模型上没有直接的 'amenities' 字段
             'fields': ('capacity', 'is_bookable', 'is_active', 'requires_approval',)
         }),
         ('时间与时长规则', {
@@ -190,41 +174,41 @@ class SpaceAdmin(admin.ModelAdmin):
         'delete_selected',
     ]
 
-    def _has_permission(self, request, obj=None):
-        return has_space_management_privileges(request.user)
-
     # 权限检查方法
     def has_module_permission(self, request):
-        return self._has_permission(request)
+        return request.user.is_staff and request.user.has_perm('spaces.view_space')
 
     def has_view_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.view_space', obj)
 
     def has_add_permission(self, request):
-        return self._has_permission(request)
+        return request.user.has_perm('spaces.add_space')
 
     def has_change_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.change_space', obj)
 
     def has_delete_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('spaces.delete_space', obj)
 
     # 重写 get_actions 确保只有有权限的用户能看到并执行自定义动作
     def get_actions(self, request):
         actions = super().get_actions(request)
-        if not self._has_permission(request):  # 无权限用户直接返回空动作
-            return {}
-
-        # 否则，返回所有定义的 actions
-        # 注意：此处不再复杂筛选，因为_has_permission已经控制了操作者的权限。
-        # 如果需要更细粒度的控制某个Action，则在该Action内部再做判断。
+        # 只有拥有 change 权限的用户才能看到和执行这些批量操作
+        if not request.user.has_perm('spaces.change_space'):
+            # 移除所有自定义 actions
+            for action_name in self.actions:
+                if action_name in actions:
+                    del actions[action_name]
+        # 对于删除动作，如果用户只有 change 权限而没有 delete 权限，则隐藏 delete_selected
+        if 'delete_selected' in actions and not request.user.has_perm('spaces.delete_space'):
+            del actions['delete_selected']
         return actions
 
-    # --- Action 方法定义 --- (确保所有 Action 方法内部也使用统一的权限检查)
+    # --- Action 方法定义 --- (内部权限检查也基于 has_perm)
 
     @admin.action(description="将选择的空间设置为可预订")
     def make_spaces_bookable(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.change_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.update(is_bookable=True)
@@ -232,7 +216,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="将选择的空间设置为不可预订")
     def make_spaces_not_bookable(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.change_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.update(is_bookable=False)
@@ -240,7 +224,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="激活选择的空间")
     def activate_spaces(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.change_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         try:
@@ -256,7 +240,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="停用选择的空间 (同时设为不可预订)")
     def deactivate_spaces(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.change_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         try:
@@ -272,7 +256,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="将选择的空间设置为需要审批")
     def require_approval_for_spaces(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.change_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.update(requires_approval=True)
@@ -280,7 +264,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="将选择的空间设置为无需审批")
     def dont_require_approval_for_spaces(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.change_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.update(requires_approval=False)
@@ -288,7 +272,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="删除选择的空间")
     def delete_selected(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('spaces.delete_space'):  # 删除操作检查 delete 权限
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
 

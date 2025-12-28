@@ -12,11 +12,7 @@ if TYPE_CHECKING:
 
 from bookings.models import Booking, Violation
 
-# 导入自定义权限辅助函数
-from core.utils.admin_permissions import (
-    has_booking_management_privileges,
-    has_violation_management_privileges
-)
+# 不需要再导入 custom admin permissions functions 了
 
 # 确保 CustomUser 可用
 try:  # 运行时导入
@@ -24,9 +20,8 @@ try:  # 运行时导入
 except ImportError:
     class CustomUser:
         is_authenticated = False
-        is_super_admin = False
-        is_admin = False
-        is_space_manager = False
+        is_staff = False  # 必须为False才能模拟无权限
+        has_perm = lambda self, perm_name, obj=None: False  # 模拟无权限
         username = "mock_user"
 
 
@@ -35,7 +30,7 @@ except ImportError:
 
 
 # ====================================================================
-# Booking Admin (预订管理) - 预订管理权限
+# Booking Admin (预订管理) - 完全基于 Django 权限
 # ====================================================================
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
@@ -101,35 +96,37 @@ class BookingAdmin(admin.ModelAdmin):
             return "是" if obj.bookable_amenity.space.requires_approval else "否"
         return "N/A"
 
-    def _has_permission(self, request, obj=None):
-        return has_booking_management_privileges(request.user)
+    # 权限检查方法
+    def has_module_permission(self, request):
+        return request.user.is_staff and request.user.has_perm('bookings.view_booking')
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.has_perm('bookings.view_booking', obj)
+
+    def has_add_permission(self, request):
+        return request.user.has_perm('bookings.add_booking')
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.has_perm('bookings.change_booking', obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.has_perm('bookings.delete_booking', obj)
 
     def get_actions(self, request):
         actions = super().get_actions(request)
-        if not self._has_permission(request):
-            return {}
+        if not request.user.has_perm('bookings.change_booking'):
+            # 移除所有自定义 actions
+            for action_name in self.actions:
+                if action_name in actions:
+                    del actions[action_name]
+        if 'delete_selected' in actions and not request.user.has_perm('bookings.delete_booking'):
+            del actions['delete_selected']
         return actions
-
-    # 权限检查方法
-    def has_module_permission(self, request):
-        return self._has_permission(request)
-
-    def has_view_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
-
-    def has_add_permission(self, request):
-        return self._has_permission(request)
-
-    def has_change_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
-
-    def has_delete_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
 
     # --- Action 方法定义 ---
     @admin.action(description="批准选择的预订")
     def approve_bookings(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('bookings.change_booking'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.filter(status='PENDING').update(
@@ -141,7 +138,7 @@ class BookingAdmin(admin.ModelAdmin):
 
     @admin.action(description="拒绝选择的预订")
     def reject_bookings(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('bookings.change_booking'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.filter(status='PENDING').update(
@@ -153,7 +150,7 @@ class BookingAdmin(admin.ModelAdmin):
 
     @admin.action(description="取消选择的预订")
     def cancel_bookings(self, request, queryset):
-        if not self._has_permission(request):
+        if not request.user.has_perm('bookings.change_booking'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.filter(status__in=['PENDING', 'APPROVED']).update(
@@ -165,7 +162,7 @@ class BookingAdmin(admin.ModelAdmin):
 
     @admin.action(description="标记为已完成")
     def mark_completed_bookings(self, request, queryset):
-        if not self._has_permission(request):  # 这里应是 has_booking_management_privileges
+        if not request.user.has_perm('bookings.change_booking'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
         updated_count = queryset.filter(status='APPROVED').update(
@@ -175,7 +172,7 @@ class BookingAdmin(admin.ModelAdmin):
 
 
 # ====================================================================
-# Violation Admin (违约记录管理) - 违约管理权限
+# Violation Admin (违约记录管理) - 完全基于 Django 权限
 # ====================================================================
 @admin.register(Violation)
 class ViolationAdmin(admin.ModelAdmin):
@@ -204,29 +201,31 @@ class ViolationAdmin(admin.ModelAdmin):
 
     @admin.display(description='记录人员')
     def issued_by_username(self, obj: 'Violation'):
-        return obj.issued_by.username if obj.issued_by else 'N/A'
-
-    def _has_permission(self, request, obj=None):
-        return has_violation_management_privileges(request.user)
-
-    def get_actions(self, request):
-        actions = super().get_actions(request)
-        if not self._has_permission(request):
-            return {}
-        return actions
+        return obj.issued_by.username if obj.reviewed_by else 'N/A'  # 修正错误：这里应该是obj.issued_by
 
     # 权限检查方法
     def has_module_permission(self, request):
-        return self._has_permission(request)
+        return request.user.is_staff and request.user.has_perm('bookings.view_violation')
 
     def has_view_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('bookings.view_violation', obj)
 
     def has_add_permission(self, request):
-        return self._has_permission(request)
+        return request.user.has_perm('bookings.add_violation')
 
     def has_change_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('bookings.change_violation', obj)
 
     def has_delete_permission(self, request, obj=None):
-        return self._has_permission(request, obj)
+        return request.user.has_perm('bookings.delete_violation', obj)
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        if not request.user.has_perm('bookings.change_violation'):  # 修改删除动作，检查change或delete
+            # 移除所有自定义 actions
+            for action_name in self.actions:
+                if action_name in actions:
+                    del actions[action_name]
+        if 'delete_selected' in actions and not request.user.has_perm('bookings.delete_violation'):
+            del actions['delete_selected']
+        return actions

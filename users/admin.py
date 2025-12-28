@@ -6,31 +6,35 @@ from .models import ROLE_STUDENT, ROLE_SPACE_MANAGER, ROLE_ADMIN, ROLE_SUPERUSER
 
 
 # ====================================================================
-# Role Admin (角色管理)
+# Role Admin (角色管理) - 完全基于 Django 权限
 # ====================================================================
 @admin.register(Role)
 class RoleAdmin(admin.ModelAdmin):
     list_display = ('name', 'description')
     search_fields = ('name',)
 
+    # 权限：所有方法都直接使用 request.user.has_perm
+    def has_module_permission(self, request):
+        return request.user.is_staff and request.user.has_perm('users.view_role')
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.has_perm('users.view_role', obj)
+
     def has_add_permission(self, request):
-        return request.user.is_super_admin  # 只有超级管理员可以添加角色
+        return request.user.has_perm('users.add_role')
 
     def has_change_permission(self, request, obj=None):
-        return request.user.is_super_admin  # 只有超级管理员可以修改角色
+        return request.user.has_perm('users.change_role', obj)
 
     def has_delete_permission(self, request, obj=None):
-        return request.user.is_super_admin  # 只有超级管理员可以删除角色
+        return request.user.has_perm('users.delete_role', obj)
 
 
 # ====================================================================
-# CustomUserAdmin (自定义用户管理)
+# CustomUserAdmin (自定义用户管理) - 仍然基于is_super_admin/is_admin进行管理层的安全保护
 # ====================================================================
 @admin.register(CustomUser)
 class CustomUserAdmin(UserAdmin):
-    # 继承 UserAdmin，大部分功能已具备
-
-    # 添加自定义字段到 fieldsets
     fieldsets = UserAdmin.fieldsets + (
         ('自定义信息', {
             'fields': (
@@ -39,86 +43,75 @@ class CustomUserAdmin(UserAdmin):
             ),
         }),
     )
-    # 添加自定义字段到 add_fieldsets (用于新建用户时的表单)
     add_fieldsets = UserAdmin.add_fieldsets + (
         ('自定义信息', {
             'fields': (
                 'full_name', 'phone_number', 'work_id', 'major',
-                'student_class', 'gender', 'role'  # 新建时通常不设置 total_violation_count
+                'student_class', 'gender', 'role'
             ),
         }),
     )
 
     list_display = UserAdmin.list_display + ('full_name', 'phone_number', 'work_id', 'role', 'total_violation_count')
-    list_filter = UserAdmin.list_filter + ('role',)  # 按角色过滤
+    list_filter = UserAdmin.list_filter + ('role',)
     search_fields = ('username', 'full_name', 'phone_number', 'work_id', 'email')
     ordering = ('username',)
 
-    # ================================================================
-    # 权限控制：只有超级管理员可以修改用户的 is_staff/is_superuser 状态及角色
-    # 系统管理员可以修改普通用户（学生/空间管理员）的非敏感信息
-    # ================================================================
+    # 权限控制：这里仍使用 CustomUser 的 @property 方法，因为它是在管理用户自身的“身份”和“权限等级”
+    # 这是对管理其他模型（Space, Booking等）权限的更高一层的安全保护。
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)
 
-        # 请求用户是否是超级管理员
         is_requesting_superuser = request.user.is_super_admin
-        # 请求用户是否是系统管理员 (非超级管理员)
         is_requesting_admin = request.user.is_admin and not is_requesting_superuser
-
-        # 正在编辑的用户是否是超级管理员
         is_editing_superuser = obj and obj.is_super_admin
 
-        # === 核心修改：明确处理权限逻辑，避免副作用 ===
-
-        # 情景1: 非超级管理员用户尝试编辑超级管理员用户
+        # 如果非超级管理员尝试编辑超级管理员用户
         if is_editing_superuser and not is_requesting_superuser:
-            # 禁用表单中所有字段
             for field_name in form.base_fields:
                 form.base_fields[field_name].widget.attrs['disabled'] = True
-                # 对于 ManyToManyField 和 ForeignKey 等，可能还需要优化显示为只读
-            # 不允许通过这个表单进行保存
-            self.has_change_permission = lambda r, o=None: False  # 仅针对当前表单请求生效
-
-        # 情景2: 系统管理员 (非超级管理员) 编辑非超级管理员用户
-        elif is_requesting_admin:
+        # 如果系统管理员 (非超级管理员) 编辑非超级管理员用户
+        elif is_requesting_admin and obj is not None:  # obj is not None 确保不是在添加新用户
             # 禁用安全敏感字段
             for field_name in ['is_superuser', 'is_staff', 'user_permissions', 'groups']:
                 if field_name in form.base_fields:
                     form.base_fields[field_name].widget.attrs['disabled'] = True
 
-            # 角色字段特殊处理：系统管理员不能将用户角色设为超级管理员
+            # 角色字段特殊处理：系统管理员不能将用户角色改为超级管理员
             if 'role' in form.base_fields:
                 form.base_fields['role'].queryset = form.base_fields['role'].queryset.exclude(name=ROLE_SUPERUSER)
-                # 如果当前编辑的用户角色是超级管理员 (尽管 is_editing_superuser 应该已经处理了)
-                if obj and obj.is_super_admin:
+                if obj.is_super_admin:  # 不应该发生，因为前面的is_editing_superuser保护
                     form.base_fields['role'].widget.attrs['disabled'] = True
-                    # 确保即使禁用，仍显示正确的超级管理员角色
                     form.base_fields['role'].queryset = Role.objects.filter(name=ROLE_SUPERUSER)
 
-        # ===============================================================
         return form
+
+    # 权限方法：对 CustomUser 模型的管理，我们依然使用基于角色的检查，以保护核心管理功能
+    def has_module_permission(self, request):
+        return request.user.is_staff and (request.user.is_super_admin or request.user.is_admin)
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_super_admin or request.user.is_admin
+
+    def has_add_permission(self, request):
+        return request.user.is_super_admin or request.user.is_admin
 
     def has_change_permission(self, request, obj=None):
         user = request.user
-        if user.is_super_admin:  # 超级管理员拥有所有权限
+        if user.is_super_admin:
             return True
-        if user.is_admin:  # 系统管理员权限
-            if obj and obj.is_super_admin:  # 系统管理员不能修改超级管理员账户
+        if user.is_admin:
+            if obj and obj.is_super_admin:  # 系统管理员不能修改超级管理员
                 return False
-            return True  # 系统管理员可以修改其他非超级管理员用户
-        return False  # 其他用户（如空间管理员、学生）无权在这里修改用户
-
-    def has_add_permission(self, request):
-        # 只有超级管理员和系统管理员可以添加新用户
-        return request.user.is_super_admin or request.user.is_admin
+            return True  # 系统管理员可以修改其他非超级管理员
+        return False
 
     def has_delete_permission(self, request, obj=None):
         user = request.user
         if user.is_super_admin:
             return True
         if user.is_admin:
-            if obj and obj.is_super_admin:  # 系统管理员不能删除超级管理员账户
+            if obj and obj.is_super_admin:  # 系统管理员不能删除超级管理员
                 return False
-            return True  # 系统管理员可以删除其他非超级管理员用户
+            return True  # 系统管理员可以删除其他非超级管理员
         return False
