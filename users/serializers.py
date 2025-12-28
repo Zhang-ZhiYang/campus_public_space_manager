@@ -31,7 +31,6 @@ class CustomUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CustomUser
-        # === 关键修改：移除 'first_name', 'last_name', 添加 'full_name' ===
         fields = (
             'id', 'username', 'email', 'full_name',
             'total_violation_count', 'phone_number',
@@ -41,6 +40,7 @@ class CustomUserSerializer(serializers.ModelSerializer):
             'role', 'role_id'
         )
         read_only_fields = (
+            'id', 'username',  # username 通常不可修改
             'total_violation_count', 'is_active', 'is_staff', 'is_superuser',
             'date_joined', 'last_login', 'gender_display', 'role'
         )
@@ -56,49 +56,74 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CustomUser
-        # === 关键修改：移除 'first_name', 'last_name', 添加 'full_name' ===
         fields = (
             'username', 'email', 'phone_number', 'password', 'password2',
-            'full_name',
-            'work_id', 'major', 'student_class', 'gender'
+            'full_name', 'work_id', 'major', 'student_class', 'gender'
         )
         extra_kwargs = {
             'username': {'required': True},
-            # === 更正：根据 models.py 的 blank=True, null=True 调整为非必填，允许空白 ===
+            # === 必要的修改：明确 allow_blank=True，并通过 validate_field 将 '' 转换为 None ===
             'email': {'required': False, 'allow_blank': True},
             'phone_number': {'required': False, 'allow_blank': True},
-            'work_id': {'required': True},
+            'work_id': {'required': True},  # work_id 是唯一的，且不允许为空
             'full_name': {'required': False, 'allow_blank': True},
             'major': {'required': False, 'allow_blank': True},
             'student_class': {'required': False, 'allow_blank': True},
-            'gender': {'required': False, 'allow_blank': True},  # gender 字段默认值是 'U', 但也允许客户端不提供
+            'gender': {'required': False, 'allow_blank': True},
         }
+
+    # === 关键修改：为所有 blank=True, null=True 但可能接收空字符串的字段添加 validate_<field_name> 方法 ===
+    def validate_email(self, value):
+        """将邮箱的空字符串转换为 None，并检查唯一性。"""
+        if value == '':
+            return None
+        if value and CustomUser.objects.filter(email=value).exists():
+            raise serializers.ValidationError("该邮箱已被注册。")
+        return value
+
+    def validate_phone_number(self, value):
+        """将手机号的空字符串转换为 None，并检查唯一性。"""
+        if value == '':
+            return None
+        if value and CustomUser.objects.filter(phone_number=value).exists():
+            raise serializers.ValidationError("该手机号已被注册。")
+        return value
+
+    def validate_full_name(self, value):
+        """将姓名的空字符串转换为 None。"""
+        if value == '':
+            return None
+        return value
+
+    def validate_major(self, value):
+        """将专业的空字符串转换为 None。"""
+        if value == '':
+            return None
+        return value
+
+    def validate_student_class(self, value):
+        """将班级的空字符串转换为 None。"""
+        if value == '':
+            return None
+        return value
 
     def validate(self, attrs):
         if attrs['password'] != attrs['password2']:
             raise serializers.ValidationError({"password": "两次输入的密码不一致。"})
 
         # 使用一个临时的 CustomUser 实例来验证密码策略，避免在用户未创建前保存到数据库
-        # `validate_password` 主要需要 username 进行上下文检查 (例如防止用户名出现在密码中)
         temp_user = CustomUser(username=attrs['username'])
         try:
+            # 这里的 attrs['password'] 指的是原始密码字符串，validate_password 不会处理 None
             validate_password(attrs['password'], user=temp_user)
         except DjangoValidationError as e:
             raise serializers.ValidationError({'password': list(e.messages)})
 
-        # 检查工号/学号是否唯一
+        # 检查工号/学号是否唯一 (work_id 是 required=True)
         if CustomUser.objects.filter(work_id=attrs.get('work_id')).exists():
             raise serializers.ValidationError({"work_id": "该工号/学号已被注册。"})
 
-        # 检查手机号如果提供的话是否唯一 (注意此处应处理 None 或空字符串)
-        phone_number = attrs.get('phone_number')
-        if phone_number and phone_number != '' and CustomUser.objects.filter(phone_number=phone_number).exists():
-            raise serializers.ValidationError({"phone_number": "该手机号已被注册。"})
-
-        # 检查 email 如果提供的话是否唯一 (注意此处应处理 None 或空字符串)
-        email = attrs.get('email')
-        if email and email != '' and CustomUser.objects.filter(email=email).exists():
-            raise serializers.ValidationError({"email": "该邮箱已被注册。"})
+        # email 和 phone_number 的唯一性检查已移至 validate_field 方法中
 
         return attrs
 
@@ -113,6 +138,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         user = CustomUser.objects.create_user(
             password=password,
             **validated_data
+            # create_user 内部会调用 set_password
         )
         return user
 
@@ -125,10 +151,9 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CustomUser
-        # === 关键修改：移除 'first_name', 'last_name', 添加 'full_name' ===
         fields = (
-            'full_name',
-            'email', 'phone_number', 'major', 'student_class', 'gender'
+            'full_name', 'email', 'phone_number',
+            'major', 'student_class', 'gender'
         )
         extra_kwargs = {
             'email': {'required': False, 'allow_blank': True},
@@ -136,36 +161,42 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
             'major': {'required': False, 'allow_blank': True},
             'student_class': {'required': False, 'allow_blank': True},
             'gender': {'required': False, 'allow_blank': True},
-            'full_name': {'required': False, 'allow_blank': True},  # full_name 也是可选的
-
+            'full_name': {'required': False, 'allow_blank': True},
         }
 
-    # 自定义字段验证，将空字符串转换为 None，以便正确存储到 null=True 的数据库字段
+    # === 关键修改：为所有 blank=True, null=True 但可能接收空字符串的字段添加 validate_<field_name> 方法 ===
     def validate_email(self, value):
+        """将邮箱的空字符串转换为 None，并检查唯一性。"""
         if value == '':
             return None  # 将空字符串转换为 None
-        if CustomUser.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
+        # 排除当前实例进行唯一性检查
+        if value and CustomUser.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError("该邮箱已被其他用户使用。")
         return value
 
     def validate_phone_number(self, value):
+        """将手机号的空字符串转换为 None，并检查唯一性。"""
         if value == '':
             return None  # 将空字符串转换为 None
-        if CustomUser.objects.exclude(id=self.instance.id).filter(phone_number=value).exists():
+        # 排除当前实例进行唯一性检查
+        if value and CustomUser.objects.exclude(pk=self.instance.pk).filter(phone_number=value).exists():
             raise serializers.ValidationError("该手机号已被其他用户使用。")
         return value
 
     def validate_full_name(self, value):
+        """将姓名的空字符串转换为 None。"""
         if value == '':
             return None  # 将空字符串转换为 None
         return value
 
     def validate_major(self, value):
+        """将专业的空字符串转换为 None。"""
         if value == '':
             return None
         return value
 
     def validate_student_class(self, value):
+        """将班级的空字符串转换为 None。"""
         if value == '':
             return None
         return value
@@ -183,5 +214,4 @@ class AdminUserUpdateSerializer(UserProfileUpdateSerializer):
     )
 
     class Meta(UserProfileUpdateSerializer.Meta):
-        # 继承父类的 fields，并添加 'role'
         fields = UserProfileUpdateSerializer.Meta.fields + ('role',)

@@ -1,10 +1,12 @@
-# users/urls.py
-from django.urls import path
-from . import views
+# spaces/urls.py
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from spaces.views import AmenityViewSet, SpaceViewSet
 
-app_name = 'users' # 定义应用命名空间
+router = DefaultRouter()
+router.register(r'amenities', AmenityViewSet, basename='amenity')
+router.register(r'spaces', SpaceViewSet, basename='space')
 
 urlpatterns = [
-    # 这里将放置用户相关的 API 路由，例如注册、登录、个人资料等
-    # path('register/', views.UserRegisterView.as_view(), name='register'),
+    path('', include(router.urls)),
 ]
