@@ -24,10 +24,8 @@ except ImportError:
         has_perm = lambda self, perm_name, obj=None: False  # 模拟无权限
         username = "mock_user"
 
-
     print("Warning: users.models.CustomUser could not be imported in bookings/admin.py. "
           "Using mock objects. Admin functionalities will be limited.")
-
 
 # ====================================================================
 # Booking Admin (预订管理) - 完全基于 Django 权限
@@ -170,7 +168,6 @@ class BookingAdmin(admin.ModelAdmin):
         )
         self.message_user(request, f"成功标记 {updated_count} 条预订为已完成。", messages.SUCCESS)
 
-
 # ====================================================================
 # Violation Admin (违约记录管理) - 完全基于 Django 权限
 # ====================================================================
@@ -201,7 +198,8 @@ class ViolationAdmin(admin.ModelAdmin):
 
     @admin.display(description='记录人员')
     def issued_by_username(self, obj: 'Violation'):
-        return obj.issued_by.username if obj.reviewed_by else 'N/A'  # 修正错误：这里应该是obj.issued_by
+        # 修正错误：这里应该是 obj.issued_by
+        return obj.issued_by.username if obj.issued_by else 'N/A'
 
     # 权限检查方法
     def has_module_permission(self, request):
@@ -221,7 +219,11 @@ class ViolationAdmin(admin.ModelAdmin):
 
     def get_actions(self, request):
         actions = super().get_actions(request)
-        if not request.user.has_perm('bookings.change_violation'):  # 修改删除动作，检查change或delete
+        # 这里批量删除动作的权限检查策略可能需要根据具体需求调整。
+        # 当前逻辑是：如果没有 'change_violation' 权限就移除所有自定义actions；
+        # 然后如果 'delete_selected' 存在但没有 'delete_violation' 权限，再移除它。
+        # 这种双重检查可以保留，但理解其意图很重要。
+        if not request.user.has_perm('bookings.change_violation'):
             # 移除所有自定义 actions
             for action_name in self.actions:
                 if action_name in actions:

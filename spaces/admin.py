@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.db import transaction
 # 确保所有模型都被导入以供使用和类型检查
-from spaces.models import Amenity, Space, SpaceType, BookableAmenity
+from spaces.models import Amenity, Space, SpaceType, BookableAmenity, Role # <-- 导入 Role
 
 # 导入 CustomUser 和 Booking 用于类型检查和删除逻辑
 from typing import TYPE_CHECKING
@@ -12,19 +12,20 @@ if TYPE_CHECKING:
     from users.models import CustomUser
     from bookings.models import Booking
 
-# 不需要再导入 custom admin permissions functions 了
-
 # 用于运行时安全导入及模拟
 try:
-    from users.models import CustomUser
+    from users.models import CustomUser, Role
     from bookings.models import Booking
 except ImportError:
     class CustomUser:  # Mock CustomUser
         is_authenticated = False
-        is_staff = False  # 必须为False才能模拟无权限
-        has_perm = lambda self, perm_name, obj=None: False  # 模拟无权限
+        is_staff = False
+        has_perm = lambda self, perm_name, obj=None: False
         username = "mock_user"
 
+    class Role: # Mock Role for admin.py
+        name = "Mock Role"
+        def __str__(self): return self.name
 
     class Booking:  # Mock Booking
         @staticmethod
@@ -33,13 +34,11 @@ except ImportError:
         @staticmethod
         def objects_filter_bookable_amenity_exists(bookable_amenity_obj): return False
 
-
-    print("Warning: Missing modules (users.models.CustomUser or bookings.models.Booking). "
+    print("Warning: Missing modules (users.models.CustomUser, users.models.Role or bookings.models.Booking). "
           "Using mock objects in spaces/admin.py. Admin functionalities may be limited.")
 
-
 # ====================================================================
-# SpaceType Admin (空间类型管理) - 完全基于 Django 权限
+# SpaceType Admin (空间类型管理) - 这里不应有 filter_horizontal
 # ====================================================================
 @admin.register(SpaceType)
 class SpaceTypeAdmin(admin.ModelAdmin):
@@ -65,7 +64,6 @@ class SpaceTypeAdmin(admin.ModelAdmin):
         }),
     )
 
-    # 权限：所有方法都直接使用 request.user.has_perm
     def has_module_permission(self, request):
         return request.user.is_staff and request.user.has_perm('spaces.view_spacetype')
 
@@ -81,9 +79,8 @@ class SpaceTypeAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return request.user.has_perm('spaces.delete_spacetype', obj)
 
-
 # ====================================================================
-# Amenity Admin (设施类型管理) - 完全基于 Django 权限
+# Amenity Admin (设施类型管理)
 # ====================================================================
 @admin.register(Amenity)
 class AmenityAdmin(admin.ModelAdmin):
@@ -107,17 +104,14 @@ class AmenityAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return request.user.has_perm('spaces.delete_amenity', obj)
 
-
 # ====================================================================
-# BookableAmenity Inline (作为 Space 的内联显示) - 完全基于 Django 权限
+# BookableAmenity Inline
 # ====================================================================
 class BookableAmenityInline(admin.TabularInline):
     model = BookableAmenity
     extra = 1
     fields = ('amenity', 'quantity', 'is_bookable', 'is_active')
 
-    # Inline 的权限通常依赖于其父级 ModelAdmin 的权限，
-    # 但我们让它检查自身的权限，以提供更细粒度的控制。
     def has_add_permission(self, request, obj=None):
         return request.user.has_perm('spaces.add_bookableamenity')
 
@@ -127,25 +121,30 @@ class BookableAmenityInline(admin.TabularInline):
     def has_delete_permission(self, request, obj=None):
         return request.user.has_perm('spaces.delete_bookableamenity', obj)
 
-
 # ====================================================================
-# Space Admin (空间管理) - 完全基于 Django 权限
+# Space Admin (空间管理) - filter_horizontal 应在这里
 # ====================================================================
 @admin.register(Space)
 class SpaceAdmin(admin.ModelAdmin):
     list_display = (
         'name', 'location', 'space_type', 'parent_space', 'capacity',
-        'is_bookable', 'is_active', 'is_container', 'requires_approval'
+        'is_bookable', 'is_active', 'is_container', 'requires_approval',
+        'display_restricted_roles'
     )
     list_filter = (
         'is_bookable', 'is_active', 'is_container', 'requires_approval',
-        'space_type', ('parent_space', admin.RelatedOnlyFieldListFilter)
+        'space_type', ('parent_space', admin.RelatedOnlyFieldListFilter),
+        'restricted_roles'
     )
     search_fields = ('name', 'location', 'description')
     date_hierarchy = 'created_at'
     raw_id_fields = ('parent_space',)
 
     inlines = [BookableAmenityInline]
+
+    # --- 确保这一行在 SpaceAdmin 中，且只在这里 ---
+    filter_horizontal = ('restricted_roles',)
+    # -----------------------------------------------
 
     fieldsets = (
         (None, {
@@ -156,6 +155,11 @@ class SpaceAdmin(admin.ModelAdmin):
         }),
         ('预订设置', {
             'fields': ('capacity', 'is_bookable', 'is_active', 'requires_approval',)
+        }),
+        ('预订角色限制', {
+            'fields': ('restricted_roles',),
+            'description': '选择在此空间中禁止预订的角色。如果未选择任何角色，则所有角色都可以预订。',
+            'classes': ('collapse',)
         }),
         ('时间与时长规则', {
             'fields': (
@@ -174,7 +178,6 @@ class SpaceAdmin(admin.ModelAdmin):
         'delete_selected',
     ]
 
-    # 权限检查方法
     def has_module_permission(self, request):
         return request.user.is_staff and request.user.has_perm('spaces.view_space')
 
@@ -190,21 +193,29 @@ class SpaceAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return request.user.has_perm('spaces.delete_space', obj)
 
-    # 重写 get_actions 确保只有有权限的用户能看到并执行自定义动作
     def get_actions(self, request):
         actions = super().get_actions(request)
-        # 只有拥有 change 权限的用户才能看到和执行这些批量操作
         if not request.user.has_perm('spaces.change_space'):
-            # 移除所有自定义 actions
             for action_name in self.actions:
                 if action_name in actions:
                     del actions[action_name]
-        # 对于删除动作，如果用户只有 change 权限而没有 delete 权限，则隐藏 delete_selected
         if 'delete_selected' in actions and not request.user.has_perm('spaces.delete_space'):
             del actions['delete_selected']
         return actions
 
-    # --- Action 方法定义 --- (内部权限检查也基于 has_perm)
+    def display_restricted_roles(self, obj):
+        # 优化：通过 prefetch_related 获取角色，减少查询
+        # obj.restricted_roles.all() 在 list_display 中可能导致 N+1 查询问题。
+        # 更好的做法是在 get_queryset 中通过 prefetch_related 预先加载。
+        # 如果没有预加载，这里每次都会查询。
+        return ", ".join([role.name for role in obj.restricted_roles.all()])
+    display_restricted_roles.short_description = "禁止预订角色"
+
+    # --- 添加 get_queryset 以预加载 M2M 字段，优化 display_restricted_roles 的性能 ---
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.prefetch_related('restricted_roles')
+    # ----------------------------------------------------------------------------------
 
     @admin.action(description="将选择的空间设置为可预订")
     def make_spaces_bookable(self, request, queryset):
@@ -272,7 +283,7 @@ class SpaceAdmin(admin.ModelAdmin):
 
     @admin.action(description="删除选择的空间")
     def delete_selected(self, request, queryset):
-        if not request.user.has_perm('spaces.delete_space'):  # 删除操作检查 delete 权限
+        if not request.user.has_perm('spaces.delete_space'):
             self.message_user(request, "您没有权限执行此操作。", messages.ERROR)
             return
 
@@ -288,6 +299,8 @@ class SpaceAdmin(admin.ModelAdmin):
                         continue
 
                     # 2. 检查是否有预订记录 (空间本身)
+                    # Note: Booking.objects_filter_space_exists 是一个模拟方法
+                    # 在真实环境中，你需要确保 Booking.objects.filter(space=space).exists() 这样工作
                     if Booking.objects_filter_space_exists(space):
                         undeletable_names.append(f"{space.name} (存在空间预订)")
                         continue
@@ -295,6 +308,7 @@ class SpaceAdmin(admin.ModelAdmin):
                     # 3. 检查是否有预订记录 (通过 BookableAmenity)
                     has_amenity_bookings = False
                     for bookable_amenity in space.bookable_amenities.all():
+                        # 同上，Booking.objects_filter_bookable_amenity_exists 是模拟方法
                         if Booking.objects_filter_bookable_amenity_exists(bookable_amenity):
                             has_amenity_bookings = True
                             break
