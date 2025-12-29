@@ -3,43 +3,13 @@ from django.db import models
 from django.db.models import Manager
 from datetime import timedelta
 from django.core.exceptions import ValidationError
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import pre_save, post_save, post_delete # <-- 导入 pre_save
 from django.dispatch import receiver
 from django.utils import timezone  # 导入 timezone 用于时间操作
 
-# 从其他应用导入相关模型 (CustomUser 和 Role)
-try:
-    from users.models import CustomUser, Role
-except ImportError:
-    # 临时代替 CustomUser 和 Role，用于让模型定义通过
-    class CustomUser(models.Model):
-        username = models.CharField(max_length=150, unique=True)
-        total_violation_count = models.PositiveIntegerField(default=0)
-        # 模拟 is_superuser 和 is_admin 属性，确保 Booking.clean() 中的豁免逻辑能正常解析
-        is_superuser = False
-        is_admin = False
-
-        # 模拟 role 属性，确保 Booking.clean() 中的 self.user.role 不会直接报错
-        class _MockRole:
-            pk = 0
-            name = "Mock Role"
-
-            def __str__(self): return self.name
-
-        role = _MockRole()
-
-        def save(self, *args, **kwargs):
-            pass  # 模拟 save 方法，防止信号处理时报错
-
-
-    class Role(models.Model):  # 模拟 Role 模型
-        name = models.CharField(max_length=50, unique=True)
-
-        def __str__(self): return self.name
-
-
-    print("Warning: users.models.CustomUser or Role could not be imported. Using mock classes for model definition. "
-          "Ensure 'users' app is in INSTALLED_APPS and CustomUser/Role models are correctly defined.")
+# ！！！重要：确保以下导入成功，并且 'users' 应用在 settings.py 的 INSTALLED_APPS 中
+# ！！！并且在 'bookings' 应用之前。
+from users.models import CustomUser, Role
 
 # 导入 Space 和 BookableAmenity
 from spaces.models import Space, BookableAmenity
@@ -68,7 +38,6 @@ VIOLATION_TYPE_CHOICES = (
     ('OCCUPY_OVERTIME', '超时占用'),
     ('OTHER', '其他'),
 )
-
 
 # ====================================================================
 # Booking Model (预订)
@@ -319,7 +288,6 @@ class Booking(models.Model):
         self.full_clean()  # 确保在保存前调用所有 clean 方法
         super().save(*args, **kwargs)
 
-
 # ====================================================================
 # Violation Model (违约记录)
 # ====================================================================
@@ -388,26 +356,103 @@ class Violation(models.Model):
                 f"用户: {self.user.username} - "
                 f"时间: {self.issued_at.strftime('%Y-%m-%d %H:%M')}")
 
-
 # ====================================================================
 # Django Signals for Violation model (关联 CustomUser 的 total_violation_count)
 # ====================================================================
+
+@receiver(pre_save, sender=Violation)
+def store_old_violation_state(sender, instance, **kwargs):
+    """
+    在 Violation 实例保存之前，获取并暂存其旧的 is_resolved 和 penalty_points 状态。
+    """
+    if instance.pk: # 仅对已存在的实例进行更新操作时，才需要获取旧状态
+        try:
+            original = sender.objects.get(pk=instance.pk)
+            # 将旧状态保存在实例的临时属性中
+            instance._original_is_resolved = original.is_resolved
+            instance._original_penalty_points = original.penalty_points
+        except sender.DoesNotExist:
+            # 如果旧实例不存在（理论上不应发生，但为了健壮性），则认为这是新实例
+            instance._original_is_resolved = None
+            instance._original_penalty_points = None
+    else:
+        # 新创建的实例没有旧状态
+        instance._original_is_resolved = None
+        instance._original_penalty_points = None
+
 @receiver(post_save, sender=Violation)
 def update_user_violation_count_on_save(sender, instance, created, **kwargs):
     """
     在 Violation 实例创建或更新后，更新用户总违约次数。
+    - 如果是新创建的违约记录，则增加。
+    - 如果是更新existing的违约记录，且 'is_resolved' 字段发生变化，则相应调整。
+    - 如果 penalty_points 发生变化，且违约记录处于未解决状态，也需要调整。
     """
-    if created:  # 仅在新创建违约记录时增加总违约次数
-        instance.user.total_violation_count += instance.penalty_points
-        # 仅更新指定字段，避免触发 CustomUser 的 clean/save 逻辑中的其他副作用
-        instance.user.save(update_fields=['total_violation_count'])
+    raw = kwargs.get('raw', False)
+    if raw:  # 忽略从fixture加载的情况，避免重复逻辑或数据不一致
+        return
 
+    user = instance.user
+    penalty = instance.penalty_points
+
+    # 确保 user 存在且有 total_violation_count 属性
+    if not user or not hasattr(user, 'total_violation_count'):
+        return
+
+    # 1. 处理新创建的违约记录
+    if created:
+        user.total_violation_count += penalty
+        user.save(update_fields=['total_violation_count'])
+        return
+
+    # 2. 处理更新操作 (使用 pre_save 中暂存的旧状态)
+    original_is_resolved = getattr(instance, '_original_is_resolved', None)
+    original_penalty_points = getattr(instance, '_original_penalty_points', None)
+
+    # 如果无法获取到旧状态，或者旧状态是 None (意味着是新实例或异常情况，但已在 created 中处理)，则退出
+    if original_is_resolved is None and original_penalty_points is None:
+        return
+
+    is_resolved_changed = original_is_resolved != instance.is_resolved
+    penalty_points_changed = original_penalty_points != penalty # 这里的 penalty 是 instance.penalty_points
+
+    # A. `is_resolved` 字段变化
+    if is_resolved_changed:
+        if instance.is_resolved:  # 从未解决 (False) 变为已解决 (True)
+            # 减少用户的总违约次数
+            user.total_violation_count = max(0, user.total_violation_count - penalty)
+        else:  # 从已解决 (True) 变为未解决 (False)
+            # 增加用户的总违约次数
+            user.total_violation_count += penalty
+        user.save(update_fields=['total_violation_count'])
+    # B. `penalty_points` 字段变化 (且 `is_resolved` 未变)
+    # 只有当违约记录是“未解决”状态时，penalty_points 的变化才影响 total_violation_count
+    elif penalty_points_changed and not instance.is_resolved:
+        # 调整总数：先减去旧的 penalty_points，再增加新的 penalty_points
+        user.total_violation_count = max(0, user.total_violation_count - original_penalty_points + penalty)
+        user.save(update_fields=['total_violation_count'])
+
+    # 清理在实例上暂存的临时属性，避免在其他地方误用
+    if hasattr(instance, '_original_is_resolved'):
+        del instance._original_is_resolved
+    if hasattr(instance, '_original_penalty_points'):
+        del instance._original_penalty_points
 
 @receiver(post_delete, sender=Violation)
 def update_user_violation_count_on_delete(sender, instance, **kwargs):
     """
     在 Violation 实例被删除后，减少用户总违约次数。
+    - 只有当被删除的违约记录在被删除时是“未解决”状态，才需要从总数中减去。
+      因为如果它已经是已解决状态，其 penalty_points 在标记为解决时就已经从总数中移除了。
     """
-    instance.user.total_violation_count = max(0, instance.user.total_violation_count - instance.penalty_points)
-    # 仅更新指定字段
-    instance.user.save(update_fields=['total_violation_count'])
+    user = instance.user
+    penalty = instance.penalty_points
+
+    # 确保 user 存在且有 total_violation_count 属性
+    if not user or not hasattr(user, 'total_violation_count'):
+        return
+
+    # 只有当被删除的违约记录是“未解决”状态时，才需要从总数中减去
+    if not instance.is_resolved:
+        user.total_violation_count = max(0, user.total_violation_count - penalty)
+        user.save(update_fields=['total_violation_count'])
