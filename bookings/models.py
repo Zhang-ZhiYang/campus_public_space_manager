@@ -1,18 +1,15 @@
 # bookings/models.py
 from django.db import models
-from django.db.models import Manager
+from django.db.models import Manager, Index
 from datetime import timedelta
 from django.core.exceptions import ValidationError
-from django.db.models.signals import pre_save, post_save, post_delete # <-- 导入 pre_save
+from django.db.models.signals import post_save, post_delete, pre_save  # 引入Django信号
 from django.dispatch import receiver
-from django.utils import timezone  # 导入 timezone 用于时间操作
+from django.utils import timezone  # 导入 timezone
 
-# ！！！重要：确保以下导入成功，并且 'users' 应用在 settings.py 的 INSTALLED_APPS 中
-# ！！！并且在 'bookings' 应用之前。
-from users.models import CustomUser, Role
-
-# 导入 Space 和 BookableAmenity
-from spaces.models import Space, BookableAmenity
+# 从其他应用导入相关模型
+from users.models import CustomUser
+from spaces.models import Space, BookableAmenity, SpaceType
 
 # ====================================================================
 # Booking 状态选择项
@@ -24,6 +21,8 @@ BOOKING_STATUS_CHOICES = (
     ('CANCELLED', '已取消'),
     ('COMPLETED', '已完成'),
     ('NO_SHOW', '未到场'),
+    ('CHECKED_IN', '已签到'),  # 新增
+    ('CHECKED_OUT', '已签出'),  # 新增
 )
 
 # ====================================================================
@@ -38,6 +37,7 @@ VIOLATION_TYPE_CHOICES = (
     ('OCCUPY_OVERTIME', '超时占用'),
     ('OTHER', '其他'),
 )
+
 
 # ====================================================================
 # Booking Model (预订)
@@ -123,12 +123,12 @@ class Booking(models.Model):
         verbose_name_plural = verbose_name
         ordering = ['-start_time']
         indexes = [
-            models.Index(fields=['user', 'start_time', 'end_time']),
-            models.Index(fields=['space', 'start_time', 'end_time']),
-            models.Index(fields=['bookable_amenity', 'start_time', 'end_time']),
-            models.Index(fields=['status']),
-            models.Index(fields=['start_time']),
-            models.Index(fields=['end_time']),
+            Index(fields=['user', 'start_time']),
+            Index(fields=['space', 'start_time', 'end_time']),
+            Index(fields=['bookable_amenity', 'start_time', 'end_time']),
+            Index(fields=['status']),
+            Index(fields=['start_time']),
+            Index(fields=['end_time']),
         ]
 
     def __str__(self):
@@ -138,160 +138,51 @@ class Booking(models.Model):
         elif self.bookable_amenity:
             target_name = f"{self.bookable_amenity.space.name} 的 {self.bookable_amenity.amenity.name}"
 
-        return (f"{self.user.username} 预订 {target_name} ({self.booked_quantity}个) "
-                f"从 {self.start_time.strftime('%Y-%m-%d %H:%M')} 到 {self.end_time.strftime('%Y-%m-%d %H:%M')} "
+        return (f"{self.user.get_full_name} 预订 {target_name} ({self.booked_quantity}个) "
+                f"从 {self.start_time.strftime('%Y-%m-%d %H:%M')} 到 {self.end_time.strftime('%H:%M')} "
                 f"[{self.get_status_display()}]")
 
     def clean(self):
-        super().clean()
+        """
+        在保存前执行自定义验证。
+        - 确保开始时间早于结束时间。
+        - 确保只能预订 Space 或 BookableAmenity 中的一个。
+        - 校验 booked_quantity。
+        """
+        if self.start_time and self.end_time and self.start_time >= self.end_time:  # 改为 >=，结束时间不能等于开始时间
+            raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
 
-        # 1. 确保用户和预订目标存在
-        if not self.user:
-            raise ValidationError('预订用户不能为空。')
         if not ((self.space is not None) ^ (self.bookable_amenity is not None)):
             raise ValidationError('预订必须且只能指定一个目标：空间或设施实例。')
 
-        user_role = self.user.role
-
-        # --- 管理员豁免逻辑 ---
-        # 允许超级用户和系统管理员绕过此类限制
-        if self.user and hasattr(self.user, 'is_admin') and self.user.is_admin:
-            # 管理员用户跳过所有角色限制和部分激活/可预订检查
-            pass
-        else:  # 普通用户需要进行所有检查
-            # 角色必须存在
-            if not user_role:
-                raise ValidationError('预订用户必须分配一个角色。')
-
-            # =========================================================================
-            # !!! 核心修改在此处：根据预订目标类型进行不同的角色限制检查 !!!
-            # =========================================================================
-
-            if self.space:  # 预订的是整个空间
-                # 检查空间本身的角色预订限制 (黑名单)
-                if not self.space.can_role_book(user_role):
-                    raise ValidationError(f"您的角色 ({user_role.name}) 不允许预订空间 '{self.space.name}'。")
-
-                # 空间自身必须活跃且可预订
-                if not self.space.is_active or not self.space.is_bookable:
-                    raise ValidationError(f"所选空间 '{self.space.name}' 不可预订或未启用。")
-
-                # 预订整个空间数量必须为1
-                if self.booked_quantity != 1:
-                    raise ValidationError({'booked_quantity': '预订整个空间时，数量必须为1。'})
-
-                # 确定用于时间/冲突检查的目标空间
-                target_for_conflict_check = self.space
-
-            elif self.bookable_amenity:  # 预订的是设施实例
-                # 根据新需求，预订设施时，不检查父级空间的 restricted_roles
-                # 也就是说，如果学生被禁止预订教室，但可以预订教室内的投影仪。
-
-                # 检查设施实例自身是否活跃且可预订
-                if not self.bookable_amenity.is_active or not self.bookable_amenity.is_bookable:
-                    raise ValidationError(
-                        f"所选设施 '{self.bookable_amenity.amenity.name}' (in {self.bookable_amenity.space.name}) 不可预订或未启用。")
-
-                # 设施所属的父级空间必须是活跃的 (即使不检查角色限制，空间不活跃设施也无法用)
-                if not self.bookable_amenity.space.is_active:
-                    raise ValidationError(
-                        f"设施所属空间 '{self.bookable_amenity.space.name}' 未激活，因此无法预订其设施。")
-
-                # 校验设施预订数量
-                if self.booked_quantity <= 0:
-                    raise ValidationError({'booked_quantity': '预订设施时，预订数量必须大于0。'})
-                if self.booked_quantity > self.bookable_amenity.quantity:
-                    raise ValidationError(
-                        {'booked_quantity': f"预订数量不能超过设施总数量 {self.bookable_amenity.quantity}。"})
-
-                # 确定用于时间/冲突检查的目标空间实例是设施的父级空间
-                target_for_conflict_check = self.bookable_amenity.space
-
-            else:  # 防御性编程，如果space和bookable_amenity都为空，虽然前面已经检查过
-                raise ValidationError('无法确定预订目标。')
-
-        # 此时 target_for_conflict_check 变量已经确定 (无论是直接预订空间还是预订设施内的父空间)
-        # 后面的时间、时长和冲突检查都将使用这个 target_for_conflict_check 变量
-
-        # 2. 预订时间逻辑检查
-        if self.start_time >= self.end_time:
-            raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
-
-        now = timezone.now()
-        # 允许修改已存在且已开始的预订，但不能创建或修改开始时间为过去的预订
-        if self.start_time < now:
-            # 如果是新创建的预订，或者旧预订的开始时间被修改到过去，则报错
-            # 这里的逻辑可以更细致：如果预订已开始，不应该允许修改 start_time 和 end_time
-            if not self.pk or (self.pk and Booking.objects.get(pk=self.pk).start_time >= now):
-                raise ValidationError({'start_time': '预订开始日期不能在过去。'})
-
-        # 3. 目标空间时间范围和时长检查 (现在统一使用 target_for_conflict_check)
-        space_start_time = target_for_conflict_check.available_start_time
-        space_end_time = target_for_conflict_check.available_end_time
-
-        booking_start_time_only = self.start_time.astimezone(
-            timezone.get_default_timezone()).time() if self.start_time.tzinfo else self.start_time.time()
-        booking_end_time_only = self.end_time.astimezone(
-            timezone.get_default_timezone()).time() if self.end_time.tzinfo else self.end_time.time()
-
-        # 检查预订时间是否在空间/设施父级空间的每日可用时间范围内
-        if not (space_start_time <= booking_start_time_only and booking_end_time_only <= space_end_time):
-            raise ValidationError(f"预订时间必须在目标空间 '{target_for_conflict_check.name}' 的每日可预订时间范围 "
-                                  f"({space_start_time.strftime('%H:%M')} - {space_end_time.strftime('%H:%M')}) 内。")
-
-        booking_duration = self.end_time - self.start_time
-        if booking_duration < target_for_conflict_check.min_booking_duration:
-            raise ValidationError(
-                f"预订时长必须至少为 {target_for_conflict_check.min_booking_duration.total_seconds() / 60} 分钟。")
-        if booking_duration > target_for_conflict_check.max_booking_duration:
-            raise ValidationError(
-                f"预订时长不能超过 {target_for_conflict_check.max_booking_duration.total_seconds() / 60} 分钟。")
-
-        # 4. 与现有预订的冲突检查 (包括缓冲时间)
-        buffer_timedelta = timedelta(minutes=target_for_conflict_check.buffer_time_minutes)
-
-        # 筛选出与当前预订有时间上重叠可能的所有其他预订
-        # 注意：这里因为 target_for_conflict_check 现在是统一的父空间，所以查询条件也统一
-        conflicting_bookings_query = Booking.objects.filter(
-            space=target_for_conflict_check,  # 确保这里的 space 字段匹配
-            start_time__lt=self.end_time + buffer_timedelta,
-            end_time__gt=self.start_time - buffer_timedelta,
-        ).exclude(
-            pk=self.pk
-        ).exclude(
-            status__in=['REJECTED', 'CANCELLED']
-        )
-
-        if self.bookable_amenity:  # 如果预订的是设施
-            # 过滤出针对同一个 BookableAmenity 的冲突预订
-            conflicting_amenity_bookings = conflicting_bookings_query.filter(bookable_amenity=self.bookable_amenity)
-            booked_quantity_in_slot = sum(b.booked_quantity for b in conflicting_amenity_bookings)
-            if booked_quantity_in_slot + self.booked_quantity > self.bookable_amenity.quantity:
+        if self.bookable_amenity:
+            if self.booked_quantity <= 0:
+                raise ValidationError({'booked_quantity': '预订设施时，预订数量必须大于0。'})
+            if self.booked_quantity > self.bookable_amenity.quantity:
                 raise ValidationError(
-                    f"设施 '{self.bookable_amenity.amenity.name}' (in {self.bookable_amenity.space.name}) 在该时间段库存不足。"
-                    f"当前可用: {self.bookable_amenity.quantity - booked_quantity_in_slot}。"
+                    {'booked_quantity': f"预订数量不能超过设施总数量 {self.bookable_amenity.quantity}。"}
                 )
-        else:  # 如果预订的是整个空间
-            # 检查是否有任何冲突的预订，无论它们是针对整个空间还是空间内的设施
-            # 这可能需要更细致的逻辑：预订整个空间时，应该检查是否与任何设施的预订冲突
-            # 反之，预订设施时，不应与整个空间的预订冲突
-            # 简化起见，我们假设一旦空间被整体预订，内部设施也隐含被占用。
-            # 或者反过来，只有当设施全部被预订，且所有设施加起来等于空间容量，才算空间满了。
-            # 但目前策略是：预订整个空间，会与该空间所有其他任何预订冲突。
+            if not self.bookable_amenity.is_active or not self.bookable_amenity.is_bookable:
+                raise ValidationError("所选设施不可预订或未启用。")
 
-            # 如果是整个空间的预订，那么与任何其他预订其内部设施或自身的预订都冲突
-            if conflicting_bookings_query.exists():
-                raise ValidationError(
-                    f"空间 '{target_for_conflict_check.name}' 在该时间段已被预订，且与前后预订存在冲突或缓冲时间不足。")
+        if self.space:
+            if self.booked_quantity != 1:
+                raise ValidationError({'booked_quantity': '预订整个空间时，数量必须为1。'})
+            if not self.space.is_active or not self.space.is_bookable:
+                raise ValidationError("所选空间不可预订或未启用。")
 
     def save(self, *args, **kwargs):
-        self.full_clean()  # 确保在保存前调用所有 clean 方法
+        self.full_clean()
         super().save(*args, **kwargs)
+
 
 # ====================================================================
 # Violation Model (违约记录)
 # ====================================================================
 class Violation(models.Model):
+    """
+    用户的违约记录。
+    """
     objects: Manager = Manager()
 
     user = models.ForeignKey(
@@ -310,6 +201,15 @@ class Violation(models.Model):
         verbose_name="关联预订",
         help_text="与本次违约行为相关的预订（可选）"
     )
+    space_type = models.ForeignKey(  # 新增字段，用于匹配禁用策略
+        SpaceType,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='violations',
+        verbose_name="违约所属空间类型",
+        help_text="本次违约行为发生时的空间类型，用于计算不同类型空间的违约点数"
+    )
     violation_type = models.CharField(
         max_length=50,
         choices=VIOLATION_TYPE_CHOICES,
@@ -320,9 +220,9 @@ class Violation(models.Model):
         help_text="对违约行为的具体描述"
     )
     penalty_points = models.PositiveIntegerField(
-        default=1,
-        verbose_name="扣除积分/增加违约次数",
-        help_text="本次违约行为导致用户扣除的积分或增加的违约次数"
+        default=1,  # 默认扣1分
+        verbose_name="违约点数",
+        help_text="本次违约行为增加的违约点数"
     )
     issued_by = models.ForeignKey(
         CustomUser,
@@ -337,7 +237,22 @@ class Violation(models.Model):
     is_resolved = models.BooleanField(
         default=False,
         verbose_name="是否已解决",
-        help_text="本次违约是否已经处理或解决"
+        help_text="本次违约是否已经处理或解决。已解决的违规不计入活跃点数。"
+    )
+    resolved_at = models.DateTimeField(  # 新增
+        null=True,
+        blank=True,
+        verbose_name="解决时间",
+        help_text="本次违约被标记为已解决的时间"
+    )
+    resolved_by = models.ForeignKey(  # 新增
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resolved_violations',
+        verbose_name="解决人员",
+        help_text="将本次违约标记为已解决的管理员/空间管理员"
     )
 
     class Meta:
@@ -345,114 +260,417 @@ class Violation(models.Model):
         verbose_name_plural = verbose_name
         ordering = ['-issued_at']
         indexes = [
-            models.Index(fields=['user']),
-            models.Index(fields=['booking']),
-            models.Index(fields=['violation_type']),
-            models.Index(fields=['issued_at']),
+            Index(fields=['user']),
+            Index(fields=['booking']),
+            Index(fields=['space_type']),  # 新增索引
+            Index(fields=['violation_type']),
+            Index(fields=['issued_at']),
+            Index(fields=['is_resolved']),  # 常用过滤字段
         ]
 
     def __str__(self):
-        return (f"违约记录 ({self.get_violation_type_display()}) - "
-                f"用户: {self.user.username} - "
+        status_text = " (已解决)" if self.is_resolved else ""
+        return (f"违约记录 ({self.get_violation_type_display()}){status_text} - "
+                f"用户: {self.user.get_full_name} - "
                 f"时间: {self.issued_at.strftime('%Y-%m-%d %H:%M')}")
 
+
 # ====================================================================
-# Django Signals for Violation model (关联 CustomUser 的 total_violation_count)
+# UserPenaltyPointsPerSpaceType Model (用户违约点数统计 - 按空间类型)
+# ====================================================================
+class UserPenaltyPointsPerSpaceType(models.Model):
+    """
+    记录用户在特定空间类型下的当前活跃违约点数。
+    这些点数用于触发禁用策略。
+    """
+    objects: Manager = Manager()
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name='penalty_points_records',
+        verbose_name="用户"
+    )
+    # space_type 为空表示全局违约点数
+    space_type = models.ForeignKey(
+        SpaceType,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='user_penalty_points',
+        verbose_name="空间类型"
+    )
+    current_penalty_points = models.PositiveIntegerField(
+        default=0,
+        verbose_name="当前活跃违约点数",
+        help_text="用户在此空间类型下当前未解决的累计违约点数，用于触发禁用"
+    )
+    last_violation_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="最后违约时间",
+        help_text="该空间类型下最后一次违规记录的时间"
+    )
+    last_ban_trigger_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="最后触发禁用时间",
+        help_text="该空间类型下最后一次点数触发禁用策略的时间"
+    )
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = '用户违约点数 (按类型)'
+        verbose_name_plural = verbose_name
+        # 同一用户在同一空间类型下只能有一条记录
+        unique_together = ('user', 'space_type')
+        ordering = ['user__username', 'space_type__name']
+        indexes = [
+            Index(fields=['user']),
+            Index(fields=['space_type']),
+            Index(fields=['current_penalty_points']),
+        ]
+
+    def __str__(self):
+        space_type_name = self.space_type.name if self.space_type else "全局"
+        return (f"{self.user.get_full_name} 在 {space_type_name} 类型下 "
+                f"当前活跃点数: {self.current_penalty_points}")
+
+
+# ====================================================================
+# SpaceTypeBanPolicy Model (空间类型禁用策略)
+# ====================================================================
+class SpaceTypeBanPolicy(models.Model):
+    """
+    定义根据违约点数自动禁用用户的策略。
+    策略可以针对特定的空间类型或全局生效。
+    """
+    objects: Manager = Manager()
+
+    # space_type 为空表示全局禁用策略
+    space_type = models.ForeignKey(
+        SpaceType,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='ban_policies',
+        verbose_name="策略应用空间类型",
+        help_text="此禁用策略应用的特定空间类型；为空则表示全局策略"
+    )
+    threshold_points = models.PositiveIntegerField(
+        verbose_name="触发点数阈值",
+        help_text="当用户在此空间类型（或全局）的活跃点数达到此值时，触发禁用"
+    )
+    ban_duration = models.DurationField(
+        verbose_name="禁用持续时长",
+        help_text="达到阈值时的禁用时长（如：7天、30天等）"
+    )
+    priority = models.PositiveIntegerField(
+        default=0,
+        verbose_name="策略优先级",
+        help_text="当多个策略满足条件时，数字越大优先级越高（0为最低）"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="是否启用此策略",
+        help_text="此禁用策略是否处于启用状态"
+    )
+    description = models.TextField(
+        blank=True,
+        verbose_name="策略描述"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = '空间类型禁用策略'
+        verbose_name_plural = verbose_name
+        # 同一空间类型下，点数阈值不能重复
+        unique_together = ('space_type', 'threshold_points')
+        # 排序：全局策略优先（space_type为null），然后按空间类型名，最后按点数阈值降序和优先级降序
+        ordering = ['space_type__id', 'space_type__name', '-threshold_points', '-priority']
+        indexes = [
+            Index(fields=['space_type', 'threshold_points']),
+            Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        space_type_name = self.space_type.name if self.space_type else "全局"
+        return (
+            f"{space_type_name} 达到 {self.threshold_points} 点禁用 {self.ban_duration} ({'启用' if self.is_active else '禁用'})")
+
+
+# ====================================================================
+# UserSpaceTypeBan Model (用户空间类型禁用记录)
+# ====================================================================
+class UserSpaceTypeBan(models.Model):
+    """
+    记录用户被禁用的具体时间段和原因。
+    """
+    objects: Manager = Manager()
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name='activity_bans',
+        verbose_name="被禁用用户"
+    )
+    # space_type 为空表示全局禁用
+    space_type = models.ForeignKey(
+        SpaceType,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='user_bans',
+        verbose_name="禁用空间类型",
+        help_text="用户在此空间类型下被禁用；为空则表示全局禁用"
+    )
+    start_date = models.DateTimeField(verbose_name="禁用开始时间")
+    end_date = models.DateTimeField(verbose_name="禁用结束时间")
+    ban_policy_applied = models.ForeignKey(
+        SpaceTypeBanPolicy,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        verbose_name="应用禁用策略",
+        help_text="触发本次禁用的具体策略（如果是由策略自动触发）"
+    )
+    reason = models.TextField(
+        blank=True,
+        verbose_name="禁用原因",
+        help_text="对用户被禁用原因的说明"
+    )
+    issued_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='issued_bans',
+        verbose_name="执行禁用人员",
+        help_text="执行本次禁用的管理员（可以是系统自动，也可以是手动）"
+    )
+    issued_at = models.DateTimeField(auto_now_add=True, verbose_name="禁用创建时间")
+
+    class Meta:
+        verbose_name = '用户禁用记录'
+        verbose_name_plural = verbose_name
+        ordering = ['-start_date']
+        indexes = [
+            Index(fields=['user']),
+            Index(fields=['space_type']),
+            Index(fields=['start_date', 'end_date']),
+            Index(fields=['issued_at']),
+        ]
+        # 同一时间，一个用户在同一空间类型下只能有一个活跃的禁用记录
+        # 这需要在 clean 或 service 层进行复杂校验，因为涉及时间重叠
+
+    def __str__(self):
+        space_type_name = self.space_type.name if self.space_type else "全局"
+        status = "（已结束）" if self.end_date < timezone.now() else "（活跃中）"
+        return (f"{self.user.get_full_name} 在 {space_type_name} 类型下被禁用 "
+                f"从 {self.start_date.strftime('%Y-%m-%d')} 到 {self.end_date.strftime('%Y-%m-%d')} {status}")
+
+
+# ====================================================================
+# UserSpaceTypeExemption Model (用户空间类型豁免 - 白名单) - 从 users.models.py 移动到这里
+# ====================================================================
+class UserSpaceTypeExemption(models.Model):
+    """
+    用户在特定空间类型下的豁免记录（白名单）。
+    可用于豁免某些预订规则、违规惩罚等。
+    """
+    objects: Manager = Manager()
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name='exemptions',
+        verbose_name="豁免用户"
+    )
+    space_type = models.ForeignKey(
+        SpaceType,  # 直接引用本应用或已导入的 SpaceType
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='user_exemptions',
+        verbose_name="豁免空间类型"
+    )
+    exemption_reason = models.TextField(
+        verbose_name="豁免原因",
+        help_text="说明用户获得豁免的具体原因"
+    )
+    start_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="豁免开始时间",
+        help_text="豁免的起始时间点，为空表示永久有效"
+    )
+    end_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="豁免结束时间",
+        help_text="豁免的结束时间点，为空表示永久有效"
+    )
+    granted_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='granted_exemptions',
+
+        verbose_name="授权人员"
+    )
+    granted_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="授权时间"
+    )
+
+    class Meta:
+        verbose_name = '用户豁免记录'
+        verbose_name_plural = verbose_name
+        unique_together = ('user', 'space_type')
+        ordering = ['user__username', 'space_type__name']
+        indexes = [
+            Index(fields=['user']),
+            Index(fields=['space_type']),
+            Index(fields=['start_date', 'end_date']),
+        ]
+
+    def __str__(self):
+        space_type_name = self.space_type.name if self.space_type else "全局"
+        return f"{self.user.get_full_name} 豁免 {space_type_name}"
+
+
+# ====================================================================
+# Django Signals for Violation and UserPenaltyPointsPerSpaceType
 # ====================================================================
 
 @receiver(pre_save, sender=Violation)
-def store_old_violation_state(sender, instance, **kwargs):
-    """
-    在 Violation 实例保存之前，获取并暂存其旧的 is_resolved 和 penalty_points 状态。
-    """
-    if instance.pk: # 仅对已存在的实例进行更新操作时，才需要获取旧状态
+def store_old_violation_is_resolved(sender, instance, **kwargs):
+    """在保存前存储旧的 is_resolved 状态，以便 post_save 判断其是否改变。"""
+    if instance.pk:
         try:
-            original = sender.objects.get(pk=instance.pk)
-            # 将旧状态保存在实例的临时属性中
-            instance._original_is_resolved = original.is_resolved
-            instance._original_penalty_points = original.penalty_points
+            old_instance = sender.objects.get(pk=instance.pk)
+            instance._old_is_resolved = old_instance.is_resolved
         except sender.DoesNotExist:
-            # 如果旧实例不存在（理论上不应发生，但为了健壮性），则认为这是新实例
-            instance._original_is_resolved = None
-            instance._original_penalty_points = None
+            instance._old_is_resolved = False
     else:
-        # 新创建的实例没有旧状态
-        instance._original_is_resolved = None
-        instance._original_penalty_points = None
+        instance._old_is_resolved = False
+
 
 @receiver(post_save, sender=Violation)
-def update_user_violation_count_on_save(sender, instance, created, **kwargs):
+def update_user_penalty_points_on_violation_save_with_resolved_logic(sender, instance, created, **kwargs):
     """
-    在 Violation 实例创建或更新后，更新用户总违约次数。
-    - 如果是新创建的违约记录，则增加。
-    - 如果是更新existing的违约记录，且 'is_resolved' 字段发生变化，则相应调整。
-    - 如果 penalty_points 发生变化，且违约记录处于未解决状态，也需要调整。
+    在 Violation 实例创建、更新后，更新 UserPenaltyPointsPerSpaceType 的活跃点数，并考虑解决状态。
     """
-    raw = kwargs.get('raw', False)
-    if raw:  # 忽略从fixture加载的情况，避免重复逻辑或数据不一致
-        return
+    if instance.user:
+        # 1. 确保 Violation 的 space_type 总是被填充
+        if not instance.space_type and instance.booking:
+            if instance.booking.space and instance.booking.space.space_type:
+                instance.space_type = instance.booking.space.space_type  # 自动从预订的空间中获取
+            elif instance.booking.bookable_amenity and instance.booking.bookable_amenity.space and instance.booking.bookable_amenity.space.space_type:
+                instance.space_type = instance.booking.bookable_amenity.space.space_type
+            # 必须重新保存实例，让 space_type 的变化持久化。
+            # 但要小心，避免无限循环。这里简单处理，假设后续逻辑能处理 None。
+            # 更好的做法是在 Violation 的 clean 或 save 方法中处理，而不应在 post_save 修改自身。
 
-    user = instance.user
-    penalty = instance.penalty_points
+        target_space_type = instance.space_type  # 此时 space_type 应该已经被确定
 
-    # 确保 user 存在且有 total_violation_count 属性
-    if not user or not hasattr(user, 'total_violation_count'):
-        return
+        penalty_points_record, created_record = UserPenaltyPointsPerSpaceType.objects.get_or_create(
+            user=instance.user,
+            space_type=target_space_type  # 可以是 None
+        )
 
-    # 1. 处理新创建的违约记录
-    if created:
-        user.total_violation_count += penalty
-        user.save(update_fields=['total_violation_count'])
-        return
+        old_is_resolved = getattr(instance, '_old_is_resolved', False)
+        points_changed = 0
 
-    # 2. 处理更新操作 (使用 pre_save 中暂存的旧状态)
-    original_is_resolved = getattr(instance, '_original_is_resolved', None)
-    original_penalty_points = getattr(instance, '_original_penalty_points', None)
+        if created:  # 新创建的违规
+            if not instance.is_resolved:
+                points_changed = instance.penalty_points
+        else:  # 更新的违规
+            if instance.is_resolved and not old_is_resolved:  # 从未解决变为已解决
+                points_changed = -instance.penalty_points
+            elif not instance.is_resolved and old_is_resolved:  # 从已解决变为未解决
+                points_changed = instance.penalty_points
+            # 如果 penalty_points 自身值改变，则需要更复杂的逻辑，这里假设 penalty_points 除非创建，否则不变
 
-    # 如果无法获取到旧状态，或者旧状态是 None (意味着是新实例或异常情况，但已在 created 中处理)，则退出
-    if original_is_resolved is None and original_penalty_points is None:
-        return
+        if points_changed != 0:
+            penalty_points_record.current_penalty_points = max(0,
+                                                               penalty_points_record.current_penalty_points + points_changed)
+            penalty_points_record.last_violation_at = instance.issued_at
+            penalty_points_record.save()  # 保存点数记录
 
-    is_resolved_changed = original_is_resolved != instance.is_resolved
-    penalty_points_changed = original_penalty_points != penalty # 这里的 penalty 是 instance.penalty_points
+            # 检查是否触发禁用策略 (仅在活跃点数发生变化时才检查)
+            check_for_ban_trigger(penalty_points_record)
 
-    # A. `is_resolved` 字段变化
-    if is_resolved_changed:
-        if instance.is_resolved:  # 从未解决 (False) 变为已解决 (True)
-            # 减少用户的总违约次数
-            user.total_violation_count = max(0, user.total_violation_count - penalty)
-        else:  # 从已解决 (True) 变为未解决 (False)
-            # 增加用户的总违约次数
-            user.total_violation_count += penalty
-        user.save(update_fields=['total_violation_count'])
-    # B. `penalty_points` 字段变化 (且 `is_resolved` 未变)
-    # 只有当违约记录是“未解决”状态时，penalty_points 的变化才影响 total_violation_count
-    elif penalty_points_changed and not instance.is_resolved:
-        # 调整总数：先减去旧的 penalty_points，再增加新的 penalty_points
-        user.total_violation_count = max(0, user.total_violation_count - original_penalty_points + penalty)
-        user.save(update_fields=['total_violation_count'])
-
-    # 清理在实例上暂存的临时属性，避免在其他地方误用
-    if hasattr(instance, '_original_is_resolved'):
-        del instance._original_is_resolved
-    if hasattr(instance, '_original_penalty_points'):
-        del instance._original_penalty_points
 
 @receiver(post_delete, sender=Violation)
-def update_user_violation_count_on_delete(sender, instance, **kwargs):
+def update_user_penalty_points_on_violation_delete(sender, instance, **kwargs):
     """
-    在 Violation 实例被删除后，减少用户总违约次数。
-    - 只有当被删除的违约记录在被删除时是“未解决”状态，才需要从总数中减去。
-      因为如果它已经是已解决状态，其 penalty_points 在标记为解决时就已经从总数中移除了。
+    在 Violation 实例被删除后，减少 UserPenaltyPointsPerSpaceType 的活跃点数。
     """
-    user = instance.user
-    penalty = instance.penalty_points
+    if instance.user:
+        target_space_type = instance.space_type or \
+                            (instance.booking.space.space_type if instance.booking and instance.booking.space else None)
 
-    # 确保 user 存在且有 total_violation_count 属性
-    if not user or not hasattr(user, 'total_violation_count'):
-        return
+        try:
+            penalty_points_record = UserPenaltyPointsPerSpaceType.objects.get(
+                user=instance.user,
+                space_type=target_space_type
+            )
+            if not instance.is_resolved:  # 仅未解决的违规删除时才减少活跃点数
+                penalty_points_record.current_penalty_points = max(0,
+                                                                   penalty_points_record.current_penalty_points - instance.penalty_points)
+                penalty_points_record.last_violation_at = timezone.now()  # 更新最后违规时间
+                penalty_points_record.save()
+            check_for_ban_trigger(penalty_points_record)
+        except UserPenaltyPointsPerSpaceType.DoesNotExist:
+            pass  # 记录可能不存在，忽略
 
-    # 只有当被删除的违约记录是“未解决”状态时，才需要从总数中减去
-    if not instance.is_resolved:
-        user.total_violation_count = max(0, user.total_violation_count - penalty)
-        user.save(update_fields=['total_violation_count'])
+
+def check_for_ban_trigger(penalty_points_record: 'UserPenaltyPointsPerSpaceType'):
+    """
+    检查用户的活跃违约点数是否达到禁用策略的阈值，并创建/更新禁用记录。
+    此函数应在 UserPenaltyPointsPerSpaceType 更新后被调用。
+    """
+
+    # 查找适用于该空间类型（或全局）且处于启用状态的策略
+    applicable_policies = SpaceTypeBanPolicy.objects.filter(
+        models.Q(space_type=penalty_points_record.space_type) | models.Q(space_type__isnull=True),
+        is_active=True,
+        threshold_points__lte=penalty_points_record.current_penalty_points
+    ).order_by('-threshold_points', '-priority')  # 优先匹配点数最高、优先级最高的策略
+
+    if applicable_policies.exists():
+        policy = applicable_policies.first()  # 选择最匹配的策略
+        ban_start = timezone.now()
+        ban_end = ban_start + policy.ban_duration
+
+        # 检查是否已存在一个当前活跃的禁用记录，如果存在且新的禁用时间更长，则更新
+        existing_active_ban = UserSpaceTypeBan.objects.filter(
+            user=penalty_points_record.user,
+            space_type=penalty_points_record.space_type,  # 针对特定空间类型或全局
+            end_date__gt=timezone.now()  # 仍在活跃期
+        ).first()
+
+        if existing_active_ban:
+            if ban_end > existing_active_ban.end_date:  # 如果新策略的禁用时长更长
+                existing_active_ban.end_date = ban_end
+                existing_active_ban.ban_policy_applied = policy
+                existing_active_ban.reason = f"因在 {penalty_points_record.space_type.name if penalty_points_record.space_type else '全局'} 累计 {policy.threshold_points} 点触发，更新禁用"
+                existing_active_ban.save(update_fields=['end_date', 'ban_policy_applied', 'reason'])
+        else:
+            UserSpaceTypeBan.objects.create(
+                user=penalty_points_record.user,
+                space_type=penalty_points_record.space_type,  # 可为 None
+                start_date=ban_start,
+                end_date=ban_end,
+                ban_policy_applied=policy,
+                reason=f"因在 {penalty_points_record.space_type.name if penalty_points_record.space_type else '全局'} 累计 {policy.threshold_points} 点触发禁用",
+                issued_by=None  # 标记为系统自动触发
+            )
+        penalty_points_record.last_ban_trigger_at = ban_start
+        penalty_points_record.save(update_fields=['last_ban_trigger_at'])
+
+# 确保在 `SpaceType` 和 `CustomUser` 模型被定义后，才能引用它们。
+# 这通常通过在各个应用的 `__init__.py` 或 `apps.py` 中导入信号来解决。

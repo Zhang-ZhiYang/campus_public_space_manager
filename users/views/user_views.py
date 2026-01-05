@@ -1,19 +1,21 @@
-# users/views.py
+# users/views/user_views.py
 from django.db import IntegrityError
-from rest_framework import generics, permissions, status, viewsets # <-- 导入 viewsets
-
+from rest_framework import generics, permissions, status, viewsets
+from rest_framework.response import Response  # 导入 Response
 from core.utils.response import success_response, error_response
-from core.utils.exceptions import BadRequestException, ConflictException, UnauthorizedException, ForbiddenException
-from core.utils.constants import MSG_CREATED, MSG_SUCCESS, MSG_BAD_REQUEST, HTTP_200_OK, HTTP_201_CREATED, \
-    HTTP_400_BAD_REQUEST, HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
-from users.models import CustomUser, Role
-from users.serializers import CustomUserSerializer, AdminUserUpdateSerializer, RoleSerializer, \
-    UserRegistrationSerializer, UserProfileUpdateSerializer
+from core.utils.exceptions import BadRequestException, ConflictException, ForbiddenException
+from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_200_OK, HTTP_201_CREATED, HTTP_400_BAD_REQUEST, \
+    HTTP_403_FORBIDDEN
+from users.models import CustomUser  # 移除了对 Role 的导入
+from users.serializers import CustomUserSerializer, AdminUserUpdateSerializer, \
+    UserRegistrationSerializer, UserProfileUpdateSerializer  # 移除了 RoleSerializer
+# --- 关键修改：将 IsAdminOrSuperAdmin 替换为 IsSystemAdminOnly ---
+from users.permissions import IsSystemAdminOnly, IsAdminOrSpaceManagerOrReadOnly
 
 class UserRegisterView(generics.CreateAPIView):
     """
     用户注册 API 视图。
-    允许未认证用户注册新账户，注册后默认分配 '学生' 角色。
+    允许未认证用户注册新账户，注册后默认将其添加到 '学生' Group。
     """
     queryset = CustomUser.objects.all()
     serializer_class = UserRegistrationSerializer
@@ -23,11 +25,11 @@ class UserRegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         try:
             serializer.is_valid(raise_exception=True)
-            self.perform_create(serializer)
+            user = self.perform_create(serializer)  # perform_create 返回 user 实例
             headers = self.get_success_headers(serializer.data)
             return success_response(
                 message=MSG_CREATED,
-                data=serializer.data,
+                data=CustomUserSerializer(user).data,  # 返回完整用户数据，可能包含 groups 信息
                 status_code=HTTP_201_CREATED,
                 headers=headers
             )
@@ -57,15 +59,15 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
-        obj = self.request.user
-        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        # 允许通过 PK 获取，但必须是当前登录用户
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field  # 默认 'pk'
         if lookup_url_kwarg in self.kwargs:
-            if obj.pk != self.kwargs[lookup_url_kwarg]:
-                raise ForbiddenException(detail="You do not have permission to access another user's profile.")
-        return obj
+            if self.request.user.pk != self.kwargs[lookup_url_kwarg]:
+                raise ForbiddenException(detail="您没有权限访问其他用户的个人资料。")
+        return self.request.user  # 始终返回当前请求的用户
 
     def get_serializer_class(self):
-        if self.request.method == 'PUT' or self.request.method == 'PATCH':
+        if self.request.method in ['PUT', 'PATCH']:
             return UserProfileUpdateSerializer  # 普通用户更新自己的资料时使用
         return CustomUserSerializer
 
@@ -86,45 +88,26 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
         return success_response(message=MSG_SUCCESS, data=serializer.data, status_code=HTTP_200_OK)
 
-# --- 新增：管理员用户管理视图集 ---
-class IsAdminOrReadOnly(permissions.BasePermission):
+# --- 管理员用户管理视图集 ---
+class UserAdminViewSet(viewsets.ModelViewSet):  # 重命名为 UserAdminViewSet
     """
-    自定义权限：只允许管理员进行写操作，其他用户只读。
+    管理员对用户的 CRUD 操作（包含组/角色管理）。
+    只允许系统管理员（包括is_superuser）使用。
     """
-
-    def has_permission(self, request, view):
-        # 允许 GET, HEAD, OPTIONS 请求给所有认证用户
-        if request.method in permissions.SAFE_METHODS:
-            return request.user and request.user.is_authenticated
-
-        # 否则，只允许管理员或超级用户进行写操作 (POST, PUT, PATCH, DELETE)
-        # 这里的 is_admin 属性需要 CustomUser 模型中定义
-        return request.user and (request.user.is_staff or request.user.is_superuser or request.user.is_admin)
-
-# 将 generis.ListCreateRetrieveUpdateDestroyAPIView 替换为 viewsets.ModelViewSet
-class UserRoleAdminViewSet(viewsets.ModelViewSet): # <-- 关键修改
-    """
-    管理员对用户的 CRUD 操作（包含角色管理）。
-    只允许管理员使用。
-    """
-    queryset = CustomUser.objects.all().select_related('role')  # 优化查询，预加载 role
+    queryset = CustomUser.objects.all()  # 不再需要 select_related('role')
     serializer_class = CustomUserSerializer
-    permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]  # 认证用户，且管理员可写
+    permission_classes = [permissions.IsAuthenticated, IsSystemAdminOnly]  # 只有系统管理员可读写
 
     def get_serializer_class(self):
-        # 对于 ModelViewSet，根据 action 来判断（list, retrieve, create, update, partial_update, destroy）
-        if self.action in ['create', 'update', 'partial_update']: # <-- 使用 self.action
+        if self.action in ['create', 'update', 'partial_update']:
             return AdminUserUpdateSerializer
-        return CustomUserSerializer  # GET (list, retrieve) 请求时仍使用 CustomUserSerializer 展示完整信息
+        return CustomUserSerializer
 
-    # 以下方法覆盖 ModelViewSet 的默认实现，以返回统一响应格式
     def list(self, request, *args, **kwargs):
-        # 调用 ModelViewSet 的默认 list 方法，它会处理分页并返回一个 Response 对象
         response = super().list(request, *args, **kwargs)
-        # 将默认响应的数据封装到我们的 success_response 中
         return success_response(
             message=MSG_SUCCESS,
-            data=response.data, # ModelViewSet's list response.data already contains paginated data
+            data=response.data,
             status_code=HTTP_200_OK
         )
 
@@ -134,37 +117,32 @@ class UserRoleAdminViewSet(viewsets.ModelViewSet): # <-- 关键修改
         return success_response(message=MSG_SUCCESS, data=serializer.data)
 
     def create(self, request, *args, **kwargs):
-        response = super().create(request, *args, **kwargs) # 调用父类的 create 方法
-        # 将父类返回的 Response 数据和头部封装
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()  # 调用 serializer.save() 创建用户
+
         return success_response(
             message=MSG_CREATED,
-            data=response.data,
-            status_code=HTTP_201_CREATED,
-            headers=response.headers # 确保 Location header 被传递
+            data=self.get_serializer(user).data,  # 返回更新后的用户数据
+            status_code=HTTP_201_CREATED
         )
 
     def update(self, request, *args, **kwargs):
-        response = super().update(request, *args, **kwargs) # 调用父类的 update 方法
-        return success_response(message=MSG_SUCCESS, data=response.data, status_code=HTTP_200_OK)
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)  # perform_update 调用 serializer.save()
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            instance._prefetched_objects_cache = {}
+
+        return success_response(message=MSG_SUCCESS, data=serializer.data, status_code=HTTP_200_OK)
 
     def partial_update(self, request, *args, **kwargs):
-        response = super().partial_update(request, *args, **kwargs) # 调用父类的 partial_update 方法
-        return success_response(message=MSG_SUCCESS, data=response.data, status_code=HTTP_200_OK)
+        return self.update(request, *args, **kwargs, partial=True)
 
     def destroy(self, request, *args, **kwargs):
-        super().destroy(request, *args, **kwargs) # 调用父类的 destroy 方法
-        return success_response(message=MSG_SUCCESS, data={}, status_code=HTTP_200_OK)  # 删除成功也返回统一格式
-
-# 新增：角色管理视图 (如果需要通过 API 管理角色)
-class RoleListView(generics.ListAPIView):
-    """
-    列出所有可用角色。
-    """
-    queryset = Role.objects.all()
-    serializer_class = RoleSerializer
-    permission_classes = [permissions.IsAuthenticated, IsAdminOrReadOnly]  # 只有管理员能修改，但所有认证用户可以读
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
-        serializer = self.get_serializer(queryset, many=True)
-        return success_response(message=MSG_SUCCESS, data=serializer.data)
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return success_response(message=MSG_SUCCESS, data={}, status_code=HTTP_200_OK)

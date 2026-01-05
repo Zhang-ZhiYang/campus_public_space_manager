@@ -1,88 +1,122 @@
 # spaces/models.py
 from django.db import models
-from django.db.models import Manager
+from django.db.models import Manager, Index
 from datetime import timedelta, time
 from django.core.exceptions import ValidationError
-from django.utils import timezone  # 导入 timezone for default time
-
-# 导入 Role 模型，确保它在 users 应用中定义且可用
-try:
-    from users.models import Role
-except ImportError:
-    class Role(models.Model):
-        name = models.CharField(max_length=50, unique=True)
-
-        def __str__(self): return self.name
-
-
-    print("Warning: users.models.Role could not be imported. Using a mock Role for spaces/models.py. "
-          "Ensure 'users' app is in INSTALLED_APPS and Role model is correctly defined.")
-
+from django.contrib.auth.models import Group # 导入 Group
 
 # ====================================================================
-# SpaceType Model (空间类型) - (保持不变)
+# SpaceType Model (空间类型)
 # ====================================================================
 class SpaceType(models.Model):
+    """
+    定义空间的类型，例如：教学楼、教室、会议室、实验室等。
+    添加默认预订规则和基础设施标识。
+    """
     objects: Manager = Manager()
 
     name = models.CharField(max_length=100, unique=True, verbose_name="空间类型名称")
     description = models.TextField(blank=True, verbose_name="类型描述")
 
-    is_container_type = models.BooleanField(default=False, verbose_name="是否为容器类型")
+    is_container_type = models.BooleanField(
+        default=False,
+        verbose_name="是否为容器类型",
+        help_text="如教学楼，通常不直接预订，但包含子空间或设施"
+    )
+    is_basic_infrastructure = models.BooleanField(
+        default=False,
+        verbose_name="是否为基础型基础设施",
+        help_text="如果为True，该类型空间/设施通常可由普通用户（如学生）预订，无需特定对象级权限。"
+    )
+
+    # 默认预订规则字段，作为创建 Space 时的初始模板
     default_is_bookable = models.BooleanField(default=True, verbose_name="默认是否可预订")
-    default_requires_approval = models.BooleanField(default=True, verbose_name="默认是否需要审批")
-    default_available_start_time = models.TimeField(null=True, blank=True, verbose_name="默认每日最早可预订时间",
-                                                    default=time(8, 0))
-    default_available_end_time = models.TimeField(null=True, blank=True, verbose_name="默认每日最晚可预订时间",
-                                                  default=time(22, 0))
-    default_min_booking_duration = models.DurationField(null=True, blank=True, verbose_name="默认单次预订最短时长",
-                                                        default=timedelta(minutes=30))
-    default_max_booking_duration = models.DurationField(null=True, blank=True, verbose_name="默认单次预订最长时长",
-                                                        default=timedelta(hours=4))
-    default_buffer_time_minutes = models.PositiveIntegerField(default=0, verbose_name="默认前后预订缓冲时间(分钟)")
+    default_requires_approval = models.BooleanField(
+        default=False, # 默认改为 False，多数空间可能无需审批
+        verbose_name="默认是否需要审批",
+        help_text="新创建的空间默认是否需要管理员审核批准"
+    )
+    default_available_start_time = models.TimeField(
+        null=True, blank=True,
+        verbose_name="默认每日最早可预订时间",
+        default=time(8, 0)
+    )
+    default_available_end_time = models.TimeField(
+        null=True, blank=True,
+        verbose_name="默认每日最晚可预订时间",
+        default=time(22, 0)
+    )
+    default_min_booking_duration = models.DurationField(
+        null=True, blank=True,
+        verbose_name="默认单次预订最短时长",
+        default=timedelta(minutes=30)
+    )
+    default_max_booking_duration = models.DurationField(
+        null=True, blank=True,
+        verbose_name="默认单次预订最长时长",
+        default=timedelta(hours=4)
+    )
+    default_buffer_time_minutes = models.PositiveIntegerField(
+        default=0,
+        verbose_name="默认前后预订缓冲时间(分钟)",
+         help_text="相邻预订之间的最短间隔（分钟）"
+    )
 
     class Meta:
         verbose_name = '空间类型'
         verbose_name_plural = verbose_name
         ordering = ['name']
         indexes = [
-            models.Index(fields=['name']),
-            models.Index(fields=['is_container_type']),
+            Index(fields=['name']),
+            Index(fields=['is_container_type']),
+            Index(fields=['is_basic_infrastructure']),
         ]
 
-    def __str__(self): return self.name
-
+    def __str__(self):
+        return self.name
 
 # ====================================================================
-# Amenity Model (设施 - 定义设施的种类) - (保持不变)
+# Amenity Model (设施 - 定义设施的种类)
 # ====================================================================
 class Amenity(models.Model):
+    """
+    设施种类模型，例如投影仪、白板、Wi-Fi、椅子等。
+    它定义了设施的类型，不关心具体数量和所属空间。
+    """
     objects: Manager = Manager()
 
     name = models.CharField(max_length=100, unique=True, verbose_name="设施名称")
     description = models.TextField(blank=True, verbose_name="设施描述")
-    is_bookable_individually = models.BooleanField(default=False, verbose_name="是否可单独预订")
+    is_bookable_individually = models.BooleanField(
+        default=False,
+        verbose_name="是否可单独预订",
+        help_text="如果为True，则可创建为单独的预订目标；否则只能作为空间的一部分提供"
+    )
 
     class Meta:
         verbose_name = '设施类型'
         verbose_name_plural = verbose_name
         ordering = ['name']
         indexes = [
-            models.Index(fields=['name']),
-            models.Index(fields=['is_bookable_individually']),
+            Index(fields=['name']),
+            Index(fields=['is_bookable_individually']),
         ]
 
-    def __str__(self): return self.name
-
+    def __str__(self):
+        return self.name
 
 # ====================================================================
-# BookableAmenity Model (可预订设施实例 - Space 下的设施具体数量) - (保持不变)
+# BookableAmenity Model (可预订设施实例 - Space 下的设施具体数量)
 # ====================================================================
 class BookableAmenity(models.Model):
+    """
+    特定空间中可预订的设施实例。
+    例如：A教室有 2 个“投影仪”实例，B会议室有 10 把“椅子”实例。
+    """
     objects: Manager = Manager()
 
     space = models.ForeignKey(
-        'Space',
+        'Space', # 使用字符串引用 Space，避免循环引用
         on_delete=models.CASCADE,
         related_name='bookable_amenities',
         verbose_name="所属空间"
@@ -93,37 +127,60 @@ class BookableAmenity(models.Model):
         related_name='bookable_instances',
         verbose_name="设施类型"
     )
-    quantity = models.PositiveIntegerField(default=1, verbose_name="总数量")
-    is_bookable = models.BooleanField(default=True, verbose_name="是否可预订")
-    is_active = models.BooleanField(default=True, verbose_name="是否启用")
+    quantity = models.PositiveIntegerField(
+        default=1,
+        verbose_name="总数量",
+        help_text="该空间中此类型设施的总数"
+    )
+    is_bookable = models.BooleanField(
+        default=True,
+        verbose_name="是否可预订",
+        help_text="此设施实例在该空间中是否对外开放预订"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="是否启用",
+        help_text="此设施实例是否处于启用状态"
+    )
 
     class Meta:
         verbose_name = '空间设施实例'
         verbose_name_plural = verbose_name
+        # 同一空间不能有相同设施类型的多个实例
         unique_together = ('space', 'amenity')
         ordering = ['space__name', 'amenity__name']
         indexes = [
-            models.Index(fields=['space', 'amenity']),
-            models.Index(fields=['is_bookable']),
-            models.Index(fields=['is_active']),
+            Index(fields=['space', 'amenity']),
+            Index(fields=['is_bookable']),
+            Index(fields=['is_active']),
         ]
 
     def clean(self):
         super().clean()
+
+        # 业务规则1: 如果设施类型本身不可单独预订，则此实例也不能被标记为可预订
         if self.amenity and not self.amenity.is_bookable_individually and self.is_bookable:
             raise ValidationError(
-                {'is_bookable': f"设施类型 '{self.amenity.name}' 不可单独预订，不能设置此实例为可预订。"})
+                {'is_bookable': f"设施类型 '{self.amenity.name}' 不可单独预订，不能设置此实例为可预订。"}
+            )
+
+        # 业务规则2: 如果设施实例不活跃，则也不能标记为可预订
         if not self.is_active and self.is_bookable:
             raise ValidationError({'is_bookable': '不活跃的设施实例不能设置为可预订。'})
+
+        # 业务规则3: 设施数量必须大于0
         if self.quantity <= 0:
             raise ValidationError({'quantity': '设施数量必须大于0。'})
 
     def save(self, *args, **kwargs):
+        # 强制执行业务规则
         if self.amenity:
             if not self.amenity.is_bookable_individually:
                 self.is_bookable = False
+
         if not self.is_active:
             self.is_bookable = False
+
         self.full_clean()
         super().save(*args, **kwargs)
 
@@ -131,14 +188,12 @@ class BookableAmenity(models.Model):
         activity_status = "活跃" if self.is_active else "不活跃"
         return f"{self.space.name} 的 {self.amenity.name} (数量: {self.quantity}, 状态: {activity_status})"
 
-
 # ====================================================================
-# Space Model (空间) - 核心修改在这里
+# Space Model (空间)
 # ====================================================================
 class Space(models.Model):
     """
     可预订空间模型，定义了每个空间的属性和预订规则。
-    新增基于角色的预订访问控制（黑名单策略）。
     """
     objects: Manager = Manager()
 
@@ -175,32 +230,42 @@ class Space(models.Model):
     image = models.ImageField(upload_to='space_images/', blank=True, null=True, verbose_name="空间图片")
 
     requires_approval = models.BooleanField(
-        default=True,
+        default=False, # 默认改为 False，多数空间可能无需审批
         verbose_name="需要管理员审批",
         help_text="预订此空间是否需要管理员审核批准"
     )
 
-    available_start_time = models.TimeField(null=True, blank=True, verbose_name="每日最早可预订时间",
-                                            help_text="例如 08:00")
-    available_end_time = models.TimeField(null=True, blank=True, verbose_name="每日最晚可预订时间",
-                                          help_text="例如 22:00")
+    available_start_time = models.TimeField(
+        null=True, blank=True, verbose_name="每日最早可预订时间", help_text="例如 08:00"
+    )
+    available_end_time = models.TimeField(
+        null=True, blank=True, verbose_name="每日最晚可预订时间", help_text="例如 22:00"
+    )
 
-    min_booking_duration = models.DurationField(default=timedelta(minutes=30), verbose_name="单次预订最短时长",
-                                                help_text="例如 30 分钟")
-    max_booking_duration = models.DurationField(default=timedelta(hours=4), verbose_name="单次预订最长时长",
-                                                help_text="例如 4 小时")
-    buffer_time_minutes = models.PositiveIntegerField(default=0, verbose_name="前后预订缓冲时间(分钟)",
-                                                      help_text="相邻预订之间的最短间隔（分钟）")
+    min_booking_duration = models.DurationField(
+        null=True, blank=True,
+        verbose_name="单次预订最短时长",
+        help_text="例如 30 分钟。为空则继承 SpaceType 默认或不限制"
+    )
+    max_booking_duration = models.DurationField(
+        null=True, blank=True,
+        verbose_name="单次预订最长时长",
+        help_text="例如 4 小时。为空则继承 SpaceType 默认或不限制"
+    )
+    buffer_time_minutes = models.PositiveIntegerField(
+        null=True, blank=True,
+        verbose_name="前后预订缓冲时间(分钟)",
+        help_text="相邻预订之间的最短间隔（分钟）。为空则继承 SpaceType 默认或无"
+    )
 
-    # --- 新增字段：基于角色的预订访问控制 (黑名单策略) ---
-    restricted_roles = models.ManyToManyField(
-        Role,
+    # restricted_groups 字段，用于实现基于 Group 的静态黑名单
+    restricted_groups = models.ManyToManyField(
+        Group,
         blank=True,
         related_name='restricted_spaces',
-        verbose_name="禁止预订的角色",
-        help_text="在此列表中的角色将无法预订此空间。如果列表为空，则所有角色均可预订。"
+        verbose_name="受限用户组",
+        help_text="属于这些用户组的用户不能预订此空间。"
     )
-    # --- 新增字段结束 ---
 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -209,45 +274,45 @@ class Space(models.Model):
         verbose_name = '空间'
         verbose_name_plural = verbose_name
         ordering = ['name']
+        # 添加对象级权限，供 django-guardian 使用
+        permissions = (
+            ("can_book_this_space", "Can book this specific space"),
+        )
         indexes = [
-            models.Index(fields=['name']),
-            models.Index(fields=['location']),
-            models.Index(fields=['space_type']),
-            models.Index(fields=['parent_space']),
-            models.Index(fields=['is_bookable']),
-            models.Index(fields=['is_active']),
-            models.Index(fields=['is_container']),
-            models.Index(fields=['requires_approval']),
-            models.Index(fields=['created_at']),
+            Index(fields=['name']),
+            Index(fields=['location']),
+            Index(fields=['space_type']),
+            Index(fields=['parent_space']),
+            Index(fields=['is_bookable']),
+            Index(fields=['is_active']),
+            Index(fields=['is_container']),
+            Index(fields=['requires_approval']),
+            Index(fields=['created_at']),
         ]
 
     def clean(self):
         super().clean()
 
-        # 现有业务规则
         if not self.is_active and self.is_bookable:
             raise ValidationError({'is_bookable': '不活跃的空间不能设置为可预订。'})
+
         if self.available_start_time and self.available_end_time and \
-                self.available_start_time >= self.available_end_time:  # 修正为 >=
+                self.available_start_time >= self.available_end_time:
             raise ValidationError({'available_end_time': '每日最晚可预订时间必须晚于最早可预订时间。'})
+
         if self.is_container and self.is_bookable:
             raise ValidationError({'is_bookable': '容器空间通常不直接预订，请设置 is_bookable 为 False。'})
 
-        # 避免自关联的循环引用 (A是B的父，B是A的父)
         if self.pk and self.parent_space == self:
             raise ValidationError({'parent_space': '空间不能将自身设置为父级空间。'})
 
-        # 业务规则4: 避免父级空间是其子空间或孙子空间 (更健壮的循环检测)
+        # 业务规则: 避免父级空间是其子空间或孙子空间 (环形引用)
         if self.parent_space and self.parent_space.pk:
             current = self.parent_space
-            path = {current.pk}
-            while current.parent_space:
-                current = current.parent_space
-                if current.pk == self.pk:  # 直接检测到循环
+            while current:
+                if current == self:
                     raise ValidationError({'parent_space': '父级空间不能是其子空间或孙子空间。'})
-                if current.pk in path:  # 检测到更长的循环
-                    raise ValidationError({'parent_space': '父级空间链中存在循环。'})
-                path.add(current.pk)
+                current = current.parent_space # 遍历父链
 
     def save(self, *args, **kwargs):
         """
@@ -257,17 +322,17 @@ class Space(models.Model):
         """
         # 逻辑1: 强制设置 is_bookable
         if not self.is_active:
-            self.is_bookable = False  # 如果空间不活跃，强制设置为不可预订
-
-        if self.is_container:  # 如果是容器空间，强制设置为不可预订
             self.is_bookable = False
 
-        # 逻辑2: 根据 space_type 自动填充默认值 (仅在字段未设置时)
+        if self.is_container:
+            self.is_bookable = False
+
+        # 逻辑2: 根据 space_type 自动填充默认值 (仅当字段为 None 时，允许实例级别覆盖)
         if self.space_type:
-            # 如果空间类型是容器类型，强制设置 is_container (尽管 clean 已经有校验了)
+            # 如果空间类型是容器类型，强制设置 is_container
             if self.space_type.is_container_type:
                 self.is_container = True
-                self.is_bookable = False  # 容器类型通常不可预订
+                self.is_bookable = False # 容器类型通常不可预订
 
             if self.requires_approval is None:
                 self.requires_approval = self.space_type.default_requires_approval
@@ -282,38 +347,8 @@ class Space(models.Model):
             if self.buffer_time_minutes is None:
                 self.buffer_time_minutes = self.space_type.default_buffer_time_minutes
 
-        self.full_clean()  # 触发 clean() 方法进行模型验证以及字段验证
+        self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} ({self.location})"
-
-    # --- 新增辅助方法：用于检查某个角色是否可以预订此空间 ---
-    def can_role_book(self, user_role: 'Role') -> bool:
-        """
-        根据 spaces/models.py 中的 Space.restricted_roles 字段
-        检查给定用户的角色是否可以预订此空间。
-
-        Args:
-            user_role: CustomUser 实例的 role 字段 (Role 模型实例)。
-
-        Returns:
-            bool: 如果该用户角色可以预订此空间，则返回 True，否则返回 False。
-        """
-        if not user_role or not isinstance(user_role, Role):
-            # 用户没有角色，或者传递的不是有效的 Role 实例
-            return False
-
-        # 如果 restricted_roles 列表为空，表示没有角色被限制，所有角色都可以预订。
-        # 考虑到 ManyToManyField 在未保存前可能无法访问，这里用 .exists() 会更安全。
-        # self.restricted_roles 是 ManyToManyManager
-        if not self.restricted_roles.exists():  # 检查是否有任何限制角色存在
-            return True
-
-        # 如果 restricted_roles 列表不为空，则检查用户的角色是否在其中。
-        # 如果在列表中，表示该角色被限制，不能预订。
-        if self.restricted_roles.filter(pk=user_role.pk).exists():  # 更高效地检查是否存在
-            return False
-
-        # 如果 restricted_roles 不为空，且用户角色不在其中，则可以预订。
-        return True
