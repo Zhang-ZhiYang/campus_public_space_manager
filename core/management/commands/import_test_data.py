@@ -69,11 +69,15 @@ class Command(BaseCommand):
             # 它们的管理通过用户组完成，在 handle 方法中会处理。
         return user
 
+        # core/management/commands/import_test_data.py
+
+        # ... (前面的导入和 _create_user_with_roles 保持不变) ...
+
     @transaction.atomic
     def handle(self, *args, **options):
         self.stdout.write(self.style.HTTP_INFO('Starting test data import...'))
 
-        # --- 1. Create Users and Groups ---
+        # --- 1. 创建 Users and Groups ---
         self.stdout.write(self.style.HTTP_INFO('\n1. Creating Users and Groups...'))
 
         # 创建 '空间管理员' 组
@@ -83,7 +87,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING("  Group '空间管理员' already exists."))
 
-        # 创建 '系统管理员' 组 (新增)
+        # 创建 '系统管理员' 组
         system_admin_group, created = Group.objects.get_or_create(name='系统管理员')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '系统管理员'"))
@@ -91,8 +95,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("  Group '系统管理员' already exists."))
 
         # 创建特定用户
-        # 对于系统管理员和空间管理员，只需传入 is_staff=True。
-        # 它们的具体角色（is_system_admin, is_space_manager）将通过组会员身份来管理。
         superuser = self._create_user_with_roles('admin', 'admin123', 'admin@example.com',
                                                  is_staff=True, is_superuser=True, first_name='Super',
                                                  last_name='User')
@@ -121,6 +123,10 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"  Added {sysadmin.username} to '系统管理员' group."))
         else:
             self.stdout.write(self.style.WARNING(f"  {sysadmin.username} is already in '系统管理员' group."))
+        # IMPORTANT: Force save sysadmin to re-evaluate is_staff after group is added
+        sysadmin.save()
+        self.stdout.write(
+            self.style.SUCCESS(f"  Ensured {sysadmin.username}'s is_staff reflects group membership."))
 
         # 将空间管理员用户添加到 '空间管理员' 组
         for sm in [space_manager1, space_manager2, space_manager3]:
@@ -129,6 +135,11 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS(f"  Added {sm.username} to '空间管理员' group."))
             else:
                 self.stdout.write(self.style.WARNING(f"  {sm.username} is already in '空间管理员' group."))
+            # IMPORTANT: Force save space manager to re-evaluate is_staff after group is added
+            sm.save()
+            self.stdout.write(self.style.SUCCESS(f"  Ensured {sm.username}'s is_staff reflects group membership."))
+
+    # ... (以下部分保持不变) ...
 
         # --- 2. 创建 SpaceTypes, Amenities, Spaces & BookableAmenities ---
         # 以下部分保持不变，但为了完整性再次包含
