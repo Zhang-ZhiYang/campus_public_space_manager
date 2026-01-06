@@ -12,7 +12,7 @@ from django.conf import settings
 CustomUser = settings.AUTH_USER_MODEL
 
 # 直接导入本应用的模型
-from bookings.models import Booking # 注意：这里是 bookings.models.Booking，不是 .models
+from bookings.models import Booking
 from bookings.models import Violation # 导入 Violation for mark_no_show_and_violate
 
 # 确保 SPACES_MODELS_LOADED 标志存在
@@ -115,9 +115,10 @@ class BookingAdmin(GuardedModelAdmin):
     @admin.display(description='是否需审批')
     def requires_approval_status(self, obj: 'Booking'):
         target_obj = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
-        return "是" if target_obj and getattr(target_obj, 'requires_approval', False) else "否"
+        # 修正：直接返回布尔值，因为已设置 boolean = True
+        return bool(target_obj and getattr(target_obj, 'requires_approval', False))
 
-    requires_approval_status.boolean = True
+    requires_approval_status.boolean = True # 保持为 True
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
@@ -131,12 +132,12 @@ class BookingAdmin(GuardedModelAdmin):
 
         # 获取用户有 'spaces.can_manage_space_bookings' 权限的所有 Space 对象的 ID
         managed_spaces_ids = get_objects_for_user(
-            request.user, 'spaces.can_manage_space_bookings', klass=Space  # klass 匹配 Space
+            request.user, 'spaces.can_manage_space_bookings', klass=Space
         ).values_list('id', flat=True)
 
         # 获取用户有 'spaces.can_manage_bookable_amenity' 权限的所有 BookableAmenity 对象的 ID
         managed_amenities_ids = get_objects_for_user(
-            request.user, 'spaces.can_manage_bookable_amenity', klass=BookableAmenity  # klass 匹配 BookableAmenity
+            request.user, 'spaces.can_manage_bookable_amenity', klass=BookableAmenity
         ).values_list('id', flat=True)
 
         return qs.filter(
@@ -146,24 +147,30 @@ class BookingAdmin(GuardedModelAdmin):
     def has_module_permission(self, request):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or request.user.is_system_admin: return True
-        return request.user.is_staff and request.user.is_space_manager  # This check doesn't need get_objects_for_user
+        return request.user.is_staff and request.user.is_space_manager
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or request.user.is_system_admin: return True
-        if obj is None: return self.has_module_permission(request)  # For list view, defer to module permission
+        if obj is None: return self.has_module_permission(request)
 
         target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
-        if not (target_space and SPACES_MODELS_LOADED): return False  # Ensure target_space and modules are loaded
+        if not (target_space and SPACES_MODELS_LOADED): return False
         return request.user.has_perm('spaces.can_manage_space_bookings', target_space)
 
+    # 修正：允许部分用户添加 Booking
     def has_add_permission(self, request):
-        return False
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or request.user.is_system_admin:
+            return True
+        # 空间管理员也可以添加，如果他们是 staff 成员
+        return request.user.is_staff and request.user.is_space_manager
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or request.user.is_system_admin: return True
-        if obj is None: return self.has_module_permission(request)  # For list view, defer to module permission
+        if obj is None: return self.has_module_permission(request)
 
         target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
         if not (target_space and SPACES_MODELS_LOADED): return False
@@ -172,7 +179,7 @@ class BookingAdmin(GuardedModelAdmin):
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or request.user.is_system_admin: return True
-        if obj is None: return False  # Space managers cannot bulk delete
+        if obj is None: return False
 
         target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
         if not (target_space and SPACES_MODELS_LOADED): return False
@@ -186,7 +193,7 @@ class BookingAdmin(GuardedModelAdmin):
                 'approve_bookings', 'reject_bookings', 'cancel_bookings', 'mark_completed_bookings',
                 'mark_checked_in', 'mark_no_show_and_violate'
             ]
-            actions.pop('delete_selected', None)
+            actions.pop('delete_selected', None) # 空间管理员不能批量删除
 
             all_current_actions = list(actions.keys())
             for action_name in all_current_actions:
@@ -307,8 +314,7 @@ class BookingAdmin(GuardedModelAdmin):
     def mark_no_show_and_violate(self, request, queryset):
         if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
                                                                 messages.ERROR); return
-        # from .models import Violation # Violation 已经在顶部导入了
-        no_show_count = 0;
+        no_show_count = 0
         violation_count = 0
         for booking in queryset:
             target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
@@ -317,7 +323,7 @@ class BookingAdmin(GuardedModelAdmin):
                     (target_space and request.user.has_perm('spaces.can_manage_space_bookings', target_space)):
                 if booking.status in ['PENDING', 'APPROVED'] and booking.end_time < timezone.now():
                     booking.status = 'NO_SHOW'
-                    booking.save(update_fields=['status']);
+                    booking.save(update_fields=['status'])
                     no_show_count += 1
                     space_type_for_violation = target_space.space_type if target_space else None
                     if space_type_for_violation:
@@ -326,7 +332,7 @@ class BookingAdmin(GuardedModelAdmin):
                             violation_type='NO_SHOW',
                             description=f"用户 {booking.user.get_full_name} 未在 {getattr(target_space, 'name', '未知空间')} 预订中签到。",
                             issued_by=request.user, penalty_points=1
-                        );
+                        )
                         violation_count += 1
                     else:
                         self.message_user(request, f"预订 {booking.id} 无法确定空间类型，未能创建违规记录。",
