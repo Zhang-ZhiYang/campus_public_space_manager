@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'drf_spectacular',
     'guardian',  # <-- 确保这一行在这里
     # --- 自定义业务模块 ---
+    'core',
     'users.apps.UsersConfig',
     'spaces.apps.SpacesConfig',
     'bookings.apps.BookingsConfig',

@@ -1,22 +1,19 @@
-# spaces/admin.py
+# spaces/admin/space_admin.py
 from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import transaction, models
 from django.contrib.auth.models import Group
-from django.db.models import Q, Manager, QuerySet  # 导入 QuerySet
 
 # 直接导入本应用的模型
-from .models import Amenity, Space, SpaceType, BookableAmenity
+from spaces.models import Amenity, Space, SpaceType, BookableAmenity # 注意：从 spaces.models 导入
 
 from django.conf import settings
 from guardian.admin import GuardedModelAdmin
 from guardian.shortcuts import get_objects_for_user
 
-# CRITICAL FIX: 使用 get_user_model 来确保 CustomUser 是模型类
 from django.contrib.auth import get_user_model
-
-CustomUser = get_user_model()  # <--- 修改这里
+CustomUser = get_user_model()
 
 # --------------------------------------------------------------------
 # 用于运行时安全导入及模拟其他应用的模型
@@ -25,118 +22,23 @@ CustomUser = get_user_model()  # <--- 修改这里
 BOOKINGS_MODELS_LOADED = False
 try:
     from bookings.models import Booking
-
     BOOKINGS_MODELS_LOADED = True
 except ImportError:
-    class MockQuerySet(QuerySet):
-        def none(self): return self  # Ensure .none() returns self for chaining
-
-        def filter(self, *args, **kwargs): return self  # Add filter for robustness
-
-        def values_list(self, *args, **kwargs): return []  # Ensure values_list returns empty list
-
-
-    class MockManager(Manager):
+    class MockQuerySet(models.QuerySet):
+        def none(self): return self
+        def filter(self, *args, **kwargs): return self
+        def values_list(self, *args, **kwargs): return []
+    class MockManager(models.Manager):
         def get_queryset(self):
             return MockQuerySet(self.model, using=self._db)
-
-
     class MockBooking(models.Model):
         objects = MockManager()
-
         @staticmethod
         def objects_filter_space_exists(space_obj): return False
-
         @staticmethod
         def objects_filter_bookable_amenity_exists(bookable_amenity_obj): return False
-
-
     Booking = MockBooking
-
-    print(
-        "Warning: Missing 'bookings' app. Using robust mock Booking objects in spaces/admin.py. Functionality may be limited.")
-
-
-# ====================================================================
-# SpaceType Admin (空间类型管理)
-# ====================================================================
-@admin.register(SpaceType)
-class SpaceTypeAdmin(admin.ModelAdmin):
-    list_display = (
-        'name', 'is_container_type', 'is_basic_infrastructure', 'default_is_bookable', 'default_requires_approval',
-        'default_available_start_time', 'default_available_end_time',
-        'description'
-    )
-    search_fields = ('name',)
-    list_filter = ('is_container_type', 'is_basic_infrastructure', 'default_is_bookable', 'default_requires_approval')
-
-    fieldsets = (
-        (None, {'fields': ('name', 'description')}),
-        ('类型属性', {'fields': ('is_container_type', 'is_basic_infrastructure')}),
-        ('默认预订规则 (创建空间时可作为默认值)', {
-            'fields': (
-                'default_is_bookable', 'default_requires_approval',
-                'default_available_start_time', 'default_available_end_time',
-                'default_min_booking_duration', 'default_max_booking_duration',
-                'default_buffer_time_minutes'
-            ),
-            'classes': ('collapse',)
-        }),
-    )
-
-    def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        return request.user.is_staff and (request.user.is_superuser or request.user.is_system_admin)
-
-    def has_view_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
-
-    def has_add_permission(self, request):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
-
-    def has_change_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
-
-    def has_delete_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
-
-
-# ====================================================================
-# Amenity Admin (设施类型管理)
-# ====================================================================
-@admin.register(Amenity)
-class AmenityAdmin(admin.ModelAdmin):
-    list_display = ('name', 'is_bookable_individually', 'description')
-    search_fields = ('name',)
-    list_filter = ('is_bookable_individually',)
-    fields = ('name', 'description', 'is_bookable_individually')
-
-    def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        return request.user.is_staff and (
-                request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager)
-
-    def has_view_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager
-
-    def has_add_permission(self, request):
-        if not request.user.is_authenticated: return False
-        # 允许系统管理员、超级管理员 和 空间管理员 添加设施类型
-        return request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager
-
-    def has_change_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
-
-    def has_delete_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
-
+    print("Warning: Missing 'bookings' app. Using robust mock Booking objects in spaces/admin/space_admin.py. Functionality may be limited.")
 
 # ====================================================================
 # BookableAmenity Inline
@@ -185,7 +87,6 @@ class BookableAmenityInline(admin.TabularInline):
             messages.error(request, '您没有权限修改此设施实例。')
             raise ValidationError('没有权限')
         super().save_model(request, obj, form, change)
-
 
 # ====================================================================
 # Space Admin (空间管理)
