@@ -3,7 +3,15 @@ from django.db import models
 from django.db.models import Manager, Index
 from datetime import timedelta, time
 from django.core.exceptions import ValidationError
-from django.contrib.auth.models import Group # 导入 Group
+from django.contrib.auth.models import Group  # 导入 Group
+from django.conf import settings  # 导入 settings 获取 AUTH_USER_MODEL
+from django.dispatch import receiver
+from guardian.shortcuts import assign_perm, remove_perm
+from django.db.models.signals import post_save, pre_save  # 新增 pre_save 处理 managed_by
+
+# 获取 CustomUser 模型
+CustomUser = settings.AUTH_USER_MODEL
+
 
 # ====================================================================
 # SpaceType Model (空间类型)
@@ -32,7 +40,7 @@ class SpaceType(models.Model):
     # 默认预订规则字段，作为创建 Space 时的初始模板
     default_is_bookable = models.BooleanField(default=True, verbose_name="默认是否可预订")
     default_requires_approval = models.BooleanField(
-        default=False, # 默认改为 False，多数空间可能无需审批
+        default=False,  # 默认改为 False，多数空间可能无需审批
         verbose_name="默认是否需要审批",
         help_text="新创建的空间默认是否需要管理员审核批准"
     )
@@ -59,7 +67,7 @@ class SpaceType(models.Model):
     default_buffer_time_minutes = models.PositiveIntegerField(
         default=0,
         verbose_name="默认前后预订缓冲时间(分钟)",
-         help_text="相邻预订之间的最短间隔（分钟）"
+        help_text="相邻预订之间的最短间隔（分钟）"
     )
 
     class Meta:
@@ -74,6 +82,7 @@ class SpaceType(models.Model):
 
     def __str__(self):
         return self.name
+
 
 # ====================================================================
 # Amenity Model (设施 - 定义设施的种类)
@@ -105,6 +114,7 @@ class Amenity(models.Model):
     def __str__(self):
         return self.name
 
+
 # ====================================================================
 # BookableAmenity Model (可预订设施实例 - Space 下的设施具体数量)
 # ====================================================================
@@ -116,7 +126,7 @@ class BookableAmenity(models.Model):
     objects: Manager = Manager()
 
     space = models.ForeignKey(
-        'Space', # 使用字符串引用 Space，避免循环引用
+        'Space',  # 使用字符串引用 Space，避免循环引用
         on_delete=models.CASCADE,
         related_name='bookable_amenities',
         verbose_name="所属空间"
@@ -154,32 +164,32 @@ class BookableAmenity(models.Model):
             Index(fields=['is_bookable']),
             Index(fields=['is_active']),
         ]
+        # 添加对象级权限
+        permissions = (
+            ("can_manage_bookable_amenity", "Can manage this specific bookable amenity"),
+        )
 
     def clean(self):
         super().clean()
 
-        # 业务规则1: 如果设施类型本身不可单独预订，则此实例也不能被标记为可预订
         if self.amenity and not self.amenity.is_bookable_individually and self.is_bookable:
             raise ValidationError(
                 {'is_bookable': f"设施类型 '{self.amenity.name}' 不可单独预订，不能设置此实例为可预订。"}
             )
 
-        # 业务规则2: 如果设施实例不活跃，则也不能标记为可预订
         if not self.is_active and self.is_bookable:
             raise ValidationError({'is_bookable': '不活跃的设施实例不能设置为可预订。'})
 
-        # 业务规则3: 设施数量必须大于0
         if self.quantity <= 0:
             raise ValidationError({'quantity': '设施数量必须大于0。'})
 
     def save(self, *args, **kwargs):
-        # 强制执行业务规则
         if self.amenity:
             if not self.amenity.is_bookable_individually:
-                self.is_bookable = False
+                self.is_bookable = False  # 强制不可单独预订的设施实例为不可预订
 
         if not self.is_active:
-            self.is_bookable = False
+            self.is_bookable = False  # 不活跃的设施实例为不可预订
 
         self.full_clean()
         super().save(*args, **kwargs)
@@ -187,6 +197,7 @@ class BookableAmenity(models.Model):
     def __str__(self):
         activity_status = "活跃" if self.is_active else "不活跃"
         return f"{self.space.name} 的 {self.amenity.name} (数量: {self.quantity}, 状态: {activity_status})"
+
 
 # ====================================================================
 # Space Model (空间)
@@ -230,7 +241,7 @@ class Space(models.Model):
     image = models.ImageField(upload_to='space_images/', blank=True, null=True, verbose_name="空间图片")
 
     requires_approval = models.BooleanField(
-        default=False, # 默认改为 False，多数空间可能无需审批
+        default=False,  # 默认改为 False，多数空间可能无需审批
         verbose_name="需要管理员审批",
         help_text="预订此空间是否需要管理员审核批准"
     )
@@ -243,17 +254,17 @@ class Space(models.Model):
     )
 
     min_booking_duration = models.DurationField(
-        null=True, blank=True,
+        null=True, blank=True,  # 允许为空，表示继承或不限制
         verbose_name="单次预订最短时长",
         help_text="例如 30 分钟。为空则继承 SpaceType 默认或不限制"
     )
     max_booking_duration = models.DurationField(
-        null=True, blank=True,
+        null=True, blank=True,  # 允许为空，表示继承或不限制
         verbose_name="单次预订最长时长",
         help_text="例如 4 小时。为空则继承 SpaceType 默认或不限制"
     )
     buffer_time_minutes = models.PositiveIntegerField(
-        null=True, blank=True,
+        null=True, blank=True,  # 允许为空，表示继承或无
         verbose_name="前后预订缓冲时间(分钟)",
         help_text="相邻预订之间的最短间隔（分钟）。为空则继承 SpaceType 默认或无"
     )
@@ -267,6 +278,16 @@ class Space(models.Model):
         help_text="属于这些用户组的用户不能预订此空间。"
     )
 
+    # managed_by 字段，用于关联负责该空间的具体用户 (空间管理员)
+    managed_by = models.ForeignKey(
+        CustomUser,  # 直接引用 CustomUser 模型
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='managed_spaces',
+        verbose_name="主要管理人员",
+        help_text="该空间的主要管理人员，通常是空间管理员"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -276,7 +297,10 @@ class Space(models.Model):
         ordering = ['name']
         # 添加对象级权限，供 django-guardian 使用
         permissions = (
-            ("can_book_this_space", "Can book this specific space"),
+            ("can_book_this_space", "Can book this specific space"),  # 用户预订权限
+            ("can_manage_space_details", "Can manage details of this specific space"),  # 管理详情
+            ("can_manage_space_bookings", "Can manage bookings of this specific space"),  # 管理预订（批准/拒绝）
+            ("can_manage_space_amenities", "Can manage amenities of this specific space"),  # 管理设施
         )
         indexes = [
             Index(fields=['name']),
@@ -287,6 +311,7 @@ class Space(models.Model):
             Index(fields=['is_active']),
             Index(fields=['is_container']),
             Index(fields=['requires_approval']),
+            Index(fields=['managed_by']),  # 新增 managed_by 索引
             Index(fields=['created_at']),
         ]
 
@@ -306,13 +331,12 @@ class Space(models.Model):
         if self.pk and self.parent_space == self:
             raise ValidationError({'parent_space': '空间不能将自身设置为父级空间。'})
 
-        # 业务规则: 避免父级空间是其子空间或孙子空间 (环形引用)
         if self.parent_space and self.parent_space.pk:
             current = self.parent_space
             while current:
                 if current == self:
                     raise ValidationError({'parent_space': '父级空间不能是其子空间或孙子空间。'})
-                current = current.parent_space # 遍历父链
+                current = current.parent_space
 
     def save(self, *args, **kwargs):
         """
@@ -332,7 +356,7 @@ class Space(models.Model):
             # 如果空间类型是容器类型，强制设置 is_container
             if self.space_type.is_container_type:
                 self.is_container = True
-                self.is_bookable = False # 容器类型通常不可预订
+                self.is_bookable = False  # 容器类型通常不可预订
 
             if self.requires_approval is None:
                 self.requires_approval = self.space_type.default_requires_approval
@@ -352,3 +376,64 @@ class Space(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.location})"
+
+
+# ====================================================================
+# Django Signals for Space and BookableAmenity (管理对象级权限)
+# ====================================================================
+
+@receiver(pre_save, sender=Space)
+def store_old_managed_by_for_space(sender, instance, **kwargs):
+    """在保存前存储旧的 managed_by 用户，以便 post_save 判断其是否改变，并移除旧权限。"""
+    if instance.pk:
+        try:
+            old_instance = sender.objects.get(pk=instance.pk)
+            instance._old_managed_by = old_instance.managed_by
+        except sender.DoesNotExist:
+            instance._old_managed_by = None  # 新创建的实例，没有旧的 managed_by
+    else:
+        instance._old_managed_by = None
+
+
+@receiver(post_save, sender=Space)
+def assign_space_management_permissions(sender, instance, created, **kwargs):
+    """
+    当 Space 对象创建或更新时，为 managed_by 用户分配对象级管理权限。
+    并处理 managed_by 变更时旧用户的权限移除。
+    """
+    permissions = [
+        'can_manage_space_details',
+        'can_manage_space_bookings',
+        'can_manage_space_amenities',
+        'can_book_this_space',
+    ]
+
+    # 移除旧 managed_by 用户的权限
+    old_managed_by = getattr(instance, '_old_managed_by', None)
+    if old_managed_by and old_managed_by != instance.managed_by:
+        for perm in permissions:
+            remove_perm(f'spaces.{perm}', old_managed_by, instance)
+
+    # 为新或现有 managed_by 用户分配权限
+    if instance.managed_by:
+        # 确保管理员拥有 '空间管理员' Group（如果这是期望行为）
+        # 避免在信号中频繁查询 Group，可以在启动时缓存或在CustomUser.save中管理
+        space_manager_group = Group.objects.filter(name='空间管理员').first()
+        if space_manager_group and instance.managed_by not in space_manager_group.user_set.all():
+            instance.managed_by.groups.add(space_manager_group)
+            # 由于 groups 是 ManyToMany，这里修改后如果需要立即反映到用户对象，可能需要刷新或在外面处理
+
+        for perm in permissions:
+            assign_perm(f'spaces.{perm}', instance.managed_by, instance)
+
+
+@receiver(post_save, sender=BookableAmenity)
+def assign_amenity_management_permissions(sender, instance, created, **kwargs):
+    """
+    当 BookableAmenity 对象创建或更新时，如果其所属 Space 有管理人员，
+    且该管理人员不是系统管理员，则为其分配该 BookableAmenity 的管理权限。
+    """
+    if instance.space and instance.space.managed_by:
+        manager = instance.space.managed_by
+        # 这里给 BookableAmenity 自身分配权限，而不是 Space 的权限
+        assign_perm('spaces.can_manage_bookable_amenity', manager, instance)

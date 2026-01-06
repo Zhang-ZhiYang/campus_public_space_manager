@@ -32,8 +32,7 @@ VIOLATION_TYPE_CHOICES = (
     ('NO_SHOW', '未到场'),
     ('LATE_CANCELLATION', '迟取消'),
     ('MISUSE_SPACE', '违规使用'),
-    ('DAMAGE_PROPERTY', '设施损坏'),
-    ('EXCEED_CAPACITY', '超员使用'),
+    ('DAMAGE_PROPERTY', '设施损坏或超员使用'),  # 合并常见的违规类型描述
     ('OCCUPY_OVERTIME', '超时占用'),
     ('OTHER', '其他'),
 )
@@ -122,6 +121,10 @@ class Booking(models.Model):
         verbose_name = '预订'
         verbose_name_plural = verbose_name
         ordering = ['-start_time']
+        permissions = (
+            ("can_approve_booking", "Can approve/reject any booking"),  # 可以批准/拒绝任何预订（全局）
+            ("can_check_in_booking", "Can check in/out any booking"),  # 可以签到/签出任何预订（全局）
+        )
         indexes = [
             Index(fields=['user', 'start_time']),
             Index(fields=['space', 'start_time', 'end_time']),
@@ -149,7 +152,7 @@ class Booking(models.Model):
         - 确保只能预订 Space 或 BookableAmenity 中的一个。
         - 校验 booked_quantity。
         """
-        if self.start_time and self.end_time and self.start_time >= self.end_time:  # 改为 >=，结束时间不能等于开始时间
+        if self.start_time and self.end_time and self.start_time >= self.end_time:
             raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
 
         if not ((self.space is not None) ^ (self.bookable_amenity is not None)):
@@ -259,13 +262,16 @@ class Violation(models.Model):
         verbose_name = '违约记录'
         verbose_name_plural = verbose_name
         ordering = ['-issued_at']
+        permissions = (
+            ("can_resolve_violation", "Can resolve any violation"),  # 可以解决任何违规（全局）
+        )
         indexes = [
             Index(fields=['user']),
             Index(fields=['booking']),
-            Index(fields=['space_type']),  # 新增索引
+            Index(fields=['space_type']),
             Index(fields=['violation_type']),
             Index(fields=['issued_at']),
-            Index(fields=['is_resolved']),  # 常用过滤字段
+            Index(fields=['is_resolved']),
         ]
 
     def __str__(self):
@@ -388,7 +394,7 @@ class SpaceTypeBanPolicy(models.Model):
         # 同一空间类型下，点数阈值不能重复
         unique_together = ('space_type', 'threshold_points')
         # 排序：全局策略优先（space_type为null），然后按空间类型名，最后按点数阈值降序和优先级降序
-        ordering = ['space_type__id', 'space_type__name', '-threshold_points', '-priority']
+        # ordering = ['space_type_id__isnull', 'space_type__name', '-threshold_points', '-priority']
         indexes = [
             Index(fields=['space_type', 'threshold_points']),
             Index(fields=['is_active']),
@@ -528,6 +534,9 @@ class UserSpaceTypeExemption(models.Model):
     class Meta:
         verbose_name = '用户豁免记录'
         verbose_name_plural = verbose_name
+        # 同一用户在同一空间类型下只能有一条活跃的豁免记录
+        # 如果存在时间范围，需要通过 clean 方法进行更复杂的校验。或者允许 overlap，以最后一条生效。
+        # 为简化，这里采用 unique_together 强制一个用户在特定空间类型下只有一条豁免。
         unique_together = ('user', 'space_type')
         ordering = ['user__username', 'space_type__name']
         indexes = [
@@ -559,26 +568,31 @@ def store_old_violation_is_resolved(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Violation)
-def update_user_penalty_points_on_violation_save_with_resolved_logic(sender, instance, created, **kwargs):
+def update_user_penalty_points_on_violation_save(sender, instance, created, **kwargs):
     """
     在 Violation 实例创建、更新后，更新 UserPenaltyPointsPerSpaceType 的活跃点数，并考虑解决状态。
     """
     if instance.user:
         # 1. 确保 Violation 的 space_type 总是被填充
+        # 如果 Violation 没有直接关联 space_type，尝试从 booking 获取
         if not instance.space_type and instance.booking:
             if instance.booking.space and instance.booking.space.space_type:
-                instance.space_type = instance.booking.space.space_type  # 自动从预订的空间中获取
+                instance.space_type = instance.booking.space.space_type
             elif instance.booking.bookable_amenity and instance.booking.bookable_amenity.space and instance.booking.bookable_amenity.space.space_type:
                 instance.space_type = instance.booking.bookable_amenity.space.space_type
-            # 必须重新保存实例，让 space_type 的变化持久化。
-            # 但要小心，避免无限循环。这里简单处理，假设后续逻辑能处理 None。
-            # 更好的做法是在 Violation 的 clean 或 save 方法中处理，而不应在 post_save 修改自身。
 
-        target_space_type = instance.space_type  # 此时 space_type 应该已经被确定
+            # 重要：如果在这个信号中修改了 instance.space_type，需要重新保存 instance
+            # 但在 post_save 中修改自身并保存容易导致无限循环。
+            # 更好的做法是在 Violation 的 save 或 clean 方法中确保 space_type 的正确性。
+            # 为了避免信号中的无限循环，这里假定 space_type 在进入 post_save 时是正确的或 None。
+            # 如果 space_type 在这里被赋值，但并未保存，则后续 penalty_points_record 的 space_type 可能会丢失。
+            # 简化处理：如果 space_type 依然为 None，则视为全局点数 (space_type=None)
+
+        target_space_type_for_points = instance.space_type  # 此时可以是 None for global points
 
         penalty_points_record, created_record = UserPenaltyPointsPerSpaceType.objects.get_or_create(
             user=instance.user,
-            space_type=target_space_type  # 可以是 None
+            space_type=target_space_type_for_points  # 可以是 None
         )
 
         old_is_resolved = getattr(instance, '_old_is_resolved', False)
@@ -592,7 +606,7 @@ def update_user_penalty_points_on_violation_save_with_resolved_logic(sender, ins
                 points_changed = -instance.penalty_points
             elif not instance.is_resolved and old_is_resolved:  # 从已解决变为未解决
                 points_changed = instance.penalty_points
-            # 如果 penalty_points 自身值改变，则需要更复杂的逻辑，这里假设 penalty_points 除非创建，否则不变
+            # TODO: 如果 penalty_points 自身值改变，则需要更复杂的逻辑，这里假设 penalty_points 除非创建，否则不变
 
         if points_changed != 0:
             penalty_points_record.current_penalty_points = max(0,
@@ -610,13 +624,20 @@ def update_user_penalty_points_on_violation_delete(sender, instance, **kwargs):
     在 Violation 实例被删除后，减少 UserPenaltyPointsPerSpaceType 的活跃点数。
     """
     if instance.user:
-        target_space_type = instance.space_type or \
-                            (instance.booking.space.space_type if instance.booking and instance.booking.space else None)
+        target_space_type = instance.space_type
+        if not target_space_type and instance.booking and instance.booking.space:
+            target_space_type = instance.booking.space.space_type
+        elif not target_space_type and instance.booking and instance.booking.bookable_amenity and instance.booking.bookable_amenity.space:
+            target_space_type = instance.booking.bookable_amenity.space.space_type
+
+        # 如果无法确定 space_type，则视为全局
+        # if not target_space_type:
+        # pass # 可以在这里决定是否将删除的违规点数从全局记录中扣除
 
         try:
             penalty_points_record = UserPenaltyPointsPerSpaceType.objects.get(
                 user=instance.user,
-                space_type=target_space_type
+                space_type=target_space_type  # 可以是 None
             )
             if not instance.is_resolved:  # 仅未解决的违规删除时才减少活跃点数
                 penalty_points_record.current_penalty_points = max(0,
@@ -625,7 +646,7 @@ def update_user_penalty_points_on_violation_delete(sender, instance, **kwargs):
                 penalty_points_record.save()
             check_for_ban_trigger(penalty_points_record)
         except UserPenaltyPointsPerSpaceType.DoesNotExist:
-            pass  # 记录可能不存在，忽略
+            pass
 
 
 def check_for_ban_trigger(penalty_points_record: 'UserPenaltyPointsPerSpaceType'):
@@ -671,6 +692,3 @@ def check_for_ban_trigger(penalty_points_record: 'UserPenaltyPointsPerSpaceType'
             )
         penalty_points_record.last_ban_trigger_at = ban_start
         penalty_points_record.save(update_fields=['last_ban_trigger_at'])
-
-# 确保在 `SpaceType` 和 `CustomUser` 模型被定义后，才能引用它们。
-# 这通常通过在各个应用的 `__init__.py` 或 `apps.py` 中导入信号来解决。

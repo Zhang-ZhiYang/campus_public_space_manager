@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'django_celery_beat',          # 定时任务调度
 
     'drf_spectacular',
+    'guardian',  # <-- 确保这一行在这里
     # --- 自定义业务模块 ---
     'users.apps.UsersConfig',
     'spaces.apps.SpacesConfig',
@@ -175,7 +176,10 @@ REST_FRAMEWORK = {
     # 添加 OpenAPI Schema 渲染器 (用于 drf-spectacular)
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
-
+AUTHENTICATION_BACKENDS = (
+    'django.contrib.auth.backends.ModelBackend', # 这是 Django 默认的用户/组权限
+    'guardian.backends.ObjectPermissionBackend',  # <-- 确保添加这一行
+)
 # ==============================================================================
 # 8. JWT 配置 (Simple JWT)
 # ==============================================================================
