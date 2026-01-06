@@ -401,7 +401,7 @@ def assign_space_management_permissions(sender, instance, created, **kwargs):
 
     if instance.managed_by:
         space_manager_group = Group.objects.filter(name='空间管理员').first()
-        if space_manager_group and instance.managed_by not in space_manager_group.user_set.all():
+        if space_manager_group and instance.managed_by not in space_manager_group.customuser_set.all():
             instance.managed_by.groups.add(space_manager_group)
 
         for perm in permissions:
