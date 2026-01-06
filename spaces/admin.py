@@ -2,7 +2,7 @@
 from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import transaction, models
 from django.contrib.auth.models import Group
 from django.db.models import Q, Manager, QuerySet  # 导入 QuerySet
 
@@ -126,7 +126,8 @@ class AmenityAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        # 允许系统管理员、超级管理员 和 空间管理员 添加设施类型
+        return request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
@@ -445,7 +446,8 @@ class SpaceAdmin(GuardedModelAdmin):
 
     def has_add_permission(self, request):
         if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        # 允许系统管理员、超级管理员 和 空间管理员 添加空间
+        return request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
