@@ -7,6 +7,8 @@ from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 
+from core.utils.date_utils import validate_booking_time_integrity, validate_booking_duration, \
+    validate_booking_daily_availability
 # CRITICAL FIX: 移除 setup_perm_query_set 的导入，以及所有自定义 PermManager 和 PermQuerySet 的定义
 
 # 从其他应用导入相关模型
@@ -153,12 +155,36 @@ class Booking(models.Model):
                 f"[{self.get_status_display()}]")
 
     def clean(self):
-        if self.start_time and self.end_time and self.start_time >= self.end_time:
-            raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
+        super().clean()
 
         if not ((self.space is not None) ^ (self.bookable_amenity is not None)):
             raise ValidationError('预订必须且只能指定一个目标：空间或设施实例。')
 
+        # 确定预订目标
+        target = self.space if self.space else self.bookable_amenity.space if self.bookable_amenity else None
+
+        if not target:
+            raise ValidationError('无法确定预订目标。')
+
+        # 获取 SpaceType 规则
+        space_type = target.space_type
+        if not space_type:
+            raise ValidationError('预订目标没有关联的空间类型。')
+
+        effective_min_duration = target.min_booking_duration
+        effective_max_duration = target.max_booking_duration
+        effective_available_start_time = target.available_start_time
+        effective_available_end_time = target.available_end_time
+        # 1. 校验预订时间的完整性
+        validate_booking_time_integrity(self.start_time, self.end_time)
+
+        # 2. 校验预订时长
+        validate_booking_duration(self.start_time, self.end_time,
+                                  effective_min_duration, effective_max_duration)
+
+        # 3. 校验预订时间范围（每日可用时间）
+        validate_booking_daily_availability(self.start_time, self.end_time,
+            effective_available_start_time, effective_available_end_time)
         if self.bookable_amenity:
             if self.booked_quantity <= 0:
                 raise ValidationError({'booked_quantity': '预订设施时，预订数量必须大于0。'})
@@ -172,9 +198,39 @@ class Booking(models.Model):
         if self.space:
             if self.booked_quantity != 1:
                 raise ValidationError({'booked_quantity': '预订整个空间时，数量必须为1。'})
+
             if not self.space.is_active or not self.space.is_bookable:
                 raise ValidationError("所选空间不可预订或未启用。")
-        super().clean()
+
+        if not self.user:
+            raise ValidationError("预订用户不能为空。")
+
+        target_space_type_for_ban = None
+        if self.space:
+            target_space_type_for_ban = self.space.space_type
+        elif self.bookable_amenity and self.bookable_amenity.space:
+            target_space_type_for_ban = self.bookable_amenity.space.space_type
+
+        if not target_space_type_for_ban:
+            pass  # 目标校验已在前面完成
+
+        active_bans = UserSpaceTypeBan.objects.filter(
+            user=self.user,
+            end_date__gt=timezone.now()
+        )
+
+        global_ban_record = active_bans.filter(space_type__isnull=True).first()
+        if global_ban_record:
+            raise ValidationError(
+                f"您已被全站禁用，直到 {global_ban_record.end_date.strftime('%Y-%m-%d %H:%M')}。原因: {global_ban_record.reason}"
+            )
+
+        if target_space_type_for_ban:
+            specific_space_type_ban_record = active_bans.filter(space_type=target_space_type_for_ban).first()
+            if specific_space_type_ban_record:
+                raise ValidationError(
+                    f"您已被禁止预订 '{target_space_type_for_ban.name}' 类型的空间，直到 {specific_space_type_ban_record.end_date.strftime('%Y-%m-%d %H:%M')}。原因: {specific_space_type_ban_record.reason}"
+                )
 
     def save(self, *args, **kwargs):
         self.full_clean()
