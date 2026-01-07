@@ -4,7 +4,9 @@ from bookings.models import (
     Booking, Violation, UserPenaltyPointsPerSpaceType, SpaceTypeBanPolicy,
     UserSpaceTypeBan, UserSpaceTypeExemption, BOOKING_STATUS_CHOICES, VIOLATION_TYPE_CHOICES
 )
-from spaces.models import Space, BookableAmenity, Amenity, SpaceType  # 确保 Amenity 导入
+# 确保从正确的地方导入 Amenity, Space, BookableAmenity, SpaceType
+from spaces.models import Space, BookableAmenity, Amenity, SpaceType
+# 确保从正确的地方导入 CustomUser
 from users.models import CustomUser
 
 
@@ -12,42 +14,58 @@ from users.models import CustomUser
 # 用于在其他序列化器中嵌套显示关联对象的简要信息
 
 class UserSerializerMinimal(serializers.ModelSerializer):
-    # 假设 CustomUser 模型有 get_full_name 方法
+    # FIX: id -> user_id
+    user_id = serializers.IntegerField(source='id', read_only=True)
     full_name = serializers.CharField(source='get_full_name', read_only=True)
 
     class Meta:
         model = CustomUser
-        fields = ('id', 'username', 'full_name')
+        fields = ('user_id', 'username', 'full_name')  # FIX: 替换 'id'
+        read_only_fields = ('user_id', 'username', 'full_name')  # 确保新的只读字段
 
 
 class SpaceTypeSerializerMinimal(serializers.ModelSerializer):
+    # FIX: id -> space_type_id
+    space_type_id = serializers.IntegerField(source='id', read_only=True)
+
     class Meta:
         model = SpaceType
-        fields = ('id', 'name')
+        fields = ('space_type_id', 'name')  # FIX: 替换 'id'
+        read_only_fields = ('space_type_id', 'name')
 
 
 class AmenitySerializerMinimal(serializers.ModelSerializer):
+    # FIX: id -> amenity_id
+    amenity_id = serializers.IntegerField(source='id', read_only=True)
+
     class Meta:
         model = Amenity
-        # FIX: 移除 'icon' 字段，因为它在 Amenity 模型中不存在
-        fields = ('id', 'name')  # 仅包含实际存在的字段
+        fields = ('amenity_id', 'name')  # FIX: 替换 'id'
+        read_only_fields = ('amenity_id', 'name')
 
 
 class SpaceSerializerMinimal(serializers.ModelSerializer):
+    # FIX: id -> space_id
+    space_id = serializers.IntegerField(source='id', read_only=True)
     space_type = SpaceTypeSerializerMinimal(read_only=True)
 
     class Meta:
         model = Space
-        fields = ('id', 'name', 'description', 'capacity', 'is_bookable', 'is_active', 'space_type')
+        fields = ('space_id', 'name', 'description', 'capacity', 'is_bookable', 'is_active',
+                  'space_type')  # FIX: 替换 'id'
+        read_only_fields = ('space_id', 'name', 'description', 'capacity', 'is_bookable', 'is_active', 'space_type')
 
 
 class BookableAmenitySerializerMinimal(serializers.ModelSerializer):
+    # FIX: id -> bookable_amenity_id
+    bookable_amenity_id = serializers.IntegerField(source='id', read_only=True)
     amenity = AmenitySerializerMinimal(read_only=True)
     space = SpaceSerializerMinimal(read_only=True)
 
     class Meta:
         model = BookableAmenity
-        fields = ('id', 'quantity', 'is_active', 'is_bookable', 'amenity', 'space')
+        fields = ('bookable_amenity_id', 'quantity', 'is_active', 'is_bookable', 'amenity', 'space')  # FIX: 替换 'id'
+        read_only_fields = ('bookable_amenity_id', 'quantity', 'is_active', 'is_bookable', 'amenity', 'space')
 
 
 # --- Booking Serializers ---
@@ -56,6 +74,8 @@ class BookingShortSerializer(serializers.ModelSerializer):
     """
     预订的简要视图，用于列表和嵌套显示。
     """
+    # 保持不变，已是 booking_id
+    booking_id = serializers.IntegerField(source='id', read_only=True)
     user = UserSerializerMinimal(read_only=True)
     space = SpaceSerializerMinimal(read_only=True)
     bookable_amenity = BookableAmenitySerializerMinimal(read_only=True)
@@ -64,11 +84,12 @@ class BookingShortSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = (
-            'id', 'user', 'space', 'bookable_amenity', 'booked_quantity',
+            'booking_id',
+            'user', 'space', 'bookable_amenity', 'booked_quantity',
             'start_time', 'end_time', 'purpose', 'status', 'status_display',
             'created_at'
         )
-        read_only_fields = ('user', 'status', 'status_display', 'created_at')
+        read_only_fields = ('booking_id', 'user', 'status', 'status_display', 'created_at')
 
 
 class BookingCreateSerializer(serializers.ModelSerializer):
@@ -76,6 +97,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
     用于创建预订的序列化器。
     要求传入 space_id 或 bookable_amenity_id。
     """
+    # 这里不需要改变，因为是写入时传入的 id
     space_id = serializers.PrimaryKeyRelatedField(
         queryset=Space.objects.all(), source='space', write_only=True, required=False, allow_null=True
     )
@@ -130,6 +152,7 @@ class BookingDetailSerializer(BookingShortSerializer):
         fields = BookingShortSerializer.Meta.fields + (
             'admin_notes', 'reviewed_by', 'reviewed_at', 'updated_at'
         )
+        # 继承所有 read_only_fields
 
 
 class BookingStatusUpdateSerializer(serializers.Serializer):
@@ -154,11 +177,10 @@ class BookingStatusUpdateSerializer(serializers.Serializer):
 # --- Violation Serializers ---
 
 class ViolationSerializer(serializers.ModelSerializer):
-    """
-    违约记录的序列化器。
-    """
+    # FIX: id -> violation_id
+    violation_id = serializers.IntegerField(source='id', read_only=True)
     user = UserSerializerMinimal(read_only=True)
-    booking = BookingShortSerializer(read_only=True)
+    booking = BookingShortSerializer(read_only=True)  # 嵌套的 BookingShortSerializer 会输出 booking_id
     space_type = SpaceTypeSerializerMinimal(read_only=True)
     issued_by = UserSerializerMinimal(read_only=True)
     resolved_by = UserSerializerMinimal(read_only=True)
@@ -166,9 +188,14 @@ class ViolationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Violation
-        fields = '__all__'
+        # FIX: 将 '__all__' 替换为显式列出的字段，并替换 'id'
+        fields = (
+            'violation_id', 'user', 'booking', 'space_type', 'violation_type',
+            'description', 'penalty_points', 'issued_by', 'issued_at',
+            'is_resolved', 'resolved_at', 'resolved_by', 'violation_type_display'
+        )
         read_only_fields = (
-            'id', 'user', 'booking', 'space_type', 'issued_by', 'issued_at',
+            'violation_id', 'user', 'booking', 'space_type', 'issued_by', 'issued_at',
             'resolved_by', 'resolved_at', 'violation_type_display', 'is_resolved'
         )
 
@@ -176,39 +203,48 @@ class ViolationSerializer(serializers.ModelSerializer):
 # --- Penalty Points Serializers ---
 
 class UserPenaltyPointsPerSpaceTypeSerializer(serializers.ModelSerializer):
-    """
-    用户违约点数统计的序列化器。
-    """
+    # FIX: id -> penalty_points_record_id
+    penalty_points_record_id = serializers.IntegerField(source='id', read_only=True)
     user = UserSerializerMinimal(read_only=True)
     space_type = SpaceTypeSerializerMinimal(read_only=True)
 
     class Meta:
         model = UserPenaltyPointsPerSpaceType
-        fields = '__all__'
-        read_only_fields = ('id', 'user', 'space_type', 'current_penalty_points', 'last_violation_at',
-                            'last_ban_trigger_at', 'updated_at')
+        # FIX: 将 '__all__' 替换为显式列出的字段，并替换 'id'
+        fields = (
+            'penalty_points_record_id', 'user', 'space_type', 'current_penalty_points',
+            'last_violation_at', 'last_ban_trigger_at', 'updated_at'
+        )
+        read_only_fields = (
+            'penalty_points_record_id', 'user', 'space_type', 'current_penalty_points',
+            'last_violation_at', 'last_ban_trigger_at', 'updated_at'
+        )
 
 
 # --- Ban Policy Serializers ---
 
 class SpaceTypeBanPolicySerializer(serializers.ModelSerializer):
-    """
-    空间类型禁用策略的序列化器。
-    """
+    # FIX: id -> ban_policy_id
+    ban_policy_id = serializers.IntegerField(source='id', read_only=True)
     space_type = SpaceTypeSerializerMinimal(read_only=True)
 
     class Meta:
         model = SpaceTypeBanPolicy
-        fields = '__all__'
-        read_only_fields = ('id', 'created_at', 'updated_at')
+        # FIX: 将 '__all__' 替换为显式列出的字段，并替换 'id'
+        fields = (
+            'ban_policy_id', 'space_type', 'threshold_points', 'ban_duration',
+            'priority', 'is_active', 'description', 'created_at', 'updated_at'
+        )
+        read_only_fields = (
+            'ban_policy_id', 'created_at', 'updated_at'
+        )
 
 
 # --- User Ban Serializers ---
 
 class UserSpaceTypeBanSerializer(serializers.ModelSerializer):
-    """
-    用户禁用记录的序列化器。
-    """
+    # FIX: id -> user_ban_id
+    user_ban_id = serializers.IntegerField(source='id', read_only=True)
     user = UserSerializerMinimal(read_only=True)
     space_type = SpaceTypeSerializerMinimal(read_only=True)
     ban_policy_applied = SpaceTypeBanPolicySerializer(read_only=True)
@@ -216,22 +252,33 @@ class UserSpaceTypeBanSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserSpaceTypeBan
-        fields = '__all__'
-        read_only_fields = ('id', 'user', 'space_type', 'ban_policy_applied', 'start_date', 'end_date', 'issued_by',
-                            'issued_at')
+        # FIX: 将 '__all__' 替换为显式列出的字段，并替换 'id'
+        fields = (
+            'user_ban_id', 'user', 'space_type', 'start_date', 'end_date',
+            'ban_policy_applied', 'reason', 'issued_by', 'issued_at'
+        )
+        read_only_fields = (
+            'user_ban_id', 'user', 'space_type', 'ban_policy_applied', 'start_date', 'end_date', 'issued_by',
+            'issued_at'
+        )
 
 
 # --- Exemption Serializers ---
 
 class UserSpaceTypeExemptionSerializer(serializers.ModelSerializer):
-    """
-    用户豁免记录的序列化器。
-    """
+    # FIX: id -> exemption_id
+    exemption_id = serializers.IntegerField(source='id', read_only=True)
     user = UserSerializerMinimal(read_only=True)
     space_type = SpaceTypeSerializerMinimal(read_only=True)
     granted_by = UserSerializerMinimal(read_only=True)
 
     class Meta:
         model = UserSpaceTypeExemption
-        fields = '__all__'
-        read_only_fields = ('id', 'user', 'space_type', 'granted_by', 'granted_at')
+        # FIX: 将 '__all__' 替换为显式列出的字段，并替换 'id'
+        fields = (
+            'exemption_id', 'user', 'space_type', 'exemption_reason',
+            'start_date', 'end_date', 'granted_by', 'granted_at'
+        )
+        read_only_fields = (
+            'exemption_id', 'user', 'space_type', 'granted_by', 'granted_at'
+        )

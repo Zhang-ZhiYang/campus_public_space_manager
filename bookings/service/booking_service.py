@@ -37,6 +37,7 @@ class BookingService(BaseService):
 
         target_space: Optional[Space] = None
         target_amenity: Optional[BookableAmenity] = None
+        requires_approval = True  # 默认需要审批
 
         if space_id:
             target_space = Space.objects.select_related('space_type').prefetch_related('restricted_groups').filter(
@@ -68,6 +69,7 @@ class BookingService(BaseService):
                     status_code=ForbiddenException.status_code
                 )
             booking_data['space'] = target_space
+            requires_approval = target_space.requires_approval  # 获取空间的审批需求
 
         elif bookable_amenity_id:
             target_amenity = BookableAmenity.objects.select_related(
@@ -109,6 +111,7 @@ class BookingService(BaseService):
                     status_code=ForbiddenException.status_code
                 )
             booking_data['bookable_amenity'] = target_amenity
+            requires_approval = parent_space.requires_approval  # 获取设施所在空间的审批需求
         else:
             return ServiceResult.error_result(
                 message="预订必须指定一个空间或可预订设施。",
@@ -118,11 +121,28 @@ class BookingService(BaseService):
 
         booking_data['user'] = user
 
+        # ====== 自动化审批逻辑 - START ======
+        if not requires_approval:
+            booking_data['status'] = 'APPROVED'
+            # 自动批准的预订，reviewed_by 和 reviewed_at 也可以设置, 例如 None 或一个系统用户
+            # 但这里为了简化，在 DAO 的 create 方法里不手动设置，
+            # 依赖 Booking 模型 default 'PENDING' 然后自动覆写为 'APPROVED'。
+            # 重要的是，模型 clean 方法和信号会处理这些。
+        else:
+            booking_data['status'] = 'PENDING'  # 默认就是 PENDING，这里明确写出
+        # ====== 自动化审批逻辑 - END ======
+
         try:
+            # create_booking 方法在 DAO 层调用了 full_clean() 和 save()
             new_booking = self.booking_dao.create_booking(**booking_data)
+
+            message = "预订请求已提交，等待审核。"
+            if not requires_approval:
+                message = "预订已成功批准。"
+
             return ServiceResult.success_result(
                 data=new_booking,
-                message="预订请求已提交。",
+                message=message,
                 status_code=201
             )
         except Exception as e:
@@ -179,8 +199,6 @@ class BookingService(BaseService):
                 error_code=BadRequestException.default_code,
                 status_code=BadRequestException.status_code
             )
-
-        # 移除取消惩罚逻辑
 
         booking.status = 'CANCELLED'
         try:
@@ -253,13 +271,12 @@ class BookingService(BaseService):
                     error_code=BadRequestException.default_code,
                     status_code=BadRequestException.status_code
                 )
-            if timezone.now() > booking.end_time:
+            if timezone.now() > booking.end_time:  # 考虑预订时间窗
                 return ServiceResult.error_result(
                     message="预订已结束，无法签到。",
                     error_code=BadRequestException.default_code,
                     status_code=BadRequestException.status_code
                 )
-            # 可以添加签到时间窗检查
         elif new_status == 'CHECKED_OUT':
             if booking.status not in ['CHECKED_IN']:
                 return ServiceResult.error_result(
@@ -268,8 +285,7 @@ class BookingService(BaseService):
                     status_code=BadRequestException.status_code
                 )
         elif new_status == 'NO_SHOW':
-            # 未到场一般是系统或管理员在预订结束后标记
-            if booking.status not in ['PENDING', 'APPROVED', 'CHECKED_IN']:  # 可以在签到前，也可以在批准后
+            if booking.status not in ['PENDING', 'APPROVED', 'CHECKED_IN']:
                 return ServiceResult.error_result(
                     message=f"预订当前状态为 '{booking.get_status_display()}'，无法标记为未到场。",
                     error_code=BadRequestException.default_code,
@@ -277,19 +293,19 @@ class BookingService(BaseService):
                 )
             if timezone.now() < booking.end_time:
                 return ServiceResult.error_result(
-                    message="预订尚未结束，无法标记为未到场。",  # 通常未到场是在预订结束或开始后一段时间内才标记的
+                    message="预订尚未结束，无法标记为未到场。",
                     error_code=BadRequestException.default_code,
                     status_code=BadRequestException.status_code
                 )
         elif new_status == 'COMPLETED':
-            if booking.status not in ['CHECKED_OUT']:  # 只有签出后才能完成
+            if booking.status not in ['CHECKED_OUT', 'NO_SHOW']:  # 允许 NO_SHOW 后也标记为 COMPLETED
                 return ServiceResult.error_result(
                     message=f"预订当前状态为 '{booking.get_status_display()}'，无法标记为已完成。",
                     error_code=BadRequestException.default_code,
                     status_code=BadRequestException.status_code
                 )
 
-        else:  # 不支持的其他状态
+        else:
             return ServiceResult.error_result(
                 message=f"不支持更新为状态 '{new_status}'。",
                 error_code=BadRequestException.default_code,
