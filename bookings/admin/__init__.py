@@ -6,3 +6,4 @@ from .penalty_admin import UserPenaltyPointsPerSpaceTypeAdmin
 from .ban_policy_admin import SpaceTypeBanPolicyAdmin
 from .user_ban_admin import UserSpaceTypeBanAdmin
 from .exemption_admin import UserSpaceTypeExemptionAdmin
+from .daily_booking_limit_admin import DailyBookingLimitAdmin

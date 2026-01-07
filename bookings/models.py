@@ -1,4 +1,5 @@
 # bookings/models.py
+from django.contrib.auth.models import Group
 from django.db import models
 from django.db.models import Manager, Index  # 导入 Manager, Index
 from datetime import timedelta
@@ -598,3 +599,44 @@ class UserSpaceTypeExemption(models.Model):
     def __str__(self):
         space_type_name = self.space_type.name if self.space_type else "全局"
         return f"{self.user.get_full_name} 豁免 {space_type_name}"
+
+# ====================================================================
+# DailyBookingLimit Model (每日预订限制)
+# ====================================================================
+class DailyBookingLimit(models.Model):
+    """
+    定义不同用户组的每日最大预订次数限制。
+    """
+    objects = models.Manager()
+
+    group = models.OneToOneField( # 使用 OneToOneField 确保每个组只有一条规则
+        Group,
+        on_delete=models.CASCADE,
+        related_name='daily_booking_limit',
+        verbose_name="用户组",
+        help_text="此每日预订限制规则应用的用户组。"
+    )
+    max_bookings = models.PositiveIntegerField(
+        default=0, # 0表示没有限制
+        verbose_name="每日最大预订次数",
+        help_text="该组用户每天最多可以进行的预订次数。设置为0表示没有限制。"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="是否启用此限制"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = '每日预订限制'
+        verbose_name_plural = verbose_name
+        ordering = ['group__name']
+        indexes = [
+            Index(fields=['group']),
+            Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        limit_str = f"{self.max_bookings} 次" if self.max_bookings > 0 else "无限制"
+        return f"{self.group.name} 每日预订限制: {limit_str} ({'启用' if self.is_active else '禁用'})"

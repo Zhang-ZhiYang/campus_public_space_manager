@@ -2,6 +2,7 @@
 from django.db import transaction
 from django.db.models import QuerySet
 from django.utils import timezone
+from datetime import datetime, time # 导入 datetime 和 time
 from typing import Dict, Any, Optional, List
 from django.contrib.auth import get_user_model
 
@@ -14,15 +15,14 @@ from core.service.factory import ServiceFactory  # 导入 ServiceFactory
 # 获取 CustomUser 模型
 CustomUser = get_user_model()
 
-
 class BookingService(BaseService):
     _dao_map = {
         'booking_dao': 'booking',
+        'daily_booking_limit_dao': 'daily_booking_limit', # <--- NEW: Added this DAO mapping
     }
 
     def __init__(self):
         super().__init__()
-        # 移除对 ViolationService 的直接引用，因为它现在与取消逻辑解耦了
         # self.violation_service = ServiceFactory.get_service('ViolationService')
 
     @transaction.atomic
@@ -121,28 +121,55 @@ class BookingService(BaseService):
 
         booking_data['user'] = user
 
+        # ====== 每日预订次数限制检查 - START ======
+        effective_max_daily_bookings = float('inf')  # 初始化为无限，表示无限制
+
+        user_group_ids = list(user.groups.values_list('id', flat=True))
+
+        if user_group_ids: # 只有当用户属于某个组时才检查限制
+            # 使用 DAO 获取活跃的限制，并按 max_bookings 升序排列，第一个就是最严格的
+            # get_active_limits_for_group_ids 已经过滤了 max_bookings > 0
+            active_limits = self.daily_booking_limit_dao.get_active_limits_for_group_ids(user_group_ids)
+
+            # 遍历所有适用的限制，取最严格的（最小值）
+            for limit_obj in active_limits:
+                effective_max_daily_bookings = min(effective_max_daily_bookings, limit_obj.max_bookings)
+
+        # 如果 effective_max_daily_bookings 仍然是 float('inf')，表示用户所属的组都没有设置限制，或者所有限制都是0（不限制）
+        if effective_max_daily_bookings != float('inf'):
+            today = timezone.localdate()
+            # 使用 DAO 方法获取用户今天已有的预订数量
+            bookings_today_count = self.booking_dao.get_user_bookings_count_for_date(
+                user, today, status_in=['PENDING', 'APPROVED', 'CHECKED_IN']
+            )
+
+            if bookings_today_count >= effective_max_daily_bookings:
+                return ServiceResult.error_result(
+                    message=f"您今天已达到最大预订次数限制 ({int(effective_max_daily_bookings)} 次)。请明天再尝试。",
+                    error_code="DAILY_LIMIT_EXCEEDED",
+                    status_code=BadRequestException.status_code
+                )
+        # ====== 每日预订次数限制检查 - END ======
+
         # ====== 自动化审批逻辑 - START ======
         if not requires_approval:
             booking_data['status'] = 'APPROVED'
-            # 自动批准的预订，reviewed_by 和 reviewed_at 也可以设置, 例如 None 或一个系统用户
-            # 但这里为了简化，在 DAO 的 create 方法里不手动设置，
-            # 依赖 Booking 模型 default 'PENDING' 然后自动覆写为 'APPROVED'。
-            # 重要的是，模型 clean 方法和信号会处理这些。
+            # 自动批准的预订，需要明确设置 reviewed_by 和 reviewed_at
+            booking_data['reviewed_by'] = None  # 表示系统自动审批，而非特定用户
+            booking_data['reviewed_at'] = timezone.now()
+            message_on_success = "预订已成功批准。"
         else:
             booking_data['status'] = 'PENDING'  # 默认就是 PENDING，这里明确写出
+            message_on_success = "预订请求已提交，等待审核。"
         # ====== 自动化审批逻辑 - END ======
 
         try:
             # create_booking 方法在 DAO 层调用了 full_clean() 和 save()
             new_booking = self.booking_dao.create_booking(**booking_data)
 
-            message = "预订请求已提交，等待审核。"
-            if not requires_approval:
-                message = "预订已成功批准。"
-
             return ServiceResult.success_result(
                 data=new_booking,
-                message=message,
+                message=message_on_success, # 使用更准确的消息
                 status_code=201
             )
         except Exception as e:
@@ -200,7 +227,7 @@ class BookingService(BaseService):
                 status_code=BadRequestException.status_code
             )
 
-        booking.status = 'CANCELLED'
+        booking.status = 'CANCELLED' # 这行将通过 update_booking_status 显式处理
         try:
             updated_booking = self.booking_dao.update_booking_status(booking, 'CANCELLED', admin_user=user,
                                                                      admin_notes="用户或管理员取消预订")
@@ -235,12 +262,12 @@ class BookingService(BaseService):
 
         # 批准/拒绝权限
         if new_status in ['APPROVED', 'REJECTED'] and not user.has_perm('bookings.can_approve_booking'):
-            has_permission = False
+            has_permission = False # 如果这里被设置为False，那么下面的if not has_permission会触发
 
         # 签到/签出权限
         if new_status in ['CHECKED_IN', 'CHECKED_OUT', 'NO_SHOW'] and not user.has_perm(
                 'bookings.can_check_in_booking'):
-            has_permission = False
+            has_permission = False # 同上
 
         if not has_permission:
             return ServiceResult.error_result(

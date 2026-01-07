@@ -1,5 +1,5 @@
 # bookings/dao/booking_dao.py
-from typing import Optional
+from typing import Optional, List
 
 from django.db.models import QuerySet
 from core.dao import BaseDAO
@@ -81,3 +81,12 @@ class BookingDAO(BaseDAO):
         if booking.bookable_amenity and booking.bookable_amenity.space:
             return booking.bookable_amenity.space
         return None
+    def get_user_bookings_count_for_date(self, user: CustomUser, date: timezone.localdate, status_in: List[str]) -> int:
+        """
+        获取用户在指定日期内，处于指定状态的预订数量。
+        """
+        return self.get_queryset().filter(
+            user=user,
+            start_time__date=date, # 筛选今天的预订
+            status__in=status_in # 统计进行中或待审核的预订
+        ).count()
