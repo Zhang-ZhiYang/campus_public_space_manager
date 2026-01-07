@@ -7,6 +7,7 @@ class BookingsConfig(AppConfig):
 
     def ready(self):
         # 局部导入以避免循环引用和AppRegistryNotReady错误
+        import bookings.signals
         from core.dao import DAOFactory
         from bookings.dao.booking_dao import BookingDAO
         from bookings.dao.violation_dao import ViolationDAO
