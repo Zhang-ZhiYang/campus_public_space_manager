@@ -4,8 +4,8 @@ from typing import Optional
 from django.db.models import QuerySet
 from core.dao import BaseDAO
 from bookings.models import Booking
-from spaces.models import Space, BookableAmenity  # 确保导入 Space 和 BookableAmenity
-
+from spaces.models import Space, BookableAmenity, CustomUser  # 确保导入 Space 和 BookableAmenity
+from django.utils import timezone # 导入 timezone
 
 class BookingDAO(BaseDAO):
     model = Booking
@@ -46,6 +46,21 @@ class BookingDAO(BaseDAO):
         """
         for attr, value in kwargs.items():
             setattr(booking_instance, attr, value)
+        booking_instance.full_clean()
+        booking_instance.save()
+        return booking_instance
+
+    def update_booking_status(self, booking_instance: Booking, new_status: str,
+                             admin_user: Optional[CustomUser] = None, admin_notes: Optional[str] = None) -> Booking:
+        """
+        专门用于更新预订状态的方法，会自动处理 reviewed_by 和 reviewed_at 字段。
+        """
+        booking_instance.status = new_status
+        if admin_user:
+            booking_instance.reviewed_by = admin_user
+            booking_instance.reviewed_at = timezone.now()
+        if admin_notes is not None:
+            booking_instance.admin_notes = admin_notes
         booking_instance.full_clean()
         booking_instance.save()
         return booking_instance
