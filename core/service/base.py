@@ -1,9 +1,15 @@
 # core/service/base.py
 from core.dao import DAOFactory
 from typing import Type, Dict, Any, Optional, List, Tuple
+import logging # 导入 logging
+
+# 导入 Django 的 ValidationError，以便在服务层捕获模型验证错误
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from core.service.service_result import ServiceResult
-from core.utils.exceptions import CustomAPIException, ForbiddenException, NotFoundException, ConflictException
+from core.utils.exceptions import CustomAPIException, ForbiddenException, NotFoundException, ConflictException, ServiceException, BadRequestException # 确保 ServiceException 也导入
+
+logger = logging.getLogger(__name__) # 初始化 logger for the base service
 
 class BaseService:
     """
@@ -22,42 +28,70 @@ class BaseService:
         """
         统一处理 service 内部抛出的异常，并将其封装为 ServiceResult。
         """
+        # 1. 优先处理我们自定义的 CustomAPIException 及其子类
         if isinstance(exc, CustomAPIException):
             return ServiceResult.error_result(
-                message=exc.detail if isinstance(exc.detail, str) else default_message,
-                errors=[str(exc.detail)] if isinstance(exc.detail, str) else list(exc.detail.values()) if isinstance(exc.detail, dict) else [default_message],
+                message=exc.detail if isinstance(exc.detail, str) else exc.default_detail,
+                errors=[str(exc.detail)] if isinstance(exc.detail, str) else ([value for key, value in exc.detail.items()] if isinstance(exc.detail, dict) else [exc.default_detail]), # 确保 errors 是列表
                 error_code=exc.code,
                 status_code=exc.status_code
             )
-        elif isinstance(exc, PermissionError): # Python 内置的权限错误
+        # 2. 处理我们自定义的 ServiceException (如果 Service 层直接抛出基类的 ServiceException)
+        elif isinstance(exc, ServiceException):
+            return ServiceResult.error_result(
+                message=exc.message,
+                errors=exc.errors or [str(exc)], # 确保 errors 是列表
+                error_code=exc.error_code,
+                status_code=exc.status_code
+            )
+        # 3. 处理 Django 的模型验证错误 (例如 DAO 层中调用 model.full_clean() 失败)
+        elif isinstance(exc, DjangoValidationError):
+            errors_list = []
+            if hasattr(exc, 'error_dict'): # 字段验证错误
+                for field, field_errors in exc.error_dict.items():
+                    errors_list.extend([f"[{field}]: {str(err)}" for err in field_errors])
+            elif hasattr(exc, 'message_dict'): # 非字段错误或表单错误
+                for field, field_errors in exc.message_dict.items():
+                    errors_list.extend([f"[{field}]: {str(err)}" for err in field_errors])
+            else: # 单个验证消息
+                errors_list = [str(exc)]
+
+            return ServiceResult.error_result(
+                message="数据验证失败。",
+                errors=errors_list,
+                error_code=BadRequestException.default_code, # 400 Bad Request
+                status_code=BadRequestException.status_code
+            )
+        # 4. Python 内置的权限错误 (例如文件访问权限等)
+        elif isinstance(exc, PermissionError):
             return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 errors=[str(exc)],
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code
             )
-        elif isinstance(exc, ValueError): # 通常是业务逻辑验证失败
+        # 5. 通用的参数或业务逻辑验证失败 (非 Django ValidationError)
+        elif isinstance(exc, ValueError):
             return ServiceResult.error_result(
-                message="参数或业务逻辑验证失败",
+                message="参数或业务逻辑验证失败。",
                 errors=[str(exc)],
                 error_code="validation_error",
-                status_code=400
+                status_code=BadRequestException.status_code # 400 Bad Request
             )
-        elif isinstance(exc, self._get_model_does_not_exist_exception()): # 模型未找到
+        # 6. 模型未找到异常 (例如通过 DAO.get() 或 get_queryset().get() 找不到时)
+        elif isinstance(exc, self._get_model_does_not_exist_exception()):
              return ServiceResult.error_result(
                 message=NotFoundException.default_detail,
                 errors=[str(exc)],
                 error_code=NotFoundException.default_code,
                 status_code=NotFoundException.status_code
             )
+        # 7. 其他所有未被明确处理的未知异常
         else:
-            # 记录未知异常
-            import logging
-            logger = logging.getLogger(self.__class__.__name__)
-            logger.exception(f"Unhandled exception in service: {exc}")
+            logger.exception(f"Unhandled exception in service: {exc}", exc_info=True) # 记录完整堆栈信息
             return ServiceResult.error_result(
                 message=default_message,
-                errors=[str(exc)],
+                errors=[str(exc)], # 确保 errors 是列表
                 error_code=default_code,
                 status_code=default_status_code
             )
@@ -67,14 +101,15 @@ class BaseService:
         尝试获取与当前服务相关的 DAO 模型的 DoesNotExist 异常。
         用于更精确地捕获模型未找到错误。
         """
-        # 这是一个简化版本，假设每个 BaseService 只有一个主 DAO。
-        # 如果需要更精确，可以遍历 _dao_map 中的所有 DAO 模型。
         if self._dao_map:
             first_dao_attr = next(iter(self._dao_map))
             dao_instance = getattr(self, first_dao_attr, None)
             if dao_instance and hasattr(dao_instance, 'model') and dao_instance.model:
                 return dao_instance.model.DoesNotExist
-        return None # 返回 None 或一个通用的异常（如 object does not exist）
+        # 如果没有找到对应的模型异常，返回一个通用的 ObjectDoesNotExist 异常。
+        # Django 的 ObjectDoesNotExist 是所有模型 DoesNotExist 的基类。
+        from django.core.exceptions import ObjectDoesNotExist
+        return ObjectDoesNotExist # 返回一个通用的异常类型
 
     @classmethod
     def get_instance(cls):

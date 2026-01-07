@@ -1,68 +1,68 @@
 # bookings/dao/booking_dao.py
-from django.db.models import Q, QuerySet
-from django.conf import settings
-from guardian.shortcuts import get_objects_for_user
+from typing import Optional
 
+from django.db.models import QuerySet
+from core.dao import BaseDAO
 from bookings.models import Booking
-from core.dao import BaseDAO # 导入 BaseDAO
+from spaces.models import Space, BookableAmenity  # 确保导入 Space 和 BookableAmenity
 
-CustomUser = settings.AUTH_USER_MODEL
 
 class BookingDAO(BaseDAO):
-    model = Booking # 明确指定这个DAO操作的模型
-
-    # __init__ 方法不再需要，会被 BaseDAO 自动处理
+    model = Booking
 
     def get_queryset(self) -> QuerySet[Booking]:
         """
-        覆盖 BaseDAO 的方法，可以添加默认的 select_related/prefetch_related。
+        获取基础 Booking QuerySet，并预加载常用关联对象以优化查询。
         """
         return super().get_queryset().select_related(
-            'user', 'reviewed_by', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
+            'user',
+            'space__space_type',
+            'bookable_amenity__amenity',
+            'bookable_amenity__space__space_type',
+            'reviewed_by'
         )
 
-    def get_bookings_for_admin_view(self, user: CustomUser, spaces_loaded: bool) -> QuerySet[Booking]:
-        qs = self.get_queryset() # 使用自身的 get_queryset 包含默认的 select_related
+    def get_booking_by_id(self, booking_id: int) -> Optional[Booking]:
+        """根据ID获取单个预订记录。"""
+        try:
+            return self.get_queryset().get(pk=booking_id)
+        except Booking.DoesNotExist:
+            return None
 
-        if user.is_superuser or user.is_system_admin:
-            return qs
+    def create_booking(self, **kwargs) -> Booking:
+        """
+        创建新的 Booking 实例。
+        确保调用实例的 full_clean() 和 save()，以便触发表单校验和模型信号。
+        """
+        instance = self.model(**kwargs)
+        instance.full_clean()  # 触发 Booking 模型的 clean 方法，包括预订冲突和禁用检查
+        instance.save()  # 触发 post_save 信号（如果 Booking 有的话）
+        return instance
 
-        if not spaces_loaded:
-            return qs.none()
+    def update_booking(self, booking_instance: Booking, **kwargs) -> Booking:
+        """
+        更新现有的 Booking 实例。
+        确保调用实例的 full_clean() 和 save()，以便触发表单校验和模型信号。
+        """
+        for attr, value in kwargs.items():
+            setattr(booking_instance, attr, value)
+        booking_instance.full_clean()
+        booking_instance.save()
+        return booking_instance
 
-        # 局部导入以避免潜在的循环依赖
-        from spaces.models import Space, BookableAmenity
+    def delete_booking(self, booking_instance: Booking) -> None:
+        """
+        删除指定的 Booking 实例。
+        """
+        booking_instance.delete()
 
-        managed_spaces_ids = get_objects_for_user(
-            user, 'spaces.can_manage_space_bookings', klass=Space
-        ).values_list('id', flat=True)
-
-        managed_amenities_ids = get_objects_for_user(
-            user, 'spaces.can_manage_bookable_amenity', klass=BookableAmenity
-        ).values_list('id', flat=True)
-
-        return qs.filter(
-            Q(space__id__in=managed_spaces_ids) | Q(bookable_amenity__id__in=managed_amenities_ids)
-        )
-
-    # get_target_space_for_booking 和 create_booking 等通用方法可以保持不变或整合进service层
-    # 如果 create 不需要特殊逻辑，可以直接调用 self.create(**kwargs)
-    # create_booking 留在这里如果它提供了特定于Booking的便捷接口
-
-    def get_target_space_for_booking(self, booking: Booking):
-        # 这个方法不直接访问数据库，可以保持在DAO或移动到Service
-        return booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-
-    # 对于 create_booking，如果它只是简单地调用 model.objects.create，可以改为直接使用 self.create
-    # 如果有额外的逻辑，例如设置默认值，则保留它
-    def create_booking(self, user: CustomUser, space=None, amenity=None, quantity=1,
-                       purpose="", start_time=None, end_time=None):
-        return self.create( # 调用BaseDAO的create方法
-            user=user,
-            space=space,
-            bookable_amenity=amenity,
-            booked_quantity=quantity,
-            purpose=purpose,
-            start_time=start_time,
-            end_time=end_time
-        )
+    def get_target_space_for_booking(self, booking: Booking) -> Optional[Space]:
+        """
+        根据 Booking 实例，返回它所针对的 Space 对象。
+        无论是直接预订空间还是预订空间内的设施，都返回其父空间。
+        """
+        if booking.space:
+            return booking.space
+        if booking.bookable_amenity and booking.bookable_amenity.space:
+            return booking.bookable_amenity.space
+        return None

@@ -197,14 +197,10 @@ class BookableAmenity(models.Model):
         activity_status = "活跃" if self.is_active else "不活跃"
         return f"{self.space.name} 的 {self.amenity.name} (数量: {self.quantity}, 状态: {activity_status})"
 
-# ====================================================================
-# Space Model (空间)
-# ====================================================================
 class Space(models.Model):
     """
     可预订空间模型，定义了每个空间的属性和预订规则。
     """
-    # CRITICAL FIX: 使用默认的 models.Manager
     objects = models.Manager()
 
     name = models.CharField(max_length=255, unique=True, verbose_name="空间名称")
@@ -294,6 +290,7 @@ class Space(models.Model):
         ordering = ['name']
         permissions = (
             ("can_book_this_space", "Can book this specific space"),
+            ("can_book_amenities_in_space", "Can book amenities within this space"), # <--- 新增权限
             ("can_manage_space_details", "Can manage details of this specific space"),
             ("can_manage_space_bookings", "Can manage bookings of this specific space"),
             ("can_manage_space_amenities", "Can manage amenities of this specific space"),
@@ -392,6 +389,7 @@ def assign_space_management_permissions(sender, instance, created, **kwargs):
         'can_manage_space_bookings',
         'can_manage_space_amenities',
         'can_book_this_space',
+        'can_book_amenities_in_space', # <--- 管理员也应该有这个权限
     ]
 
     old_managed_by = getattr(instance, '_old_managed_by', None)
@@ -415,4 +413,5 @@ def assign_amenity_management_permissions(sender, instance, created, **kwargs):
     """
     if instance.space and instance.space.managed_by:
         manager = instance.space.managed_by
+        # 这个权限是管理“设施实例”的，与预订设施的权限不同
         assign_perm('spaces.can_manage_bookable_amenity', manager, instance)

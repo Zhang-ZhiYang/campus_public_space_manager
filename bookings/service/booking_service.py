@@ -1,122 +1,181 @@
 # bookings/service/booking_service.py
 from django.db import transaction
-from django.utils import timezone
-from typing import List, Tuple
 from django.db.models import QuerySet
+from django.utils import timezone
+from typing import Dict, Any, Optional
+from django.contrib.auth import get_user_model
 
 from bookings.models import Booking
-from core.service import BaseService, ServiceResult  # 导入 BaseService 和 ServiceResult
-from core.utils.exceptions import ForbiddenException, BadRequestException
+from spaces.models import Space, BookableAmenity
+from core.service import BaseService, ServiceResult
+from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException, ServiceException
 
-
-# Lazy import models if used only in methods to avoid circular dependency
-# from spaces.models import Space, BookableAmenity
+# 获取 CustomUser 模型
+CustomUser = get_user_model()
 
 class BookingService(BaseService):
-    _dao_map = {  # 定义需要注入的 DAO
-        'booking_dao': 'booking',
-        'violation_dao': 'violation',
+    _dao_map = {
+        'booking_dao': 'booking',  # 映射到 bookings.dao.booking_dao.BookingDAO
     }
 
-    # BaseService 的 __init__ 会自动处理 DAO 的注入
+    @transaction.atomic
+    def create_booking(self, user: CustomUser, booking_data: Dict[str, Any]) -> ServiceResult[Booking]:
+        """
+        创建新的预订，包含权限检查和业务逻辑校验。
+        booking_data 应包含 'space_id' 或 'bookable_amenity_id'。
+        其他字段如 'start_time', 'end_time', 'purpose', 'booked_quantity' 等。
+        """
+        space_id = booking_data.pop('space_id', None)
+        bookable_amenity_id = booking_data.pop('bookable_amenity_id', None)
 
-    def get_admin_bookings_queryset(self, user, spaces_loaded: bool) -> QuerySet[Booking]:
+        # 预加载相关对象以减少查询
+        target_space: Optional[Space] = None
+        target_amenity: Optional[BookableAmenity] = None
+
+        if space_id:
+            target_space = Space.objects.select_related('space_type').prefetch_related('restricted_groups').filter(pk=space_id).first()
+            if not target_space:
+                return ServiceResult.error_result(
+                    message="空间不存在。",
+                    error_code=NotFoundException.default_code,
+                    status_code=NotFoundException.status_code
+                )
+
+            # ====== 权限和可用性检查：预订整个空间 ======
+            # FIX: 删除 target_space 参数，将其变为全局权限检查
+            if not user.has_perm('spaces.can_book_this_space'):
+                return ServiceResult.error_result(
+                    message=f"您没有权限预订任何空间。", # 修改错误消息，使其更通用
+                    error_code=ForbiddenException.default_code,
+                    status_code=ForbiddenException.status_code
+                )
+            if not target_space.is_bookable or not target_space.is_active:
+                return ServiceResult.error_result(
+                    message=f"空间 '{target_space.name}' 不可预订或未启用。",
+                    error_code=BadRequestException.default_code,
+                    status_code=BadRequestException.status_code
+                )
+            # 检查用户所属的组是否在 Restricted Groups 中
+            if user.groups.filter(pk__in=target_space.restricted_groups.values_list('pk', flat=True)).exists():
+                return ServiceResult.error_result(
+                    message=f"抱歉，您所属的用户组被限制预订空间 '{target_space.name}'。",
+                    error_code=ForbiddenException.default_code,
+                    status_code=ForbiddenException.status_code
+                )
+            booking_data['space'] = target_space
+
+        elif bookable_amenity_id:
+            # 预加载 BookableAmenity 及其关联的 Space 和 Amenity
+            target_amenity = BookableAmenity.objects.select_related(
+                'amenity', 'space__space_type'
+            ).prefetch_related('space__restricted_groups').filter(pk=bookable_amenity_id).first()
+
+            if not target_amenity:
+                return ServiceResult.error_result(
+                    message="可预订设施实例不存在。",
+                    error_code=NotFoundException.default_code,
+                    status_code=NotFoundException.status_code
+                )
+
+            parent_space = target_amenity.space
+            if not parent_space:
+                return ServiceResult.error_result(
+                    message="可预订设施所属空间不存在。",
+                    error_code=NotFoundException.default_code,
+                    status_code=NotFoundException.status_code
+                )
+
+            # ====== 权限和可用性检查：预订空间下的设施 ======
+            # FIX: 删除 parent_space 参数，使其成为全局权限检查。
+            # 这样，只要用户拥有 'spaces.can_book_amenities_in_space' 这个全局权限，
+            # 这一步就会通过。后续的 restricted_groups 自然会提供对象级限制。
+            if not user.has_perm('spaces.can_book_amenities_in_space'):
+                # 调整错误消息，使其更符合全局权限缺失的语境
+                return ServiceResult.error_result(
+                    message=f"您没有权限预订任何设施。", # 修改错误消息
+                    error_code=ForbiddenException.default_code,
+                    status_code=ForbiddenException.status_code
+                )
+            if not target_amenity.is_bookable or not target_amenity.is_active:
+                return ServiceResult.error_result(
+                    message=f"设施 '{target_amenity.amenity.name}' (在 '{parent_space.name}' 中) 不可预订或未启用。",
+                    error_code=BadRequestException.default_code,
+                    status_code=BadRequestException.status_code
+                )
+            # 设施预订是否继承父空间的受限组？通常是的。
+            if user.groups.filter(pk__in=parent_space.restricted_groups.values_list('pk', flat=True)).exists():
+                return ServiceResult.error_result(
+                    message=f"抱歉，您所属的用户组被限制预订空间 '{parent_space.name}' 下的设施。",
+                    error_code=ForbiddenException.default_code,
+                    status_code=ForbiddenException.status_code
+                )
+            booking_data['bookable_amenity'] = target_amenity
+        else:
+            return ServiceResult.error_result(
+                message="预订必须指定一个空间或可预订设施。",
+                error_code=BadRequestException.default_code,
+                status_code=BadRequestException.status_code
+            )
+
+        # 填充其他必要的 Booking 字段
+        booking_data['user'] = user
+
         try:
-            return self.booking_dao.get_bookings_for_admin_view(user, spaces_loaded)
-        except Exception as e:
-            # 这里的 get_admin_bookings_queryset 是返回 QuerySet 供 Admin 使用，
-            # 不应该返回 ServiceResult。如果真的有异常，应该向上抛出让 Admin 处理。
-            # 或者，如果 DAO 已经封装了 none()，直接返回 none() 是更优雅的方式。
-            # 这里按照原 Admin 逻辑，直接返回 QuerySet
-            return self.booking_dao.get_queryset().none()  # 返回空 QuerySet，错误留待Admin消息提示
-
-    def _check_booking_permission(self, user, booking: Booking, permission_codename: str) -> bool:
-        from spaces.models import Space  # 延迟导入
-        target_space = self.booking_dao.get_target_space_for_booking(booking)
-        return user.is_superuser or user.is_system_admin or \
-            (target_space and user.has_perm(permission_codename, target_space))
-
-    @transaction.atomic
-    def approve_bookings(self, user, queryset: QuerySet[Booking]) -> ServiceResult[Tuple[int, int]]:
-        approved_count = 0
-        warnings = []
-        errors = []
-        for booking in queryset:
-            if booking.status == 'PENDING':
-                if self._check_booking_permission(user, booking, 'spaces.can_manage_space_bookings') or \
-                        user.has_perm('bookings.can_approve_booking'):
-                    try:
-                        self.booking_dao.update(
-                            booking,
-                            status='APPROVED',
-                            reviewed_by=user,
-                            reviewed_at=timezone.now()
-                        )
-                        approved_count += 1
-                    except Exception as e:
-                        errors.append(f"批准预订 {booking.id} 失败: {e}")
-                else:
-                    errors.append(f"您没有权限批准预订 {booking.id}。")
-            else:
-                warnings.append(f"预订 {booking.id} 状态为 {booking.status}，无法批准。")
-
-        if errors:
-            return ServiceResult.error_result(
-                message="部分预订操作失败", errors=errors + warnings,
-                error_code=BadRequestException.default_code, status_code=BadRequestException.status_code
-            )
-        if warnings and approved_count == 0:
+            new_booking = self.booking_dao.create_booking(**booking_data)
             return ServiceResult.success_result(
-                data=(approved_count, len(warnings)), message="操作完成，但存在警告。", warnings=warnings
+                data=new_booking,
+                message="预订请求已提交。",
+                status_code=201 # 现在 ServiceResult.success_result 支持 status_code
             )
-        return ServiceResult.success_result(
-            data=(approved_count, len(warnings)), message=f"成功批准了 {approved_count} 条预订。", warnings=warnings
-        )
+        except Exception as e:
+            # FIX: 将 status_code 改为 default_status_code
+            return self._handle_exception(e, default_message=f"创建预订失败: {e}",
+                                          default_status_code=BadRequestException.status_code)
 
-    # ... 其他 methods 类似修改 ...
+    # TODO: 添加其他预订管理方法，如 get_user_bookings, cancel_booking, update_booking_status 等
+    def get_user_bookings(self, user: CustomUser) -> QuerySet[Booking]:
+        """
+        获取用户的所有预订记录。
+        """
+        return self.booking_dao.get_queryset().filter(user=user)
+
     @transaction.atomic
-    def mark_no_show_and_violate(self, user, queryset: QuerySet[Booking]) -> ServiceResult[Tuple[int, int]]:
-        no_show_count = 0
-        violation_count = 0
-        warnings = []
-        errors = []
-        for booking in queryset:
-            if self._check_booking_permission(user, booking, 'spaces.can_manage_space_bookings') or \
-                    user.has_perm('bookings.can_check_in_booking'):
-                if booking.status in ['PENDING', 'APPROVED'] and booking.end_time < timezone.now():
-                    try:
-                        self.booking_dao.update(booking, status='NO_SHOW')
-                        no_show_count += 1
-
-                        target_space = self.booking_dao.get_target_space_for_booking(booking)
-                        space_type_for_violation = target_space.space_type if target_space else None
-                        if space_type_for_violation:
-                            self.violation_dao.create_violation(
-                                user=booking.user,
-                                booking=booking,
-                                space_type=space_type_for_violation,
-                                violation_type='NO_SHOW',
-                                description=f"用户 {booking.user.get_full_name} 未在 {getattr(target_space, 'name', '未知空间')} 预订中签到。",
-                                issued_by=user,
-                                penalty_points=1
-                            )
-                            violation_count += 1
-                        else:
-                            warnings.append(f"预订 {booking.id} 无法确定空间类型，未能创建违规记录。")
-                    except Exception as e:
-                        errors.append(f"标记预订 {booking.id} 为未到场或创建违规记录失败: {e}")
-                else:
-                    warnings.append(f"预订 {booking.id} 状态为 {booking.status} 或未过期，无法标记为未到场。")
-            else:
-                errors.append(f"您没有权限对预订 {booking.id} 进行未到场标记或创建违规记录。")
-
-        if errors:
+    def cancel_booking(self, user: CustomUser, booking_id: int) -> ServiceResult[Booking]:
+        """
+        取消一个预订。需要权限检查。
+        """
+        booking = self.booking_dao.get_booking_by_id(booking_id)
+        if not booking:
             return ServiceResult.error_result(
-                message="部分预订操作失败", errors=errors + warnings,
-                error_code=BadRequestException.default_code, status_code=BadRequestException.status_code
+                message="预订不存在。",
+                error_code=NotFoundException.default_code,
+                status_code=NotFoundException.status_code
             )
-        return ServiceResult.success_result(
-            data=(no_show_count, violation_count),
-            message=f"成功标记 {no_show_count} 条预订为未到场，创建 {violation_count} 条违规记录。",
-            warnings=warnings
-        )
+
+        # 权限检查：用户只能取消自己的预订，或有管理权限的管理员可以取消
+        if booking.user != user and not (user.is_superuser or user.is_system_admin):
+            # 也可以进一步细化，检查空间管理员是否有权限取消其管理空间下的预订
+            target_space = self.booking_dao.get_target_space_for_booking(booking)
+            if not (target_space and user.has_perm('spaces.can_manage_space_bookings', target_space)):
+                return ServiceResult.error_result(
+                    message="您没有权限取消此预订。",
+                    error_code=ForbiddenException.default_code,
+                    status_code=ForbiddenException.status_code
+                )
+
+        if booking.status in ['CANCELLED', 'COMPLETED', 'REJECTED']:
+            return ServiceResult.error_result(
+                message=f"预订 '{booking_id}' 状态为 '{booking.get_status_display()}'，无法取消。",
+                error_code=BadRequestException.default_code,
+                status_code=BadRequestException.status_code
+            )
+
+        # TODO: 可以在这里添加取消惩罚逻辑
+
+        booking.status = 'CANCELLED'
+        try:
+            updated_booking = self.booking_dao.update_booking(booking, status='CANCELLED')
+            return ServiceResult.success_result(data=updated_booking, message="预订已取消。", status_code=200) # status_code 可以在取消时传入
+        except Exception as e:
+            # FIX: 将 status_code 改为 default_status_code
+            return self._handle_exception(e, default_message=f"取消预订失败: {e}", default_status_code=BadRequestException.status_code)

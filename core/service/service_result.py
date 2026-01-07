@@ -23,9 +23,11 @@ class ServiceResult(Generic[T]):
 
     @classmethod
     def success_result(cls, data: T = None, message: str = "操作成功",
-                       warnings: Optional[List[str]] = None) -> 'ServiceResult[T]':
+                       warnings: Optional[List[str]] = None,
+                       status_code: Optional[int] = 200) -> 'ServiceResult[T]': # <-- NEW: 添加 status_code 参数
         """创建一个成功的 ServiceResult 实例。"""
-        return cls(success=True, data=data, message=message, warnings=warnings)
+        # NEW: 将 status_code 传递给 ServiceResult 构造函数
+        return cls(success=True, data=data, message=message, warnings=warnings, status_code=status_code)
 
     @classmethod
     def error_result(cls, message: str = "操作失败", errors: Optional[List[str]] = None,
