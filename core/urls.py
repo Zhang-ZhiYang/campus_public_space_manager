@@ -22,7 +22,7 @@ urlpatterns = [
 
     # --- API v1 路由 (保持不变) ---
     path('api/v1/users/', include('users.urls')),
-    # path('api/v1/spaces/', include('spaces.urls')),
+    path('api/v1/spaces/', include('spaces.api.urls')),
     path('api/v1/bookings/', include('bookings.api.urls', namespace='bookings_api')),
     # path('api/v1/notifications/', include('notifications.urls')),
 
