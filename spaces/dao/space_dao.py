@@ -1,64 +1,86 @@
 # spaces/dao/space_dao.py
+from typing import Optional, List
 from django.db.models import QuerySet
-from django.conf import settings
-from guardian.shortcuts import get_objects_for_user
-from typing import List, Tuple, Type, Any
-
-from spaces.models import Space, SpaceType, BookableAmenity
-# from bookings.models import Booking # 延迟导入
 from core.dao import BaseDAO
+from spaces.models import Space, BookableAmenity  # , CustomUser # CustomUser 在 DAO 中通常不需要直接导入
 
-# 获取 CustomUser 模型
-CustomUser = settings.AUTH_USER_MODEL
 
 class SpaceDAO(BaseDAO):
     model = Space
 
     def get_queryset(self) -> QuerySet[Space]:
-        return super().get_queryset().select_related('space_type', 'parent_space', 'managed_by').prefetch_related('restricted_groups')
+        """
+        获取基础 Space QuerySet，并预加载常用关联对象以优化查询。
+        FIX: 将 'restricted_groups' 替换为 'permitted_groups'。
+        """
+        return super().get_queryset().select_related(
+            'space_type',
+            'parent_space',
+            'managed_by'
+        ).prefetch_related(
+            # 'children_spaces',  # 预加载子空间
+            # FIX: 原来的 'restricted_groups' 必须改为 'permitted_groups'
+            'permitted_groups'  # 这是关键的修正！
+        )
 
-    def get_spaces_for_user_management(self, user: CustomUser) -> QuerySet[Space]:
+    def get_by_id(self, pk: int) -> Optional[Space]:
+        """按ID获取单个空间，并确保使用预加载的 queryset。"""
+        try:
+            return self.get_queryset().get(pk=pk)
+        except self.model.DoesNotExist:
+            return None
+
+    def get_spaces_for_user_management(self, user) -> QuerySet[Space]:
         """
-        Retrieves spaces that the given user has 'can_manage_space_details' permission for.
-        Used for Admin list views.
+        获取用户有权限管理的空间。
+        这通常用于空间管理员，他们可以管理那些由他们或他们的团队管理的特定空间。
         """
-        if user.is_superuser or user.is_system_admin:
+        # 如果用户是系统管理员或超级管理员，他们可以管理所有空间
+        if user.is_superuser or getattr(user, 'is_system_admin', False):
             return self.get_queryset()
 
-        # Guardian's get_objects_for_user requires a class or a queryset.
-        # We pass self.get_queryset() as klass to restrict it to already pre-fetched/selected related data if any.
-        return get_objects_for_user(user, 'spaces.can_manage_space_details', klass=self.get_queryset())
+        # 否则，列出用户通过 guardian 有 'can_manage_space_details' 权限的空间
+        # 确保只返回活跃且可预订的空间
+        return user.get_all_objects_with_perms(Space, perms=['spaces.can_manage_space_details']).filter(is_active=True,
+                                                                                                        is_bookable=True)
 
     def space_has_children(self, space: Space) -> bool:
-        return space.child_spaces.exists()
+        """检查空间是否有子空间。"""
+        # 使用 related_name 'children_spaces'
+        return space.children_spaces.exists()
 
-    def space_has_bookings(self, space: Space, BookingModel: Type[Any]) -> bool: # Changed Type['Booking'] to Type[Any] to avoid direct circular import
+    def space_has_bookings(self, space: Space, BookingModel) -> bool:
         """
-        Checks if a space has any associated bookings.
-        Requires BookingModel to be passed in to avoid circular dependency.
+        检查空间是否有活跃或待处理的预订记录。
+        需要传入 BookingModel 以避免循环导入。
         """
-        # 延迟导入 BookingModel，这里仍然需要外部传入
-        return BookingModel.objects.filter(space=space).exists()
+        return BookingModel.objects.filter(
+            space=space,
+            status__in=['PENDING', 'APPROVED', 'CHECKED_IN']  # 仅考虑活跃或待处理的预订
+        ).exists() or BookingModel.objects.filter(
+            bookable_amenity__space=space,
+            status__in=['PENDING', 'APPROVED', 'CHECKED_IN']
+        ).exists()
 
-    def space_amenities_have_bookings(self, space: Space, BookableAmenityModel: Type[BookableAmenity],
-                                      BookingModel: Type[Any]) -> bool: # Changed Type['Booking'] to Type[Any]
-        """
-        Checks if any bookable amenity within a space has associated bookings.
-        Requires BookableAmenityModel and BookingModel to be passed in.
-        """
-        # Assuming there's a reverse relation from Booking to BookableAmenity, like `related_name='amenity_bookings'`
-        # So it would be `ba.amenity_bookings.exists()` for each BookableAmenity instance.
-        # The logic has been moved to SpaceService for better modularity.
-        # This DAO method might still be useful if we want to query directly for bookings related to amenities of a space
-        return BookingModel.objects.filter(bookable_amenity__space=space).exists()
-
-# BookableAmenity DAO for Inline, needs to be separate to be registered
 class BookableAmenityDAO(BaseDAO):
     model = BookableAmenity
 
     def get_queryset(self) -> QuerySet[BookableAmenity]:
-        return super().get_queryset().select_related('amenity', 'space__space_type')
+        """
+        获取基础 BookableAmenity QuerySet，并预加载常用关联对象以优化查询。
+        """
+        return super().get_queryset().select_related(
+            'space__space_type',
+            'amenity'
+        )
+
+    def get_bookable_amenity_by_id(self, pk: int) -> Optional[BookableAmenity]:
+        """根据ID获取单个可预订设施实例。"""
+        try:
+            return self.get_queryset().get(pk=pk)
+        except self.model.DoesNotExist:
+            return None
 
     def get_bookable_amenities_for_space(self, space: Space) -> QuerySet[BookableAmenity]:
-        """Retrieves bookable amenities for a specific space."""
+        """获取指定空间下的所有可预订设施实例。"""
         return self.get_queryset().filter(space=space)

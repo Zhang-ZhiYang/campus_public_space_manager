@@ -20,6 +20,9 @@ class BookingDAO(BaseDAO):
             'bookable_amenity__amenity',
             'bookable_amenity__space__space_type',
             'reviewed_by'
+        ).prefetch_related( # NEW: 预加载 permitted_groups
+            'space__permitted_groups',
+            'bookable_amenity__space__permitted_groups'
         )
 
     def get_booking_by_id(self, booking_id: int) -> Optional[Booking]:

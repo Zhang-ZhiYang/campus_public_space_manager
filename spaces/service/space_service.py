@@ -11,7 +11,7 @@ from spaces.models import Space, Amenity, BookableAmenity
 from django.contrib.auth import get_user_model
 from guardian.shortcuts import get_objects_for_user, assign_perm
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)  # 获取 logger 实例
 CustomUser = get_user_model()
 
 
@@ -48,20 +48,19 @@ class SpaceService(BaseService):
 
                 user_groups_pks = list(user.groups.values_list('pk', flat=True))
 
-                # Q(permitted_groups__in=user_groups_pks) 当 user_groups_pks 为空列表时，该条件将筛选出没有任何 permitted_groups 的实例
-                # 预期行为是：如果 permitted_groups 为空，且空间类型非基础型，则普通用户无法访问
-                # 因此，我们需要确保 permitted_groups__in 不为空的情况下才激活这个条件
+                # 如果 user_groups_pks 为空，group_permitted_condition 应该不匹配任何空间
                 group_permitted_condition = Q(pk__in=[])  # 默认不匹配
                 if user_groups_pks:  # 只有当用户有所属组时，才检查 permitted_groups
                     group_permitted_condition = Q(
                         space_type__is_basic_infrastructure=False,
                         permitted_groups__in=user_groups_pks
                     )
+                # 否则，如果 user_groups_pks 为空，group_permitted_condition 保持 Q(pk__in=[])，不会匹配任何非基础型且有白名单的空间。
 
                 # 组合条件：满足其一是可访问的
                 spaces_qs = base_qs.filter(basic_infra_condition | group_permitted_condition).distinct()
             else:
-                # 未认证用户，默认不可见任何空间 (如果需要公开显示部分空间，需要另外的逻辑)
+                # 未认证用户，默认不可见任何空间
                 spaces_qs = base_qs.none()
 
             return ServiceResult.success_result(
@@ -70,6 +69,7 @@ class SpaceService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"Exception getting all spaces for user {user.username}.")
             return self._handle_exception(e, default_message="获取空间列表失败。")
 
     def get_space_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Space]:
@@ -79,6 +79,7 @@ class SpaceService(BaseService):
         try:
             space = self.space_dao.get_by_id(pk)
             if not space:
+                logger.debug(f"DEBUG_PERM: Space with ID {pk} not found.")
                 return ServiceResult.error_result(
                     message="空间未找到。",
                     error_code=NotFoundException.default_code,
@@ -88,47 +89,80 @@ class SpaceService(BaseService):
             can_view = False
             # 首先确保空间本身是活跃且可预订的
             if not space.is_active or not space.is_bookable:
+                logger.debug(f"DEBUG_PERM: Space {space.name} (ID:{space.id}) is not active or not bookable.")
                 can_view = False
             elif user.is_superuser or getattr(user, 'is_system_admin', False):
+                logger.debug(
+                    f"DEBUG_PERM: User {user.username} (ID:{user.id}) is superuser or system admin. Granting view access.")
                 can_view = True
             elif user.is_authenticated and getattr(user, 'is_space_manager', False):
                 # 空间管理员可以管理其有权限的空间
                 can_view = user.has_perm('spaces.can_manage_space_details', space)
+                logger.debug(
+                    f"DEBUG_PERM: User {user.username} (ID:{user.id}) is space manager. Has 'can_manage_space_details' perm for {space.name}: {can_view}.")
             elif user.is_authenticated:
                 # 非管理员、非空间管理员的普通用户访问逻辑
+
+                # 获取 is_basic_infrastructure 的值
                 is_basic_infrastructure = space.space_type and space.space_type.is_basic_infrastructure
 
                 user_is_in_permitted_groups = False
+
+                # 获取用户所属组的名称列表 (仅用于日志)
+                user_groups_names = [g.name for g in user.groups.all()]
+                # 获取空间白名单组的名称列表 (仅用于日志)
+                space_permitted_groups_names = [g.name for g in space.permitted_groups.all()]
+
+                # 检查用户是否在空间的白名单组中
                 if space.permitted_groups.exists() and user.groups.exists():  # 只有当用户有组且空间指定了允许组才检查
                     user_is_in_permitted_groups = user.groups.filter(pk__in=space.permitted_groups.all()).exists()
 
-                # 访问条件：
-                # (1) 空间类型是基础型基础设施 (对所有已认证用户开放)
-                # OR
-                # (2) 空间类型非基础型基础设施 AND (空间指定了 permitted_groups 且用户属于其中之一)
+                # --- 以下是关键日志输出 ---
+                logger.debug(
+                    f"DEBUG_PERM: User {user.username} (ID:{user.id}) attempting to access Space {space.name} (ID:{space.id}) as normal authenticated user.")
+                logger.debug(
+                    f"DEBUG_PERM: SpaceType '{space.space_type.name}' is_basic_infrastructure: {is_basic_infrastructure}")
+                logger.debug(f"DEBUG_PERM: User {user.username} belongs to groups: {user_groups_names}")
+                logger.debug(f"DEBUG_PERM: Space {space.name} has permitted_groups: {space_permitted_groups_names}")
+                logger.debug(f"DEBUG_PERM: Is user in space's permitted_groups? {user_is_in_permitted_groups}")
+
+                # 访问条件判断
                 if is_basic_infrastructure:
                     can_view = True
+                    logger.debug(
+                        f"DEBUG_PERM: Condition 1 met: SpaceType is_basic_infrastructure is True. Granting view access.")
                 elif not is_basic_infrastructure and user_is_in_permitted_groups:
                     can_view = True
+                    logger.debug(
+                        f"DEBUG_PERM: Condition 2 met: SpaceType is NOT basic infrastructure AND user is in permitted_groups. Granting view access.")
                 else:
                     can_view = False  # 不满足任何条件
+                    logger.debug(f"DEBUG_PERM: No access condition met for normal user. Denying view access.")
+
+                logger.debug(f"DEBUG_PERM: Final can_view for normal user: {can_view}")
 
             else:  # 未认证用户
+                logger.debug(f"DEBUG_PERM: User is not authenticated. Denying view access.")
                 can_view = False
 
             if not can_view:
+                # 如果 can_view 为 False，则返回禁止访问错误
+                logger.warning(
+                    f"DEBUG_PERM: User {user.username} was FORBIDDEN from accessing Space {space.name} (ID:{space.id}). Raising ForbiddenException.")
                 return ServiceResult.error_result(
                     message=ForbiddenException.default_detail,
                     error_code=ForbiddenException.default_code,
                     status_code=ForbiddenException.status_code
                 )
 
+            logger.debug(f"DEBUG_PERM: User {user.username} has access to Space {space.name}.")
             return ServiceResult.success_result(
                 data=space,
                 message="成功获取空间详情。",
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"Exception in get_space_by_id for user {user.username}, space {pk}.")
             return self._handle_exception(e, default_message="获取空间详情失败。")
 
     @transaction.atomic
@@ -168,6 +202,11 @@ class SpaceService(BaseService):
                 if not new_space.managed_by:
                     new_space.managed_by = user
                     new_space.save(update_fields=['managed_by'])
+                # 还需要给空间管理员分配新创建的空间的 can_manage_space_details 权限
+                assign_perm('spaces.can_manage_space_details', user, new_space)
+                # 分配设施管理权限, 预订管理权限
+                assign_perm('spaces.can_manage_space_amenities', user, new_space)
+                assign_perm('spaces.can_manage_space_bookings', user, new_space)
 
             self._update_space_amenities(new_space, amenity_ids)
 
@@ -177,6 +216,7 @@ class SpaceService(BaseService):
                 status_code=201
             )
         except Exception as e:
+            logger.exception(f"Exception creating space by user {user.username}.")
             return self._handle_exception(e, default_message="创建空间失败。")
 
     @transaction.atomic
@@ -229,6 +269,7 @@ class SpaceService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"Exception updating space {pk} by user {user.username}.")
             return self._handle_exception(e, default_message="更新空间失败。")
 
     @transaction.atomic
@@ -288,6 +329,7 @@ class SpaceService(BaseService):
                 status_code=204
             )
         except Exception as e:
+            logger.exception(f"Exception deleting space {pk} by user {user.username}.")
             return self._handle_exception(e, default_message="删除空间失败。")
 
     @transaction.atomic
