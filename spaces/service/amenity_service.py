@@ -24,6 +24,7 @@ class AmenityService(BaseService):
         获取所有设施类型。
         """
         try:
+            # 设施类型本身不对普通用户进行额外权限过滤，任何人都可以看到有哪些类型的设施
             amenities = self.amenity_dao.get_all()
             return ServiceResult.success_result(
                 data=amenities,
@@ -47,8 +48,11 @@ class AmenityService(BaseService):
                 )
 
             # 目前假设只有系统管理员或超级管理员可以查看设施类型的详细配置
+            # 如果需要根据 Space 的权限来展示 Amenity 类型（例如，SpaceManager 可以看对应 Space 的 Amenity 类型），
+            # 需要在 Amenity model 增加对 Space 的关联或者其他逻辑。
+            # 目前，保留Amenity Type的详情只有高权限用户可见的设定。
             if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-                return ServiceResult.error_result(  # <--- 修改这里
+                return ServiceResult.error_result(
                     message=ForbiddenException.default_detail,
                     error_code=ForbiddenException.default_code,
                     status_code=ForbiddenException.status_code
@@ -68,7 +72,7 @@ class AmenityService(BaseService):
         创建新的设施类型。只有系统管理员可以操作。
         """
         if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-            return ServiceResult.error_result(  # <--- 修改这里
+            return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code
@@ -90,7 +94,7 @@ class AmenityService(BaseService):
         更新设施类型。只有系统管理员可以操作。
         """
         if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-            return ServiceResult.error_result(  # <--- 修改这里
+            return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code
@@ -121,7 +125,7 @@ class AmenityService(BaseService):
         在删除前需要检查是否有 BookableAmenity 绑定到该 Amenity。
         """
         if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-            return ServiceResult.error_result(  # <--- 修改这里
+            return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code

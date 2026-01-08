@@ -8,17 +8,22 @@ from spaces.models import SpaceType
 # ====================================================================
 @admin.register(SpaceType)
 class SpaceTypeAdmin(admin.ModelAdmin):
+    # --- REMOVED: 'created_at', 'updated_at' ---
     list_display = (
-        'name', 'is_container_type', 'is_basic_infrastructure', 'default_is_bookable', 'default_requires_approval',
+        'name', 'is_basic_infrastructure', 'default_is_bookable', 'default_requires_approval',
         'default_available_start_time', 'default_available_end_time',
         'description'
     )
     search_fields = ('name',)
-    list_filter = ('is_container_type', 'is_basic_infrastructure', 'default_is_bookable', 'default_requires_approval')
+    list_filter = (
+        'is_basic_infrastructure',
+        'default_is_bookable', 'default_requires_approval'
+    )
+    ordering = ('name',)
 
     fieldsets = (
         (None, {'fields': ('name', 'description')}),
-        ('类型属性', {'fields': ('is_container_type', 'is_basic_infrastructure')}),
+        ('类型属性', {'fields': ('is_basic_infrastructure',)}),
         ('默认预订规则 (创建空间时可作为默认值)', {
             'fields': (
                 'default_is_bookable', 'default_requires_approval',
@@ -28,24 +33,30 @@ class SpaceTypeAdmin(admin.ModelAdmin):
             ),
             'classes': ('collapse',)
         }),
+        # --- REMOVED: Timestamp fieldset ---
+        # ('时间戳', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse', 'readonly')})
+        # --- END REMOVED ---
     )
+    # --- REMOVED: readonly_fields for timestamps ---
+    # readonly_fields = ('created_at', 'updated_at')
+    # --- END REMOVED ---
 
     def has_module_permission(self, request):
         if not request.user.is_authenticated: return False
-        return request.user.is_staff and (request.user.is_superuser or request.user.is_system_admin)
+        return request.user.is_staff and (request.user.is_superuser or getattr(request.user, 'is_system_admin', False))
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
 
     def has_add_permission(self, request):
         if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
 
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)

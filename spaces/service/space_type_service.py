@@ -74,7 +74,7 @@ class SpaceTypeService(BaseService):
         创建新的空间类型。只有系统管理员可以操作。
         """
         if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-            return ServiceResult.error_result(  # <--- 修改这里
+            return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code
@@ -96,7 +96,7 @@ class SpaceTypeService(BaseService):
         更新空间类型。只有系统管理员可以操作。
         """
         if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-            return ServiceResult.error_result(  # <--- 修改这里
+            return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code
@@ -127,7 +127,7 @@ class SpaceTypeService(BaseService):
         在删除前需要检查是否有 Space 绑定到该 SpaceType。
         """
         if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-            return ServiceResult.error_result(  # <--- 修改这里
+            return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
                 status_code=ForbiddenException.status_code
