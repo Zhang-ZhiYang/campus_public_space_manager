@@ -1,4 +1,4 @@
-# bookings/admin/booking_admin.py (终极修正版 - 2026-01-09 - 禁用 SpaceManager 的直接增删改权限)
+# bookings/admin/booking_admin.py (终极修正版 - 2026-01-09 - 更严格的空间管理员权限控制)
 from django.contrib import admin
 from django.db import transaction, models
 from django.contrib import messages
@@ -27,30 +27,27 @@ try:
 
     SPACES_MODELS_LOADED = True
 except ImportError:
-    # 用于 Mock values_list() 返回结果，使其可迭代且支持 distinct()
     class MockValuesListQuerySet(list):
         def __init__(self, *args, **kwargs):
             self._mock_ids = kwargs.pop('_mock_ids', [])
-            super().__init__(self._mock_ids)  # list初始化时就包含这些元素
+            super().__init__(self._mock_ids)
 
         def distinct(self):
             return MockValuesListQuerySet(_mock_ids=list(set(self._mock_ids)))
 
         def values_list(self, *args, **kwargs):
-            # 如果在MockValuesListQuerySet上再次调用values_list，就返回自身
             return self
 
         def exists(self):
             return bool(self._mock_ids)
 
         def filter(self, *args, **kwargs):
-            return MockValuesListQuerySet(_mock_ids=[])  # 简化过滤，返回空集
+            return MockValuesListQuerySet(_mock_ids=[])
 
         def count(self):
             return len(self._mock_ids)
 
 
-    # 主 Mock QuerySet，模拟Django QuerySet的大部分行为
     class MockQuerySet(models.QuerySet):
         def __init__(self, *args, **kwargs):
             self._mock_instances = kwargs.pop('_mock_instances', [])
@@ -60,7 +57,6 @@ except ImportError:
             return MockQuerySet(self.model, using=self._db, _mock_instances=[])
 
         def filter(self, *args, **kwargs):
-            # 简化但更健壮的Mock filter逻辑，支持多级关联和__in
             filtered_instances = []
             for inst in self._mock_instances:
                 match = True
@@ -69,30 +65,30 @@ except ImportError:
                     parts = key.split('__')
 
                     for i, part in enumerate(parts):
-                        if i == len(parts) - 1 and part.endswith('_in'):  # 处理 __in 后缀
-                            field_name = part[:-3]  # 移除 '_in'
+                        if i == len(parts) - 1 and part.endswith('_in'):
+                            field_name = part[:-3]
                             attr = getattr(current_obj, field_name, None)
                             if attr is None or (value is not None and attr not in value if isinstance(value,
                                                                                                       (list, tuple,
                                                                                                        set)) else attr != value):
                                 match = False
                                 break
-                        elif i == len(parts) - 1 and part.endswith('_id'):  # 处理 __id 后缀
+                        elif i == len(parts) - 1 and part.endswith('_id'):
                             field_name = part[:-3]
                             if not hasattr(current_obj, field_name) or getattr(getattr(current_obj, field_name, None),
                                                                                'id', None) != value:
                                 match = False
                                 break
-                        else:  # 直接属性或关联对象
+                        else:
                             if isinstance(current_obj, (models.Model, object)) and hasattr(current_obj, part):
                                 current_obj = getattr(current_obj, part, None)
-                                if current_obj is None:  # 关联对象不存在
+                                if current_obj is None:
                                     match = False
                                     break
-                            else:  # 简单属性，直接比较
+                            else:
                                 if getattr(inst, key, None) != value:
                                     match = False
-                                break  # Attribute not found or mismatch
+                                break
                     if not match:
                         break
                 if match:
@@ -106,21 +102,17 @@ except ImportError:
                 row_values = []
                 for field_path in args:
                     current_val = inst
-                    # 遍历字段路径
                     for part in field_path.split('__'):
                         current_val = getattr(current_val, part, None)
                         if current_val is None:
                             break
                     row_values.append(current_val)
-                # 仅当所有提取值都不为None时才添加
                 if all(v is not None for v in row_values):
                     extracted_values.append(row_values[0] if flat and len(row_values) == 1 else tuple(row_values))
 
-            # 返回自定义的MockValuesListQuerySet，支持链式调用
             return MockValuesListQuerySet(_mock_ids=[v for v in extracted_values if v is not None])
 
         def distinct(self):
-            # 基于ID进行去重，如果没有ID就用对象哈希
             seen_ids = set()
             distinct_instances = []
             for inst in self._mock_instances:
@@ -134,7 +126,7 @@ except ImportError:
             return bool(self._mock_instances)
 
         def all(self):
-            return self._mock_instances  # 默认返回所有模拟实例
+            return self._mock_instances
 
         def first(self):
             return self._mock_instances[0] if self._mock_instances else None
@@ -143,10 +135,10 @@ except ImportError:
             return len(self._mock_instances)
 
         def update(self, **kwargs):
-            return len(self._mock_instances)  # 简化update
+            return len(self._mock_instances)
 
         def select_related(self, *args, **kwargs):
-            return self  # Mock select_related
+            return self
 
 
     class MockManager(models.Manager):
@@ -154,14 +146,13 @@ except ImportError:
             return MockQuerySet(self.model, using=self._db, _mock_instances=[])
 
 
-    # Mock 相关的 models (添加 _state 属性，避免Django内部方法报错)
     class MockSpace(models.Model):
         name = "Mock Space"
         requires_approval = False
         space_type = None
         objects = MockManager()
         id = None
-        _state = None  # 添加 _state 属性
+        _state = None
 
         def __str__(self): return self.name
 
@@ -170,7 +161,7 @@ except ImportError:
             self.name = name
             self.requires_approval = requires_approval
             self.space_type = space_type if space_type is not None else MockSpaceType(id=99)
-            self._state = _state if _state is not None else models.base.ModelState()  # 使用Django的ModelState
+            self._state = _state if _state is not None else models.base.ModelState()
 
         def has_perm(self, perm, obj=None): return True
 
@@ -179,7 +170,7 @@ except ImportError:
         name = "Mock SpaceType"
         objects = MockManager()
         id = None
-        _state = None  # 添加 _state 属性
+        _state = None
 
         def __str__(self): return self.name
 
@@ -194,7 +185,7 @@ except ImportError:
         space = None
         objects = MockManager()
         id = None
-        _state = None  # 添加 _state 属性
+        _state = None
 
         def __str__(self): return "Mock BookableAmenity"
 
@@ -279,8 +270,7 @@ class BookingAdmin(GuardedModelAdmin):
             messages.warning(request, "Space models not available. Bookings cannot be filtered by space permissions.")
             return qs.none()
 
-        # SpaceManager 的 get_queryset 依赖于对象级权限，需要模型级权限作前提
-        # 这里使用 'spaces.can_view_space_bookings' 作为 SpaceManager 的查看权限依据
+        # SpaceManager 的 get_queryset 依赖于对象级权限
         managed_spaces_ids = get_objects_for_user(
             request.user, 'spaces.can_view_space_bookings', klass=Space
         ).values_list('id', flat=True)
@@ -294,24 +284,37 @@ class BookingAdmin(GuardedModelAdmin):
         ).select_related('user', 'reviewed_by', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space')
 
     def has_module_permission(self, request):
-        # 空间管理员至少需要拥有任何一个空间的相关预订查看权限，才能看到 Booking 模块
-        if not request.user.is_authenticated: return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        if getattr(request.user, 'is_space_manager', False) and SPACES_MODELS_LOADED:
-            return get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space).exists() or \
-                get_objects_for_user(request.user, 'spaces.can_view_bookable_amenity', klass=BookableAmenity).exists()
+        """
+        统一的模块可见性权限检查。
+        - 未登录用户：不可见。
+        - 超级用户/系统管理员：总是可见。
+        - 空间管理员：取决于是否被明确分配了该 Model 的 Django 默认 'view_xxx' 权限。
+        - 其他用户：不可见。
+        """
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
+            return True
+
+        # 如果是空间管理员，动态获取当前模型的 app_label 和 model_name
+        # 然后检查是否显式分配了该模型的默认 view_xxx 权限。
+        if getattr(request.user, 'is_space_manager', False):
+            app_label = self.opts.app_label
+            model_name = self.opts.model_name
+            permission_codename = f'{app_label}.view_{model_name}'
+            return request.user.has_perm(permission_codename)
+
         return False
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        # 对于 SpaceManager，obj=None (列表页) 的查看权限由 has_module_permission 控制
-        # 对于 obj (详情页)，需要针对该对象的空间拥有查看权限
         if obj is None: return self.has_module_permission(request)
 
         target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
         if not (target_space and SPACES_MODELS_LOADED): return False
+        # 针对特定预订对象，检查用户是否对该预订所在的 Scepace 拥有 can_view_space_bookings 对象级权限
         return request.user.has_perm('spaces.can_view_space_bookings', target_space)
 
     def has_add_permission(self, request):
@@ -319,21 +322,20 @@ class BookingAdmin(GuardedModelAdmin):
             return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
             return True
-        # <<--- 修改在这里：SpaceManager 不应能直接通过管理后台创建预订 ---
+        # 空间管理员不能直接通过 Admin 后台添加预订
         return False
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        # <<--- 修改在这里：SpaceManager 不应能直接通过管理后台修改预订 ---
-        # SpaceManagers 的修改权限应仅限于通过 Admin Actions (批准, 拒绝, 签到, 取消等)
+        # 空间管理员不能直接通过 Admin 后台修改预订，所有修改都通过 Admin Actions
         return False
 
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        # SpaceManager 不拥有全局删除权限，并且 'delete_selected' 动作会被 get_actions 移除
+        # 空间管理员不能直接通过 Admin 后台删除预订
         return False
 
     def get_actions(self, request):
@@ -344,7 +346,7 @@ class BookingAdmin(GuardedModelAdmin):
                 'approve_bookings', 'reject_bookings', 'cancel_bookings', 'mark_completed_bookings',
                 'mark_checked_in', 'mark_no_show_and_violate'
             ]
-            actions.pop('delete_selected', None)  # 空间管理员不能批量删除
+            actions.pop('delete_selected', None)
 
             filtered_actions = {}
             for action_name in space_manager_specific_actions:
@@ -366,10 +368,9 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法批准。", messages.ERROR)
                 continue
 
-            # 权限检查：是否对该空间拥有 'can_approve_space_bookings' 对象级权限
             if request.user.is_superuser or request.user.is_system_admin or \
-                    (request.user.is_space_manager and request.user.has_perm('spaces.can_approve_space_bookings',
-                                                                             target_space)):
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_approve_space_bookings', target_space)):
                 if booking.status == 'PENDING':
                     booking.status = 'APPROVED'
                     booking.reviewed_by = request.user
@@ -393,10 +394,9 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法拒绝。", messages.ERROR)
                 continue
 
-            # 权限检查：是否对该空间拥有 'can_approve_space_bookings' 对象级权限 (拒绝通常与批准使用相同权限)
             if request.user.is_superuser or request.user.is_system_admin or \
-                    (request.user.is_space_manager and request.user.has_perm('spaces.can_approve_space_bookings',
-                                                                             target_space)):
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_approve_space_bookings', target_space)):
                 if booking.status == 'PENDING':
                     booking.status = 'REJECTED'
                     booking.reviewed_by = request.user
@@ -420,10 +420,9 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法取消。", messages.ERROR)
                 continue
 
-            # 权限检查：是否对该空间拥有 'can_cancel_space_bookings' 对象级权限
             if request.user.is_superuser or request.user.is_system_admin or \
-                    (request.user.is_space_manager and request.user.has_perm('spaces.can_cancel_space_bookings',
-                                                                             target_space)):
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_cancel_space_bookings', target_space)):
                 if booking.status in ['PENDING', 'APPROVED', 'CHECKED_IN']:
                     booking.status = 'CANCELLED'
                     booking.reviewed_by = request.user
@@ -447,10 +446,9 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法标记为已完成。", messages.ERROR)
                 continue
 
-            # 权限检查：是否对该空间拥有 'can_checkin_space_bookings' 对象级权限 (完成通常与签到使用相同权限)
             if request.user.is_superuser or request.user.is_system_admin or \
-                    (request.user.is_space_manager and request.user.has_perm('spaces.can_checkin_space_bookings',
-                                                                             target_space)):
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_checkin_space_bookings', target_space)):
                 if booking.status == 'CHECKED_IN':
                     booking.status = 'COMPLETED'
                     booking.save(update_fields=['status'])
@@ -473,10 +471,9 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法签到。", messages.ERROR)
                 continue
 
-            # 权限检查：是否对该空间拥有 'can_checkin_space_bookings' 对象级权限
             if request.user.is_superuser or request.user.is_system_admin or \
-                    (request.user.is_space_manager and request.user.has_perm('spaces.can_checkin_space_bookings',
-                                                                             target_space)):
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_checkin_space_bookings', target_space)):
                 if booking.status in ['APPROVED', 'PENDING']:
                     booking.status = 'CHECKED_IN'
                     booking.save(update_fields=['status'])
@@ -500,10 +497,9 @@ class BookingAdmin(GuardedModelAdmin):
                                   messages.ERROR)
                 continue
 
-            # 权限检查：是否对该空间拥有 'can_checkin_space_bookings' 对象级权限 (未到场通常与签到使用相同权限)
             if request.user.is_superuser or request.user.is_system_admin or \
-                    (request.user.is_space_manager and request.user.has_perm('spaces.can_checkin_space_bookings',
-                                                                             target_space)):
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_checkin_space_bookings', target_space)):
                 if booking.status in ['PENDING', 'APPROVED'] and booking.end_time < timezone.now():
                     booking.status = 'NO_SHOW'
                     booking.save(update_fields=['status'])

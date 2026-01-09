@@ -146,7 +146,7 @@ class CustomUserAdmin(UserAdmin):
         # ⚠️ 必须先检查是否已认证
         if not request.user.is_authenticated:
             return False
-        return request.user.is_staff and (request.user.is_system_admin or request.user.is_space_manager)
+        return request.user.is_staff and (request.user.is_system_admin)
 
     def has_view_permission(self, request, obj=None):
         """系统管理员和空间管理员可以查看用户"""

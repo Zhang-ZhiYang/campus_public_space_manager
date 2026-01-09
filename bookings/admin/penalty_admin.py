@@ -1,8 +1,8 @@
-# bookings/admin/penalty_admin.py (终极修正版)
+# bookings/admin/penalty_admin.py (终极修正版 - SpaceManager 只读，严格控制模块可见性)
 from django.contrib import admin
 from django.contrib import messages
-from django.core.exceptions import ValidationError  # <-- 确保已导入
-from django.db import  models
+from django.core.exceptions import ValidationError
+from django.db import models
 
 from guardian.admin import GuardedModelAdmin
 from guardian.shortcuts import get_objects_for_user
@@ -234,20 +234,38 @@ class UserPenaltyPointsPerSpaceTypeAdmin(GuardedModelAdmin):
                              "Space models not available. Penalty points cannot be filtered by space permissions.")
             return qs.none()
 
-        managed_spaces = get_objects_for_user(
-            request.user, 'spaces.can_view_space_bookings', klass=Space
-        )
-        managed_spacetype_ids = list(managed_spaces.values_list('space_type__id', flat=True).distinct())
-        managed_spacetype_ids = [id for id in managed_spacetype_ids if id is not None]
+        # 空间管理员只能查看其管理空间类型下的违约点数记录
+        managed_spacetype_ids = []
+        if getattr(request.user, 'is_space_manager', False):
+            managed_spaces = get_objects_for_user(
+                request.user, 'spaces.can_view_space_bookings', klass=Space
+            )
+            managed_spacetype_ids = list(managed_spaces.values_list('space_type__id', flat=True).distinct())
+            managed_spacetype_ids = [id for id in managed_spacetype_ids if id is not None]
 
         return qs.filter(space_type__id__in=managed_spacetype_ids).select_related('user', 'space_type')
 
     def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
+        """
+        统一的模块可见性权限检查。
+        - 未登录用户：不可见。
+        - 超级用户/系统管理员：总是可见。
+        - 空间管理员：取决于是否被明确分配了该 Model 的 Django 默认 'view_xxx' 权限。
+        - 其他用户：不可见。
+        """
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
+            return True
+
+        # 如果是空间管理员，动态获取当前模型的 app_label 和 model_name
+        # 然后检查是否显式分配了该模型的默认 view_xxx 权限。
         if getattr(request.user, 'is_space_manager', False):
-            return SPACES_MODELS_LOADED and get_objects_for_user(request.user, 'spaces.can_view_space_bookings',
-                                                                 klass=Space).exists()
+            app_label = self.opts.app_label
+            model_name = self.opts.model_name
+            permission_codename = f'{app_label}.view_{model_name}'
+            return request.user.has_perm(permission_codename)
+
         return False
 
     def has_view_permission(self, request, obj=None):
@@ -258,10 +276,11 @@ class UserPenaltyPointsPerSpaceTypeAdmin(GuardedModelAdmin):
         if not SPACES_MODELS_LOADED: return False
 
         if obj.space_type:
+            # 针对特定对象，检查用户是否管理该空间类型下的某个空间
             managed_spaces = get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space)
             return managed_spaces.filter(space_type=obj.space_type).exists()
-        else:
-            return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        else:  # 全局点数记录，只有系统管理员可见
+            return False
 
     def has_add_permission(self, request):
         return False

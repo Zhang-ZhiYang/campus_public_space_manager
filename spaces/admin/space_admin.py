@@ -1,4 +1,4 @@
-# spaces/admin/space_admin.py (终极修订版 - 包含 save_model 和 managed_by 权限控制)
+# spaces/admin/space_admin.py (终极修订版 - 更严格的空间管理员权限控制)
 import logging
 
 from django.contrib import admin
@@ -10,11 +10,12 @@ from django.forms.models import BaseInlineFormSet  # 导入 BaseInlineFormSet
 from django.db.models import Q  # 导入 Q 对象，用于复杂的查询
 
 # 直接导入本应用的模型
-from spaces.models import Amenity, Space, SpaceType, BookableAmenity
+from spaces.models import Amenity, Space, SpaceType, BookableAmenity, \
+    SPACE_MANAGEMENT_PERMISSIONS, BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS  # 导入权限列表
 
 from django.conf import settings
 from guardian.admin import GuardedModelAdmin
-from guardian.shortcuts import get_objects_for_user, get_perms_for_model, assign_perm  # 确保导入 assign_perm
+from guardian.shortcuts import get_objects_for_user, get_perms_for_model, assign_perm
 
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -78,28 +79,30 @@ class BookableAmenityInline(admin.TabularInline):
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
             return qs.select_related('amenity')
 
-        if request.user.has_perm('spaces.can_view_space', parent_space):
-            return get_objects_for_user(request.user,
-                                        'spaces.can_view_bookable_amenity',
-                                        klass=qs.filter(space=parent_space)).select_related('amenity')
+        # 空间管理员根据对象级权限过滤
+        if getattr(request.user, 'is_space_manager', False):
+            if request.user.has_perm('spaces.can_view_space', parent_space):
+                return get_objects_for_user(request.user,
+                                            'spaces.can_view_bookable_amenity',
+                                            klass=qs.filter(space=parent_space)).select_related('amenity')
         return qs.none()
 
     def has_add_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:  # Adding a new Space
-            return request.user.has_perm('spaces.add_bookableamenity')  # Global Django add perm
-
+        # 空间管理员创建 BookableAmenity 实例需要 can_add_space_amenity 对象级权限
+        if obj is None:  # 表示在Space创建页面，或者独立创建，但我们这里是inline，总有parent_space
+            return False
         return request.user.has_perm('spaces.can_add_space_amenity', obj)
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:  # No specific BookableAmenity instance to change
-            return False
+        if obj is None: return False  # 无特定 BookableAmenity 实例可修改
 
+        # 空间管理员修改 BookableAmenity 实例需要对应的对象级权限
         return (request.user.has_perm('spaces.can_edit_bookable_amenity_quantity', obj) or
                 request.user.has_perm('spaces.can_change_bookable_amenity_status', obj))
 
@@ -107,9 +110,9 @@ class BookableAmenityInline(admin.TabularInline):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:  # No specific BookableAmenity instance to delete
-            return False
+        if obj is None: return False  # 无特定 BookableAmenity 实例可删除
 
+        # 空间管理员删除 BookableAmenity 实例需要对应的对象级权限
         return request.user.has_perm('spaces.can_delete_bookable_amenity', obj)
 
     def save_model(self, request, obj, form, change):
@@ -156,7 +159,7 @@ class SpaceAdmin(GuardedModelAdmin):
     raw_id_fields = ('parent_space',)
     inlines = [BookableAmenityInline]
     filter_horizontal = ('permitted_groups',)
-    readonly_fields = ('created_at', 'updated_at')  # 默认的只读字段
+    readonly_fields = ('created_at', 'updated_at')
 
     def get_fieldsets(self, request, obj=None):
         fieldsets = [
@@ -185,8 +188,6 @@ class SpaceAdmin(GuardedModelAdmin):
                         continue  # 完全跳过这个 fieldset，managed_by 字段将不会在创建表单中显示
                     else:
                         # 对于SpaceManager编辑已有空间 (managed_by 字段在 readonly_fields 里)
-                        # 或者其他非系统管理员 (他们没有权限设置这个字段，让它只读即可)
-                        # 我们仍然保留 fieldset，但字段会被 get_readonly_fields 处理
                         modified_fieldsets.append((fs_name, fs_options))
                 else:
                     modified_fieldsets.append((fs_name, fs_options))
@@ -194,20 +195,17 @@ class SpaceAdmin(GuardedModelAdmin):
         return fieldsets
 
     def get_readonly_fields(self, request, obj=None):
-        readonly_fields = super().get_readonly_fields(request, obj)
+        readonly_fields = list(super().get_readonly_fields(request, obj))  # Convert to list to modify
 
         # 任何用户都不能修改创建和更新时间
-        readonly_fields += ('created_at', 'updated_at',)
+        readonly_fields.extend(['created_at', 'updated_at'])
 
         # 对于非系统管理员，managed_by 字段应始终是只读的
         # 但如果 get_fieldsets 已经完全移除了这个字段，则无需再次设置为只读（因为它不存在）
-        # 仅当字段存在且不是系统管理员时，才将其设置为只读
         if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
-            # 如果是 SpaceManager 在创建新空间，managed_by 字段已经被 get_fieldsets 移除，
-            # 这里就不需要再添加 'managed_by' 到 readonly_fields
-            if not (obj is None and getattr(request.user, 'is_space_manager', False)):
+            if not (obj is None and getattr(request.user, 'is_space_manager', False)):  # 如果不是 SpaceManager 正在创建新空间
                 if 'managed_by' not in readonly_fields:
-                    readonly_fields += ('managed_by',)
+                    readonly_fields.append('managed_by')
         return readonly_fields
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
@@ -220,8 +218,6 @@ class SpaceAdmin(GuardedModelAdmin):
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
                 try:
                     space_manager_group = Group.objects.get(name='空间管理员')
-                    # 允许选择空间管理员组的用户，或者超级用户，或者设为 is_staff 且活跃的用户
-                    # 使用 Q 对象确保逻辑正确且去重
                     kwargs["queryset"] = CustomUser.objects.filter(
                         Q(groups=space_manager_group) | Q(is_superuser=True) | Q(is_staff=True)
                     ).filter(is_active=True).distinct().order_by('username')
@@ -229,9 +225,7 @@ class SpaceAdmin(GuardedModelAdmin):
                     messages.warning(request, "‘空间管理员’用户组不存在，请检查配置。")
                     kwargs["queryset"] = CustomUser.objects.filter(is_active=True).order_by('username')
             else:
-                # 对于非系统管理员 (如普通空间管理员)，managed_by 字段通常已经被 get_fieldsets 移除
-                # 或者被 get_readonly_fields 设置为只读。
-                # 这里的 queryset 主要是为了避免潜在错误，如果字段仍然可见，它只能显示当前用户自己
+                # 对于非系统管理员，managed_by 字段通常为只读或不显示，这里的 queryset 确保即使可见也只能是当前用户自己
                 kwargs["queryset"] = CustomUser.objects.filter(pk=request.user.pk, is_active=True)
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
@@ -245,10 +239,6 @@ class SpaceAdmin(GuardedModelAdmin):
                 obj.managed_by = request.user
 
         super().save_model(request, obj, form, change)
-
-        # 注意：这里不再包含将用户添加到“空间管理员”组的逻辑，
-        # 因为这部分职责已完全移至 spaces/models.py 的 post_save 信号处理器。
-        # 确保单点维护，避免冗余和潜在冲突。
 
     @admin.display(description='管理人员')
     def managed_by_display(self, obj: Space):
@@ -271,51 +261,75 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: return qs.none()
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return qs
 
+        # 空间管理员仅能查看其有对象级权限的空间
         return get_objects_for_user(request.user, ['spaces.can_view_space', 'spaces.can_edit_space_info'],
                                     klass=qs).distinct()
 
     def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        return getattr(request.user, 'is_space_manager', False)
+        """
+        统一的模块可见性权限检查。
+        - 未登录用户：不可见。
+        - 超级用户/系统管理员：总是可见。
+        - 空间管理员：取决于是否被明确分配了该 Model 的 Django 默认 'view_xxx' 权限。
+        - 其他用户：不可见。
+        """
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
+            return True
+
+        # 如果是空间管理员，动态获取当前模型的 app_label 和 model_name
+        # 然后检查是否显式分配了该模型的默认 view_xxx 权限。
+        if getattr(request.user, 'is_space_manager', False):
+            app_label = self.opts.app_label
+            model_name = self.opts.model_name
+            permission_codename = f'{app_label}.view_{model_name}'
+            return request.user.has_perm(permission_codename)
+
+        return False
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:
-            return getattr(request.user, 'is_space_manager', False) or \
-                request.user.has_perm('spaces.can_create_space') or \
-                get_objects_for_user(request.user, 'spaces.can_view_space', klass=Space).exists()
+        if obj is None: return self.has_module_permission(request)
 
+        # 空间管理员查看特定 Space 对象需要 can_view_space 对象级权限
         return request.user.has_perm('spaces.can_view_space', obj)
 
     def has_add_permission(self, request):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        return request.user.has_perm('spaces.can_create_space')
+        # 空间管理员现在可以通过 Admin 后台添加空间，但需拥有 spaces.can_create_space 模型级权限
+        if getattr(request.user, 'is_space_manager', False):
+            return request.user.has_perm('spaces.can_create_space') # 检查模型级权限
+        return False
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:
-            return get_objects_for_user(request.user, ['spaces.can_edit_space_info', 'spaces.can_change_space_status'],
+        if obj is None:  # For change_list view (list of change forms), check if they can change *any* space
+            return get_objects_for_user(request.user,
+                                        ['spaces.can_edit_space_info', 'spaces.can_change_space_status',
+                                         'spaces.can_configure_booking_rules', 'spaces.can_manage_permitted_groups'],
                                         klass=Space).exists()
 
+        # 空间管理员修改特定 Space 对象需要对应的对象级权限
         return request.user.has_perm('spaces.can_edit_space_info', obj) or \
             request.user.has_perm('spaces.can_change_space_status', obj) or \
             request.user.has_perm('spaces.can_configure_booking_rules', obj) or \
-            request.user.has_perm('spaces.can_assign_space_manager', obj) or \
             request.user.has_perm('spaces.can_manage_permitted_groups', obj)
+        # can_assign_space_manager 权限只给系统管理员，不在此处检查
 
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:
+        if obj is None:  # For delete_list view, check if they can delete *any* space
             return get_objects_for_user(request.user, 'spaces.can_delete_space', klass=Space).exists()
 
+        # 空间管理员删除特定 Space 对象需要 can_delete_space 对象级权限
         return request.user.has_perm('spaces.can_delete_space', obj)
 
     actions = [
@@ -353,19 +367,20 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: messages.error(request, "您没有权限执行此操作，请先登录。",
                                                              messages.ERROR); return
 
-        authorized_queryset = []
+        authorized_queryset_pks = []
         for space in queryset:
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
-                    request.user.has_perm('spaces.can_change_space_status', space):
-                authorized_queryset.append(space.pk)
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_change_space_status', space)):
+                authorized_queryset_pks.append(space.pk)
             else:
                 messages.error(request, f"您没有权限修改空间 {space.name} 的预订状态。")
 
-        if not authorized_queryset:
+        if not authorized_queryset_pks:
             messages.error(request, "没有可选定的空间进行此操作。");
             return
 
-        updated_count = queryset.filter(pk__in=authorized_queryset).update(is_bookable=True)
+        updated_count = queryset.filter(pk__in=authorized_queryset_pks).update(is_bookable=True)
         self.message_user(request, f"成功将 {updated_count} 个空间设置为可预订。", messages.SUCCESS)
 
     @admin.action(description="将选择的空间设置为不可预订")
@@ -373,19 +388,20 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: messages.error(request, "您没有权限执行此操作，请先登录。",
                                                              messages.ERROR); return
 
-        authorized_queryset = []
+        authorized_queryset_pks = []
         for space in queryset:
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
-                    request.user.has_perm('spaces.can_change_space_status', space):
-                authorized_queryset.append(space.pk)
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_change_space_status', space)):
+                authorized_queryset_pks.append(space.pk)
             else:
                 messages.error(request, f"您没有权限修改空间 {space.name} 的预订状态。")
 
-        if not authorized_queryset:
+        if not authorized_queryset_pks:
             messages.error(request, "没有可选定的空间进行此操作。");
             return
 
-        updated_count = queryset.filter(pk__in=authorized_queryset).update(is_bookable=False)
+        updated_count = queryset.filter(pk__in=authorized_queryset_pks).update(is_bookable=False)
         self.message_user(request, f"成功将 {updated_count} 个空间设置为不可预订。", messages.SUCCESS)
 
     @admin.action(description="激活选择的空间")
@@ -393,22 +409,23 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: messages.error(request, "您没有权限执行此操作，请先登录。",
                                                              messages.ERROR); return
 
-        authorized_queryset = []
+        authorized_queryset_pks = []
         for space in queryset:
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
-                    request.user.has_perm('spaces.can_change_space_status', space):
-                authorized_queryset.append(space.pk)
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_change_space_status', space)):
+                authorized_queryset_pks.append(space.pk)
             else:
                 messages.error(request, f"您没有权限激活空间 {space.name}。")
 
-        if not authorized_queryset:
+        if not authorized_queryset_pks:
             messages.error(request, "没有可选定的空间进行此操作。");
             return
 
         try:
             with transaction.atomic():
                 updated_count = 0
-                for space in queryset.filter(pk__in=authorized_queryset):
+                for space in queryset.filter(pk__in=authorized_queryset_pks):
                     if not space.is_active:
                         space.is_active = True
                         space.save(update_fields=['is_active'])
@@ -422,22 +439,23 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: messages.error(request, "您没有权限执行此操作，请先登录。",
                                                              messages.ERROR); return
 
-        authorized_queryset = []
+        authorized_queryset_pks = []
         for space in queryset:
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
-                    request.user.has_perm('spaces.can_change_space_status', space):
-                authorized_queryset.append(space.pk)
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_change_space_status', space)):
+                authorized_queryset_pks.append(space.pk)
             else:
                 messages.error(request, f"您没有权限停用空间 {space.name}。")
 
-        if not authorized_queryset:
+        if not authorized_queryset_pks:
             messages.error(request, "没有可选定的空间进行此操作。");
             return
 
         try:
             with transaction.atomic():
                 updated_count = 0
-                for space in queryset.filter(pk__in=authorized_queryset):
+                for space in queryset.filter(pk__in=authorized_queryset_pks):
                     if space.is_active:
                         space.is_active = False
                         space.is_bookable = False
@@ -452,19 +470,20 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: messages.error(request, "您没有权限执行此操作，请先登录。",
                                                              messages.ERROR); return
 
-        authorized_queryset = []
+        authorized_queryset_pks = []
         for space in queryset:
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
-                    request.user.has_perm('spaces.can_configure_booking_rules', space):
-                authorized_queryset.append(space.pk)
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_configure_booking_rules', space)):
+                authorized_queryset_pks.append(space.pk)
             else:
                 messages.error(request, f"您没有权限修改空间 {space.name} 的审批需求。")
 
-        if not authorized_queryset:
+        if not authorized_queryset_pks:
             messages.error(request, "没有可选定的空间进行此操作。");
             return
 
-        updated_count = queryset.filter(pk__in=authorized_queryset).update(requires_approval=True)
+        updated_count = queryset.filter(pk__in=authorized_queryset_pks).update(requires_approval=True)
         self.message_user(request, f"成功将 {updated_count} 个空间设置为需要审批。", messages.SUCCESS)
 
     @admin.action(description="将选择的空间设置为无需审批")
@@ -472,19 +491,20 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: messages.error(request, "您没有权限执行此操作，请先登录。",
                                                              messages.ERROR); return
 
-        authorized_queryset = []
+        authorized_queryset_pks = []
         for space in queryset:
             if request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
-                    request.user.has_perm('spaces.can_configure_booking_rules', space):
-                authorized_queryset.append(space.pk)
+                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
+                        'spaces.can_configure_booking_rules', space)):
+                authorized_queryset_pks.append(space.pk)
             else:
                 messages.error(request, f"您没有权限修改空间 {space.name} 的审批需求。")
 
-        if not authorized_queryset:
+        if not authorized_queryset_pks:
             messages.error(request, "没有可选定的空间进行此操作。");
             return
 
-        updated_count = queryset.filter(pk__in=authorized_queryset).update(requires_approval=False)
+        updated_count = queryset.filter(pk__in=authorized_queryset_pks).update(requires_approval=False)
         self.message_user(request, f"成功将 {updated_count} 个空间设置为无需审批。", messages.SUCCESS)
 
     @admin.action(description="安全删除选择的空间")

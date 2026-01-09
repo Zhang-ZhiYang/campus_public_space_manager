@@ -1,4 +1,4 @@
-# bookings/admin/user_ban_admin.py (终极修正版 - SpaceManager 只读)
+# bookings/admin/user_ban_admin.py (终极修正版 - SpaceManager 只读，严格控制模块可见性)
 from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -215,7 +215,6 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
         (None, {'fields': ('user', 'space_type', ('start_date', 'end_date'), 'reason',)}),
         ('策略与记录', {'fields': ('ban_policy_applied', ('issued_by', 'issued_at'))}),
     )
-    # 对于空间管理员，issued_by 字段应该自动填充而不是手动修改
     readonly_fields = ('issued_at', 'issued_by')
 
     def save_model(self, request, obj, form, change):
@@ -224,7 +223,6 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
             raise ValidationError('没有权限')
 
         # 空间管理员不应能创建、修改或删除这些记录，该功能保留给系统管理员。
-        # has_add/change/delete_permission 会限制前端界面，这里是额外的后端验证。
         if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
             messages.error(request, f"您没有权限修改此禁用记录(ID: {obj.pk})。", messages.ERROR)
             raise ValidationError('没有权限')
@@ -263,33 +261,50 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
             return qs.none()
 
         # 空间管理员只能查看其管理空间类型下的禁用记录
-        managed_spaces = get_objects_for_user(
-            request.user, 'spaces.can_view_space_bookings', klass=Space
-        )
-        managed_spacetype_ids = list(managed_spaces.values_list('space_type__id', flat=True).distinct())
-        managed_spacetype_ids = [id for id in managed_spacetype_ids if id is not None]
+        # 这里需要检查用户是否对 "任何" 属于这个 SpaceType 的 space 有 can_view_space_bookings 权限
+        managed_spacetype_ids = []
+        if getattr(request.user, 'is_space_manager', False):
+            managed_spaces = get_objects_for_user(
+                request.user, 'spaces.can_view_space_bookings', klass=Space
+            )
+            managed_spacetype_ids = list(managed_spaces.values_list('space_type__id', flat=True).distinct())
+            managed_spacetype_ids = [id for id in managed_spacetype_ids if id is not None]  # 移除 None
 
         return qs.filter(space_type__id__in=managed_spacetype_ids).select_related('user', 'space_type',
                                                                                   'ban_policy_applied', 'issued_by')
 
     def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
+        """
+        统一的模块可见性权限检查。
+        - 未登录用户：不可见。
+        - 超级用户/系统管理员：总是可见。
+        - 空间管理员：取决于是否被明确分配了该 Model 的 Django 默认 'view_xxx' 权限。
+        - 其他用户：不可见。
+        """
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
+            return True
+
+        # 如果是空间管理员，动态获取当前模型的 app_label 和 model_name
+        # 然后检查是否显式分配了该模型的默认 view_xxx 权限。
         if getattr(request.user, 'is_space_manager', False):
-            # 空间管理员至少需要有某个空间类型的查看预订权限，才能看到此模块
-            if not SPACES_MODELS_LOADED: return False
-            return get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space).exists()
+            app_label = self.opts.app_label
+            model_name = self.opts.model_name
+            permission_codename = f'{app_label}.view_{model_name}'
+            return request.user.has_perm(permission_codename)
+
         return False
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        if obj is None: return self.has_module_permission(request)  # 对于列表页，依赖 module 权限
+        if obj is None: return self.has_module_permission(request)
 
         if not SPACES_MODELS_LOADED: return False
 
         if obj.space_type:
-            # 对于特定对象，检查用户是否管理该空间类型下的某个空间
+            # 针对特定对象，检查用户是否管理该空间类型下的某个空间
             managed_spaces = get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space)
             return managed_spaces.filter(space_type=obj.space_type).exists()
         else:  # 全局禁用记录，只有系统管理员可见
