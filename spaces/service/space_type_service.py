@@ -8,7 +8,8 @@ from core.service import BaseService, ServiceResult
 from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException
 from spaces.models import SpaceType
 from django.contrib.auth import get_user_model
-from guardian.shortcuts import get_objects_for_user
+
+# from guardian.shortcuts import get_objects_for_user # 如果没有用到，可以注释掉以保持代码简洁
 
 logger = logging.getLogger(__name__)
 CustomUser = get_user_model()
@@ -21,14 +22,31 @@ class SpaceTypeService(BaseService):
 
     def get_all_space_types(self, user: CustomUser) -> ServiceResult[QuerySet[SpaceType]]:
         """
-        获取所有空间类型。系统管理员可以查看所有，其他用户可以查看公开的。
+        获取所有空间类型。
+        现在允许系统管理员、超级管理员以及空间管理员查看所有空间类型列表。
+        普通用户也可以查看（因为通常空间类型配置是公开的，但详情可能需要权限）。
         """
         try:
-            if user.is_superuser or getattr(user, 'is_system_admin', False):
-                space_types = self.space_type_dao.get_all()
-            else:
-                space_types = self.space_type_dao.get_all()  # 假设普通用户也能看所有空间类型名称
+            # 简化权限检查：is_space_manager 已包含 is_system_admin 和 is_superuser
+            # 如果是任何认证用户都可以看列表，这里就没有 if
+            # 如果仅管理员角色可以看列表，则如下：
+            # if not user.is_authenticated or not user.is_space_manager: # 如果需要 SpaceManager 才能看列表
+            #     return ServiceResult.error_result(
+            #         message=ForbiddenException.default_detail,
+            #         error_code=ForbiddenException.default_code,
+            #         status_code=ForbiddenException.status_code
+            #     )
 
+            # 目前Admin view的has_module_permission也限制为 is_superuser or is_system_admin。
+            # 如果要同步 Admin 的 has_module_permission，则也应加判断
+            if not (user.is_superuser or user.is_system_admin):  # 与 Admin 的 has_module_permission 保持一致
+                return ServiceResult.error_result(
+                    message=ForbiddenException.default_detail,
+                    error_code=ForbiddenException.default_code,
+                    status_code=ForbiddenException.status_code
+                )
+
+            space_types = self.space_type_dao.get_all()
             return ServiceResult.success_result(
                 data=space_types,
                 message="成功获取空间类型列表。",
@@ -39,7 +57,8 @@ class SpaceTypeService(BaseService):
 
     def get_space_type_by_id(self, user: CustomUser, pk: int) -> ServiceResult[SpaceType]:
         """
-        根据ID获取单个空间类型。
+        根据ID获取单个空间类型详情。
+        只允许系统管理员和超级管理员操作。(与 SpaceTypeAdmin 的 has_view_permission 保持一致)
         """
         try:
             space_type = self.space_type_dao.get_by_id(pk)
@@ -50,10 +69,8 @@ class SpaceTypeService(BaseService):
                     status_code=NotFoundException.status_code
                 )
 
-            # 权限检查：只有系统管理员或超级管理员可以查看 SpaceType 的详细配置
-            if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
-                # 如果是普通用户或空间管理员，这里可以根据 SpaceType 是否有 is_public 字段再细分
-                # 目前简单处理：认为只有高权限用户才能看详细配置
+            # 简化权限检查：user.is_system_admin 已包含 user.is_superuser
+            if not user.is_system_admin:  # <--- 修改点
                 return ServiceResult.error_result(
                     message=ForbiddenException.default_detail,
                     error_code=ForbiddenException.default_code,
@@ -71,9 +88,11 @@ class SpaceTypeService(BaseService):
     @transaction.atomic
     def create_space_type(self, user: CustomUser, space_type_data: dict) -> ServiceResult[SpaceType]:
         """
-        创建新的空间类型。只有系统管理员可以操作。
+        创建新的空间类型。
+        只允许系统管理员和超级管理员操作。(与 SpaceTypeAdmin 的 has_add_permission 保持一致)
         """
-        if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
+        # 简化权限检查：user.is_system_admin 已包含 user.is_superuser
+        if not user.is_system_admin:  # <--- 修改点
             return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
@@ -93,9 +112,11 @@ class SpaceTypeService(BaseService):
     @transaction.atomic
     def update_space_type(self, user: CustomUser, pk: int, space_type_data: dict) -> ServiceResult[SpaceType]:
         """
-        更新空间类型。只有系统管理员可以操作。
+        更新空间类型。
+        只允许系统管理员和超级管理员操作。(与 SpaceTypeAdmin 的 has_change_permission 保持一致)
         """
-        if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
+        # 简化权限检查：user.is_system_admin 已包含 user.is_superuser
+        if not user.is_system_admin:  # <--- 修改点
             return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,
@@ -123,10 +144,11 @@ class SpaceTypeService(BaseService):
     @transaction.atomic
     def delete_space_type(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         """
-        删除空间类型。只有系统管理员可以操作。
-        在删除前需要检查是否有 Space 绑定到该 SpaceType。
+        删除空间类型。
+        只允许系统管理员和超级管理员操作。(与 SpaceTypeAdmin 的 has_delete_permission 保持一致)
         """
-        if not (user.is_superuser or getattr(user, 'is_system_admin', False)):
+        # 简化权限检查：user.is_system_admin 已包含 user.is_superuser
+        if not user.is_system_admin:  # <--- 修改点
             return ServiceResult.error_result(
                 message=ForbiddenException.default_detail,
                 error_code=ForbiddenException.default_code,

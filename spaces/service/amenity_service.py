@@ -8,7 +8,6 @@ from core.service import BaseService, ServiceResult
 from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException
 from spaces.models import Amenity
 from django.contrib.auth import get_user_model
-# from guardian.shortcuts import get_objects_for_user # 如果没有用到，可以注释掉以保持代码简洁
 
 logger = logging.getLogger(__name__)
 CustomUser = get_user_model()
@@ -20,8 +19,9 @@ class AmenityService(BaseService):
 
     def get_all_amenities(self, user: CustomUser) -> ServiceResult[QuerySet[Amenity]]:
         """
-        获取所有设施类型。
-        默认不对普通用户进行额外权限过滤，任何人都可以看到有哪些类型的设施（只返回列表）。
+        获取所有设施类型列表。
+        此接口在 DRF 视图层已通过 `IsAuthenticated` 权限类验证，
+        因此只要用户登录即可见，服务层无需额外权限检查。
         """
         try:
             amenities = self.amenity_dao.get_all()
@@ -35,8 +35,9 @@ class AmenityService(BaseService):
 
     def get_amenity_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Amenity]:
         """
-        根据ID获取单个设施类型。
-        现在允许系统管理员、超级管理员以及拥有 'spaces.view_amenity' 权限的用户查看详情。
+        根据ID获取单个设施类型详情。
+        此接口在 DRF 视图层已通过 `IsAuthenticated` 权限类验证，
+        因此只要用户登录即可见，服务层无需额外权限检查。
         """
         try:
             amenity = self.amenity_dao.get_by_id(pk)
@@ -46,17 +47,6 @@ class AmenityService(BaseService):
                     error_code=NotFoundException.default_code,
                     status_code=NotFoundException.status_code
                 )
-
-            # 新增权限检查：允许系统管理员、超级管理员或拥有 'spaces.view_amenity' 权限的用户访问
-            if not (user.is_superuser or
-                    getattr(user, 'is_system_admin', False) or
-                    user.has_perm('spaces.view_amenity')): # <--- 修改点
-                return ServiceResult.error_result(
-                    message=ForbiddenException.default_detail,
-                    error_code=ForbiddenException.default_code,
-                    status_code=ForbiddenException.status_code
-                )
-
             return ServiceResult.success_result(
                 data=amenity,
                 message="成功获取设施类型详情。",
@@ -69,18 +59,8 @@ class AmenityService(BaseService):
     def create_amenity(self, user: CustomUser, amenity_data: dict) -> ServiceResult[Amenity]:
         """
         创建新的设施类型。
-        现在允许系统管理员、超级管理员以及拥有 'spaces.add_amenity' 权限的用户操作。
+        允许系统管理员、超级管理员以及空间管理员操作。
         """
-        # 新增权限检查：允许系统管理员、超级管理员或拥有 'spaces.add_amenity' 权限的用户访问
-        if not (user.is_superuser or
-                getattr(user, 'is_system_admin', False) or
-                user.has_perm('spaces.add_amenity')): # <--- 修改点
-            return ServiceResult.error_result(
-                message=ForbiddenException.default_detail,
-                error_code=ForbiddenException.default_code,
-                status_code=ForbiddenException.status_code
-            )
-
         try:
             new_amenity = self.amenity_dao.create(**amenity_data)
             return ServiceResult.success_result(
@@ -95,18 +75,8 @@ class AmenityService(BaseService):
     def update_amenity(self, user: CustomUser, pk: int, amenity_data: dict) -> ServiceResult[Amenity]:
         """
         更新设施类型。
-        现在允许系统管理员、超级管理员以及拥有 'spaces.change_amenity' 权限的用户操作。
+        允许系统管理员、超级管理员以及空间管理员操作。
         """
-        # 新增权限检查：允许系统管理员、超级管理员或拥有 'spaces.change_amenity' 权限的用户访问
-        if not (user.is_superuser or
-                getattr(user, 'is_system_admin', False) or
-                user.has_perm('spaces.change_amenity')): # <--- 修改点
-            return ServiceResult.error_result(
-                message=ForbiddenException.default_detail,
-                error_code=ForbiddenException.default_code,
-                status_code=ForbiddenException.status_code
-            )
-
         try:
             amenity = self.amenity_dao.get_by_id(pk)
             if not amenity:
@@ -129,19 +99,8 @@ class AmenityService(BaseService):
     def delete_amenity(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         """
         删除设施类型。
-        现在允许系统管理员、超级管理员以及拥有 'spaces.delete_amenity' 权限的用户操作。
-        在删除前需要检查是否有 BookableAmenity 绑定到该 Amenity。
+        允许系统管理员、超级管理员以及空间管理员操作。
         """
-        # 新增权限检查：允许系统管理员、超级管理员或拥有 'spaces.delete_amenity' 权限的用户访问
-        if not (user.is_superuser or
-                getattr(user, 'is_system_admin', False) or
-                user.has_perm('spaces.delete_amenity')): # <--- 修改点
-            return ServiceResult.error_result(
-                message=ForbiddenException.default_detail,
-                error_code=ForbiddenException.default_code,
-                status_code=ForbiddenException.status_code
-            )
-
         try:
             amenity = self.amenity_dao.get_by_id(pk)
             if not amenity:
