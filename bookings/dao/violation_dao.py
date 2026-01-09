@@ -4,11 +4,10 @@ from django.conf import settings
 from guardian.shortcuts import get_objects_for_user
 from typing import Optional, Dict, Any, Tuple
 
-from bookings.models import Violation, Booking, UserPenaltyPointsPerSpaceType  # 导入 Booking 来协助 Violation 模型的创建
-from core.dao import BaseDAO  # 导入 BaseDAO
+from bookings.models import Violation, Booking, UserPenaltyPointsPerSpaceType
+from core.dao import BaseDAO
 from spaces.models import Space, SpaceType
-from users.models import CustomUser  # 明确导入 CustomUser
-
+from users.models import CustomUser
 
 class ViolationDAO(BaseDAO):
     model = Violation
@@ -25,20 +24,19 @@ class ViolationDAO(BaseDAO):
     def get_violations_for_admin_view(self, user: CustomUser) -> QuerySet[Violation]:
         """
         根据用户权限获取适用于 Admin 视图的违规记录 QuerySet。
-        超级管理员和系统管理员可以看到所有，空间管理员看到其管理空间类型下的违规。
+        视图层确保用户已认证并通过角色检查，Service层负责根据对象级权限过滤数据。
         """
         qs = self.get_queryset()
 
         if user.is_superuser or user.is_system_admin:
             return qs
 
-        # 获取用户有管理权限的空间实例
+        # 获取用户有管理权限的空间实例 (基于 guardian)
         managed_spaces = get_objects_for_user(
             user, 'spaces.can_manage_space_details', klass=Space
         )
 
         # 提取这些空间对应的空间类型ID
-        # 过滤掉 None 确保只有有效的 space_type_id
         managed_spacetype_ids = [
             space_type_id for space_type_id in
             managed_spaces.values_list('space_type__id', flat=True).distinct()
@@ -48,7 +46,6 @@ class ViolationDAO(BaseDAO):
         # 过滤违规记录：
         # 1. 违规记录直接关联的空间类型在用户管理的类型中
         # 2. 违规记录的预订目标（空间或设施所在空间）的空间类型在用户管理的类型中
-        # 使用 Q 对象进行 OR 查询，并使用 distinct() 避免重复
         return qs.filter(
             Q(space_type__id__in=managed_spacetype_ids) |
             Q(booking__space__space_type__id__in=managed_spacetype_ids) |
@@ -68,13 +65,10 @@ class ViolationDAO(BaseDAO):
         """
         创建新的违规记录。
         """
-        # 如果 issued_by 未提供，通常默认为执行此操作的 user
         if issued_by is None:
             issued_by = user
 
-        # 注意：这里调用的是 BaseDAO 的 create 方法，它应该会调用 model.save()
-        # 从而触发 pre_save 和 post_save 信号。
-        return self.create(  # BaseDAO 继承了 model.objects.create 的行为
+        return self.create(
             user=user,
             booking=booking,
             space_type=space_type,
@@ -91,15 +85,15 @@ class ViolationDAO(BaseDAO):
         """
         for attr, value in kwargs.items():
             setattr(violation_instance, attr, value)
-        violation_instance.full_clean()  # 强制执行模型 clean 方法
-        violation_instance.save()  # 触发信号
+        violation_instance.full_clean()
+        violation_instance.save()
         return violation_instance
 
     def delete_violation(self, violation_instance: Violation) -> None:
         """
         删除指定的违规记录实例。
         """
-        violation_instance.delete()  # 触发信号
+        violation_instance.delete()
 
     def get_user_penalty_points_record(self, user: CustomUser, space_type: Optional[SpaceType]) -> Optional[
         UserPenaltyPointsPerSpaceType]:
@@ -126,19 +120,9 @@ class ViolationDAO(BaseDAO):
             return SpaceType.objects.all()
 
         managed_spaces = get_objects_for_user(user, 'spaces.can_manage_space_details', klass=Space)
-        # 从 managed_spaces 中提取 space_type_id，并过滤掉 None
         return SpaceType.objects.filter(
             id__in=[
                 sid for sid in managed_spaces.values_list('space_type__id', flat=True).distinct()
                 if sid is not None
             ]
         )
-
-    # 可以根据需要添加更多查询方法，例如：
-    # def get_active_bans_for_user(self, user: CustomUser) -> QuerySet[UserSpaceTypeBan]:
-    #     """获取用户当前活跃的所有禁用记录。"""
-    #     from bookings.models import UserSpaceTypeBan # 延迟导入以避免循环依赖
-    #     return UserSpaceTypeBan.objects.filter(
-    #         user=user,
-    #         end_date__gt=timezone.now()
-    #     )

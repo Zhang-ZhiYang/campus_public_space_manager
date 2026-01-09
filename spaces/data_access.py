@@ -7,10 +7,10 @@ from django.core.exceptions import ValidationError  # 导入Django的ValidationE
 from spaces.models import Amenity, Space
 from core.utils.exceptions import NotFoundException, ConflictException, CustomAPIException, BadRequestException
 
-
 class AmenityDataAccess:
     """
     负责设施（Amenity）模型的数据库交互。
+    此层不包含权限逻辑，仅处理数据存取。
     """
 
     @staticmethod
@@ -64,72 +64,54 @@ class AmenityDataAccess:
         except Exception as e:
             raise CustomAPIException(detail=f"删除设施失败: {str(e)}")
 
-
 class SpaceDataAccess:
     """
     负责空间（Space）模型的数据库交互。
+    此层不包含权限逻辑，仅处理数据存取。
     """
 
     @staticmethod
     def get_space_by_id(space_id: int) -> Space:
         """根据ID获取空间，并预加载设施"""
         try:
-            return Space.objects.prefetch_related('amenities').get(id=space_id)
+            return Space.objects.prefetch_related('bookable_amenities').get(id=space_id)
         except Space.DoesNotExist:
             raise NotFoundException(detail=f"空间 ID {space_id} 未找到。")
 
     @staticmethod
     def list_spaces(**filters) -> QuerySet[Space]:
         """列出所有空间，可带过滤条件，并预加载设施"""
-        return Space.objects.filter(**filters).prefetch_related('amenities').order_by('name')
+        return Space.objects.filter(**filters).prefetch_related('bookable_amenities').order_by('name')
 
     @staticmethod
-    def create_space(data: Dict[str, Any], amenity_ids: List[int]) -> Space:
-        """创建新空间并关联设施"""
+    def create_space(data: Dict[str, Any]) -> Space:
+        """创建新空间。注意：关联设施的逻辑已移至 Service 层。"""
         try:
             with transaction.atomic():
-                space = Space.objects.create(**data)  # 创建空间时会触发模型save方法及其中的clean()
-                if amenity_ids:
-                    # 批量获取设施，检查是否存在缺失ID
-                    amenities = Amenity.objects.filter(id__in=amenity_ids)
-                    if len(amenity_ids) != amenities.count():
-                        found_ids = set(amenity.id for amenity in amenities)
-                        missing_ids = set(amenity_ids) - found_ids
-                        raise NotFoundException(detail=f"部分设施ID未找到: {list(missing_ids)}")
-                    space.amenities.set(amenities)
+                space = Space.objects.create(**data)
                 return space
-        except IntegrityError:  # 捕获唯一性约束错误 (如名称重复)
+        except IntegrityError:
             raise ConflictException(detail=f"空间名称 '{data.get('name', '')}' 已存在。")
-        except ValidationError as e:  # 捕获模型 clean() 或字段验证的错误
+        except ValidationError as e:
             raise BadRequestException(
                 detail=f"数据验证失败: {e.message_dict if hasattr(e, 'message_dict') else str(e)}")
         except Exception as e:
             raise CustomAPIException(detail=f"创建空间失败: {str(e)}")
 
     @staticmethod
-    def update_space(space: Space, data: Dict[str, Any], amenity_ids: Optional[List[int]] = None) -> Space:
-        """更新空间信息及关联设施"""
+    def update_space(space: Space, data: Dict[str, Any]) -> Space:
+        """更新空间信息。注意：关联设施的逻辑已移至 Service 层。"""
         try:
             with transaction.atomic():
                 for attr, value in data.items():
                     setattr(space, attr, value)
-
-                # space.save() 调用会触发模型的 clean() 和 full_clean()
-                # 并且在_save()中已经处理了 is_active => is_bookable 的逻辑
+                space.full_clean()
                 space.save()
-
-                if amenity_ids is not None:  # 仅当 amenity_ids 明确提供时才更新关联设施
-                    amenities = Amenity.objects.filter(id__in=amenity_ids)
-                    if len(amenity_ids) != amenities.count():
-                        found_ids = set(amenity.id for amenity in amenities)
-                        missing_ids = set(amenity_ids) - found_ids
-                        raise NotFoundException(detail=f"部分设施ID未找到: {list(missing_ids)}")
-                    space.amenities.set(amenities)
             return space
         except IntegrityError:
             name_to_check = data.get('name', space.name)
             raise ConflictException(detail=f"空间名称 '{name_to_check}' 已存在。")
-        except ValidationError as e:  # 捕获模型 clean() 或字段验证的错误
+        except ValidationError as e:
             raise BadRequestException(
                 detail=f"数据验证失败: {e.message_dict if hasattr(e, 'message_dict') else str(e)}")
         except Exception as e:
@@ -140,7 +122,7 @@ class SpaceDataAccess:
         """删除空间"""
         try:
             space.delete()
-        except IntegrityError:  # Can happen if other models (e.g., Booking) have a protected ForeignKey
+        except IntegrityError:
             raise ConflictException(detail="无法删除空间，它被其他记录引用（如预订记录）。")
         except Exception as e:
             raise CustomAPIException(detail=f"删除空间失败: {str(e)}")

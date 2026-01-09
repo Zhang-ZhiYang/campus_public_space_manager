@@ -14,23 +14,24 @@ class AmenityAdmin(admin.ModelAdmin):
     fields = ('name', 'description', 'is_bookable_individually')
 
     def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        return request.user.is_staff and (
-                request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager)
+        # 只要用户有任何关于 Amenity 的权限，就允许看到模块
+        return request.user.has_perm('spaces.can_view_amenity') or \
+            request.user.has_perm('spaces.can_create_amenity') or \
+            request.user.has_perm('spaces.can_edit_amenity') or \
+            request.user.has_perm('spaces.can_delete_amenity')
+        # 或者更简单的：
+        # return request.user.has_perm('spaces.view_amenity') # Django 默认 view 权限
+        # 或者如果你自定义的权限，用 request.user.has_perm('spaces.can_view_amenity')
+        # 我们这里假设 `can_view_amenity` 是你自定义的查看权限
 
     def has_view_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager
+        return request.user.has_perm('spaces.can_view_amenity')
 
     def has_add_permission(self, request):
-        if not request.user.is_authenticated: return False
-        # 允许系统管理员、超级管理员 和 空间管理员 添加设施类型
-        return request.user.is_superuser or request.user.is_system_admin or request.user.is_space_manager
+        return request.user.has_perm('spaces.can_create_amenity')
 
     def has_change_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        return request.user.has_perm('spaces.can_edit_amenity')
 
     def has_delete_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or request.user.is_system_admin
+        return request.user.has_perm('spaces.can_delete_amenity')

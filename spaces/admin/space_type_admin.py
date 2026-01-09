@@ -42,21 +42,20 @@ class SpaceTypeAdmin(admin.ModelAdmin):
     # --- END REMOVED ---
 
     def has_module_permission(self, request):
-        if not request.user.is_authenticated: return False
-        return request.user.is_staff and (request.user.is_superuser or getattr(request.user, 'is_system_admin', False))
+        # 只要用户有任何关于 SpaceType 的权限，就允许看到模块
+        return request.user.has_perm('spaces.can_view_spacetype') or \
+               request.user.has_perm('spaces.can_create_spacetype') or \
+               request.user.has_perm('spaces.can_edit_spacetype') or \
+               request.user.has_perm('spaces.can_delete_spacetype')
 
     def has_view_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        return request.user.has_perm('spaces.can_view_spacetype')
 
     def has_add_permission(self, request):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        return request.user.has_perm('spaces.can_create_spacetype')
 
     def has_change_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        return request.user.has_perm('spaces.can_edit_spacetype')
 
     def has_delete_permission(self, request, obj=None):
-        if not request.user.is_authenticated: return False
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        return request.user.has_perm('spaces.can_delete_spacetype')

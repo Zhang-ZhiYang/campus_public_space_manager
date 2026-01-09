@@ -10,13 +10,13 @@ import logging
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 
-# 从 rest_framework.exceptions 导入具体的异常，用于捕获 DRF 自动抛出的非 CustomAPIException 类型的验证错误
 from rest_framework.exceptions import ValidationError as DRFValidationError, NotFound as DRFNotFound, \
     PermissionDenied as DRFPermissionDenied, AuthenticationFailed, NotAuthenticated
 
 from core.utils.response import success_response, error_response
 from core.utils.exceptions import CustomAPIException, ServiceException, BadRequestException, NotFoundException, \
     ForbiddenException
+
 from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_201_CREATED, HTTP_200_OK, HTTP_204_NO_CONTENT
 
 # 导入所有 Service
@@ -31,8 +31,10 @@ from spaces.api.serializers import (
     SpaceTypeBaseSerializer, SpaceTypeCreateUpdateSerializer
 )
 
-logger = logging.getLogger(__name__)
+# 导入自定义权限装饰器
+from core.decorators import is_system_admin_required, is_admin_or_space_manager_required
 
+logger = logging.getLogger(__name__)
 
 # --- 自定义分页类 (用于 Space) ---
 class SpacePagination(PageNumberPagination):
@@ -40,11 +42,10 @@ class SpacePagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 100
 
-
 # --- Space API Views ---
 
 class SpaceListCreateAPIView(ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都应能列出空间，创建空间需要特定权限
     filter_backends = []
     search_fields = ['name', 'location', 'description']
     ordering_fields = ['name', 'capacity', 'created_at']
@@ -58,14 +59,13 @@ class SpaceListCreateAPIView(ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        service_result = SpaceService().get_all_spaces(user)
+        service_result = SpaceService().get_all_spaces(user) # Service层负责数据权限过滤
         if service_result.success:
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
-        # 覆写 list 方法，确保返回 ServiceResult 的数据
         try:
             queryset = self.filter_queryset(self.get_queryset())
 
@@ -92,6 +92,7 @@ class SpaceListCreateAPIView(ListCreateAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能创建空间
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -121,13 +122,13 @@ class SpaceListCreateAPIView(ListCreateAPIView):
                     status_code=HTTP_201_CREATED
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFValidationError, DRFNotFound, DRFPermissionDenied, AuthenticationFailed,
                 NotAuthenticated) as e:
             logger.warning(f"Known API Exception caught in SpaceListCreateAPIView (create): {type(e).__name__} - {e}")
             raise e
-        except DjangoValidationError as e:  # 捕获 Django 模型级别的 ValidationError
+        except DjangoValidationError as e:
             logger.warning(f"DjangoValidationError caught in SpaceListCreateAPIView (create): {e}")
             raise BadRequestException(detail=e.message_dict if hasattr(e, 'message_dict') else str(e))
         except Exception as e:
@@ -135,9 +136,8 @@ class SpaceListCreateAPIView(ListCreateAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
-
 class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都应能检索空间，更新和删除需要特定权限
     lookup_field = 'pk'
 
     def get_serializer_class(self):
@@ -148,14 +148,13 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
     def get_object(self):
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        service_result = SpaceService().get_space_by_id(user, pk)
+        service_result = SpaceService().get_space_by_id(user, pk) # Service层负责数据权限过滤
         if service_result.success:
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
-        # 覆写 retrieve 方法，确保返回 ServiceResult 的数据
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
@@ -174,8 +173,9 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能更新空间
     def update(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance = self.get_object() # 这里的 get_object 已经包含了查看权限的 Service 逻辑
         serializer = self.get_serializer(instance, data=request.data, partial=kwargs.get('partial', False))
         serializer.is_valid(raise_exception=True)
 
@@ -197,17 +197,18 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
         space_data_for_service['amenity_ids'] = amenity_ids
 
         try:
+            # Service 层内部会再次进行对象级权限检查（user.has_perm）
             service_result = SpaceService().update_space(user, instance.pk, space_data_for_service)
 
             if service_result.success:
                 response_data = SpaceBaseSerializer(service_result.data).data
                 return success_response(
-                    message=MSG_SUCCESS,
+                    message="空间更新成功。",
                     data=response_data,
                     status_code=HTTP_200_OK
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFValidationError, DRFNotFound, DRFPermissionDenied, AuthenticationFailed,
                 NotAuthenticated) as e:
@@ -222,21 +223,23 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能删除空间
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance = self.get_object() # 这里的 get_object 已经包含了查看权限的 Service 逻辑
         user = request.user
 
         try:
+            # Service 层内部会再次进行对象级权限检查（user.has_perm）
             service_result = SpaceService().delete_space(user, instance.pk)
 
             if service_result.success:
                 return success_response(
-                    message=MSG_SUCCESS,
+                    message="空间删除成功。",
                     data=None,
                     status_code=HTTP_204_NO_CONTENT
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFNotFound, DRFPermissionDenied, AuthenticationFailed, NotAuthenticated) as e:
             logger.warning(
@@ -247,11 +250,10 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
-
 # --- SpaceType API Views ---
 
 class SpaceTypeListView(ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都可以列出 SpaceType，创建需要特定权限
     pagination_class = None
 
     def get_serializer_class(self):
@@ -261,14 +263,13 @@ class SpaceTypeListView(ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        service_result = SpaceTypeService().get_all_space_types(user)
+        service_result = SpaceTypeService().get_all_space_types(user) # Service层负责数据权限过滤
         if service_result.success:
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
-        # 覆写 list 方法，确保返回 ServiceResult 的数据
         try:
             queryset = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset, many=True)
@@ -285,6 +286,7 @@ class SpaceTypeListView(ListCreateAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_system_admin_required # 只有系统管理员能创建空间类型
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -303,7 +305,7 @@ class SpaceTypeListView(ListCreateAPIView):
                     status_code=HTTP_201_CREATED
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFValidationError, DRFNotFound, DRFPermissionDenied, AuthenticationFailed,
                 NotAuthenticated) as e:
@@ -317,9 +319,8 @@ class SpaceTypeListView(ListCreateAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
-
 class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都可以检索 SpaceType，更新和删除需要特定权限
     lookup_field = 'pk'
 
     def get_serializer_class(self):
@@ -330,14 +331,13 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     def get_object(self):
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        service_result = SpaceTypeService().get_space_type_by_id(user, pk)
+        service_result = SpaceTypeService().get_space_type_by_id(user, pk) # Service层负责数据权限过滤
         if service_result.success:
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
-        # 覆写 retrieve 方法，确保返回 ServiceResult 的数据
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
@@ -356,8 +356,9 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_system_admin_required # 只有系统管理员能更新空间类型
     def update(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance = self.get_object() # 这里的 get_object 已经包含了查看权限的 Service 逻辑
         serializer = self.get_serializer(instance, data=request.data, partial=kwargs.get('partial', False))
         serializer.is_valid(raise_exception=True)
 
@@ -370,12 +371,12 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             if service_result.success:
                 response_data = SpaceTypeBaseSerializer(service_result.data).data
                 return success_response(
-                    message=MSG_SUCCESS,
+                    message="空间类型更新成功。",
                     data=response_data,
                     status_code=HTTP_200_OK
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFValidationError, DRFNotFound, DRFPermissionDenied, AuthenticationFailed,
                 NotAuthenticated) as e:
@@ -390,8 +391,9 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_system_admin_required # 只有系统管理员能删除空间类型
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance = self.get_object() # 这里的 get_object 已经包含了查看权限的 Service 逻辑
         user = request.user
 
         try:
@@ -399,12 +401,12 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
             if service_result.success:
                 return success_response(
-                    message=MSG_SUCCESS,
+                    message="空间类型删除成功。",
                     data=None,
                     status_code=HTTP_204_NO_CONTENT
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFNotFound, DRFPermissionDenied, AuthenticationFailed, NotAuthenticated) as e:
             logger.warning(
@@ -416,11 +418,10 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
-
 # --- Amenity API Views ---
 
 class AmenityListView(ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都可以列出 Amenity，创建需要特定权限
     pagination_class = None
 
     def get_serializer_class(self):
@@ -430,14 +431,13 @@ class AmenityListView(ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        service_result = AmenityService().get_all_amenities(user)
+        service_result = AmenityService().get_all_amenities(user) # Service层负责数据权限过滤
         if service_result.success:
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
-        # 覆写 list 方法，确保返回 ServiceResult 的数据
         try:
             queryset = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset, many=True)
@@ -454,6 +454,7 @@ class AmenityListView(ListCreateAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能创建设施类型
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -472,7 +473,7 @@ class AmenityListView(ListCreateAPIView):
                     status_code=HTTP_201_CREATED
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFValidationError, DRFNotFound, DRFPermissionDenied, AuthenticationFailed,
                 NotAuthenticated) as e:
@@ -486,9 +487,8 @@ class AmenityListView(ListCreateAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
-
 class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都可以检索 Amenity，更新和删除需要特定权限
     lookup_field = 'pk'
 
     def get_serializer_class(self):
@@ -499,14 +499,13 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     def get_object(self):
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        service_result = AmenityService().get_amenity_by_id(user, pk)
+        service_result = AmenityService().get_amenity_by_id(user, pk) # Service层负责数据权限过滤
         if service_result.success:
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
-        # 覆写 retrieve 方法，确保返回 ServiceResult 的数据
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
@@ -525,8 +524,9 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能更新设施类型
     def update(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance = self.get_object() # 这里的 get_object 已经包含了查看权限的 Service 逻辑
         serializer = self.get_serializer(instance, data=request.data, partial=kwargs.get('partial', False))
         serializer.is_valid(raise_exception=True)
 
@@ -539,12 +539,12 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             if service_result.success:
                 response_data = AmenityBaseSerializer(service_result.data).data
                 return success_response(
-                    message=MSG_SUCCESS,
+                    message="设施类型更新成功。",
                     data=response_data,
                     status_code=HTTP_200_OK
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFValidationError, DRFNotFound, DRFPermissionDenied, AuthenticationFailed,
                 NotAuthenticated) as e:
@@ -559,8 +559,9 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise ServiceException(message="服务器内部错误。", error_code="server_error",
                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能删除设施类型
     def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance = self.get_object() # 这里的 get_object 已经包含了查看权限的 Service 逻辑
         user = request.user
 
         try:
@@ -568,12 +569,12 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
             if service_result.success:
                 return success_response(
-                    message=MSG_SUCCESS,
+                    message="设施类型删除成功。",
                     data=None,
                     status_code=HTTP_204_NO_CONTENT
                 )
             else:
-                raise service_result.to_exception()  # <--- 关键修改：统一通过 to_exception 抛出
+                raise service_result.to_exception()
 
         except (CustomAPIException, DRFNotFound, DRFPermissionDenied, AuthenticationFailed, NotAuthenticated) as e:
             logger.warning(

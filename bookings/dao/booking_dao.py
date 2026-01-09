@@ -1,11 +1,11 @@
 # bookings/dao/booking_dao.py
 from typing import Optional, List
 
-from django.db.models import QuerySet
+from django.db.models import QuerySet, Q
 from core.dao import BaseDAO
 from bookings.models import Booking
-from spaces.models import Space, BookableAmenity, CustomUser  # 确保导入 Space 和 BookableAmenity
-from django.utils import timezone # 导入 timezone
+from spaces.models import Space, BookableAmenity, CustomUser
+from django.utils import timezone
 
 class BookingDAO(BaseDAO):
     model = Booking
@@ -20,7 +20,7 @@ class BookingDAO(BaseDAO):
             'bookable_amenity__amenity',
             'bookable_amenity__space__space_type',
             'reviewed_by'
-        ).prefetch_related( # NEW: 预加载 permitted_groups
+        ).prefetch_related(
             'space__permitted_groups',
             'bookable_amenity__space__permitted_groups'
         )
@@ -84,12 +84,13 @@ class BookingDAO(BaseDAO):
         if booking.bookable_amenity and booking.bookable_amenity.space:
             return booking.bookable_amenity.space
         return None
+
     def get_user_bookings_count_for_date(self, user: CustomUser, date: timezone.localdate, status_in: List[str]) -> int:
         """
         获取用户在指定日期内，处于指定状态的预订数量。
         """
         return self.get_queryset().filter(
             user=user,
-            start_time__date=date, # 筛选今天的预订
-            status__in=status_in # 统计进行中或待审核的预订
+            start_time__date=date,
+            status__in=status_in
         ).count()

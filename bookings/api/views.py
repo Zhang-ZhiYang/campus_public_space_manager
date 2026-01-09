@@ -7,9 +7,10 @@ import logging
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.generics import ListAPIView, RetrieveAPIView
-from rest_framework.exceptions import NotFound as DRFNotFound
+from rest_framework.exceptions import NotFound as DRFNotFound, PermissionDenied as DRFPermissionDenied, AuthenticationFailed, NotAuthenticated
 
 from bookings.service.booking_service import BookingService
+from core.utils.constants import HTTP_200_OK
 from core.utils.response import success_response, error_response
 from core.utils.exceptions import CustomAPIException, ServiceException, BadRequestException, NotFoundException, \
     ForbiddenException
@@ -19,15 +20,18 @@ from bookings.api.serializers import (
     BookingStatusUpdateSerializer
 )
 
-logger = logging.getLogger(__name__)
+# 导入自定义权限装饰器
+from core.decorators import is_admin_or_space_manager_required
 
+logger = logging.getLogger(__name__)
 
 # ... (BookingCreateAPIView, UserBookingListAPIView 保持不变) ...
 
 class BookingCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都应该能尝试创建预订
     booking_service = BookingService()
 
+    # 预订的实际权限检查（如能否预订特定空间/设施）在 Service 层处理
     def post(self, request, *args, **kwargs):
         serializer = BookingCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -103,7 +107,6 @@ class BookingCreateAPIView(APIView):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class UserBookingListAPIView(ListAPIView):
     """
     获取当前用户的所有预订列表。
@@ -115,14 +118,12 @@ class UserBookingListAPIView(ListAPIView):
     def get_queryset(self):
         return self.booking_service.get_user_bookings(self.request.user)
 
-    # 重写 list 方法以包装分页响应
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
 
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
-            # 获取 DRF 分页器生成的字典，例如 {"count": ..., "next": ..., "previous": ..., "results": [...]}
             paginated_response_data = self.get_paginated_response(serializer.data).data
             return success_response(
                 message="成功获取用户预订列表。",
@@ -137,7 +138,6 @@ class UserBookingListAPIView(ListAPIView):
             status_code=status.HTTP_200_OK
         )
 
-
 class BookingListAPIView(ListAPIView):
     """
     获取所有预订列表 (仅限管理员访问)。
@@ -146,65 +146,89 @@ class BookingListAPIView(ListAPIView):
     serializer_class = BookingShortSerializer
     booking_service = BookingService()
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能查看所有预订
     def get_queryset(self):
-        service_result = self.booking_service.get_all_bookings(self.request.user)
+        service_result = self.booking_service.get_all_bookings(self.request.user) # Service层负责数据权限过滤
         if not service_result.success:
             raise ForbiddenException(detail=service_result.message)
         return service_result.data
 
-    # 重写 list 方法以包装分页响应
     def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
+        try:
+            queryset = self.filter_queryset(self.get_queryset())
 
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            # 获取 DRF 分页器生成的字典，例如 {"count": ..., "next": ..., "previous": ..., "results": [...]}
-            paginated_response_data = self.get_paginated_response(serializer.data).data
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                paginated_response_data = self.get_paginated_response(serializer.data).data
+                return success_response(
+                    message="成功获取所有预订列表。",
+                    data=paginated_response_data,
+                    status_code=status.HTTP_200_OK
+                )
+
+            serializer = self.get_serializer(queryset, many=True)
             return success_response(
                 message="成功获取所有预订列表。",
-                data=paginated_response_data,
-                status_code=status.HTTP_200_OK
+                data={"results": serializer.data, "count": queryset.count(), "next": None, "previous": None},
+                status_code=HTTP_200_OK
             )
-
-        serializer = self.get_serializer(queryset, many=True)
-        return success_response(
-            message="成功获取所有预订列表。",
-            data={"results": serializer.data, "count": queryset.count(), "next": None, "previous": None},
-            status_code=status.HTTP_200_OK
-        )
-
+        except (CustomAPIException, DRFPermissionDenied, AuthenticationFailed, NotAuthenticated) as e:
+            logger.warning(f"Known API Exception caught in BookingListAPIView (list): {type(e).__name__} - {e}")
+            raise e
+        except Exception as e:
+            logger.exception("An unhandled exception occurred during booking list all in API view.")
+            raise ServiceException(message="服务器内部错误。", error_code="server_error",
+                                   status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
 class BookingRetrieveAPIView(RetrieveAPIView):
     """
     获取单个预订详情。
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都应能检索自己的预订，管理员可检索所有
     serializer_class = BookingDetailSerializer
     booking_service = BookingService()
     lookup_field = 'pk'
 
     def get_queryset(self):
-        if self.request.user.is_superuser or self.request.user.is_system_admin:
-            return self.booking_service.booking_dao.get_queryset()
-        return self.booking_service.booking_dao.get_queryset().filter(user=self.request.user)
+        # Service层无需显式过滤，它只返回一个对象。权限逻辑在 Service.get_booking_by_id 中处理。
+        # 这里只返回一个基础查询集，以便 DRF 的 get_object 可以工作
+        return self.booking_service.booking_dao.get_queryset()
 
-    # 重写 retrieve 方法以包装单个对象响应
+    def get_object(self):
+        # 在这里直接通过 Service 获取，Service 内部会进行对象级权限的检查
+        user = self.request.user
+        pk = self.kwargs[self.lookup_field]
+        service_result = self.booking_service.get_booking(user, pk) # 假设 BookingService 有 get_booking 方法
+        if service_result.success:
+            return service_result.data
+        else:
+            raise service_result.to_exception() # Service 内部会抛出 ForbiddenException 等
+
     def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        return success_response(
-            message="成功获取预订详情。",
-            data=serializer.data,
-            status_code=status.HTTP_200_OK
-        )
-
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance)
+            return success_response(
+                message="成功获取预订详情。",
+                data=serializer.data,
+                status_code=status.HTTP_200_OK
+            )
+        except (CustomAPIException, DRFNotFound, DRFPermissionDenied, AuthenticationFailed, NotAuthenticated) as e:
+            logger.warning(
+                f"Known API Exception caught in BookingRetrieveAPIView (retrieve): {type(e).__name__} - {e}")
+            raise e
+        except Exception as e:
+            logger.exception(
+                f"An unhandled exception occurred during booking retrieval for {self.kwargs[self.lookup_field]} in API view.")
+            raise ServiceException(message="服务器内部错误。", error_code="server_error",
+                                   status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, errors=[str(e)])
 
 class BookingCancelAPIView(APIView):
     """
     取消指定预订。
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 任何认证用户都应能取消自己的预订，管理员可取消所有
     booking_service = BookingService()
 
     def post(self, request, pk, *args, **kwargs):
@@ -212,10 +236,10 @@ class BookingCancelAPIView(APIView):
         booking_id = pk
 
         try:
+            # Service 层内部会进行对象级权限检查（用户是否是预订者本人 或 拥有管理权限）
             service_result = self.booking_service.cancel_booking(user, booking_id)
 
             if service_result.success:
-                # 序列化返回的 booking 对象以确保 consistent format
                 response_data = BookingDetailSerializer(service_result.data).data
                 return success_response(
                     message=service_result.message,
@@ -229,7 +253,7 @@ class BookingCancelAPIView(APIView):
                            "detail": service_result.errors or [service_result.message]},
                     status_code=service_result.status_code
                 )
-        except DRFNotFound:
+        except DRFNotFound: # Service层抛出的NotFound会被统一异常处理为DRFNotFound
             return error_response(
                 message="预订不存在。",
                 error={"code": NotFoundException.default_code, "detail": "指定的预订ID无效。"},
@@ -258,14 +282,14 @@ class BookingCancelAPIView(APIView):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class BookingStatusUpdateAPIView(APIView):
     """
     管理员或空间管理员更新预订状态 (批准、拒绝、签到、签出、未到场、完成)。
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # 认证用户才能访问，但具体操作需要角色权限
     booking_service = BookingService()
 
+    @is_admin_or_space_manager_required # 只有系统管理员或空间管理员能更新预订状态
     def post(self, request, pk, *args, **kwargs):
         serializer = BookingStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -277,10 +301,10 @@ class BookingStatusUpdateAPIView(APIView):
         booking_id = pk
 
         try:
+            # Service 层内部会进行对象级权限检查（如 can_approve_booking 或 can_check_in_booking）
             service_result = self.booking_service.update_booking_status(user, booking_id, new_status, admin_notes)
 
             if service_result.success:
-                # 序列化返回的 booking 对象以确保 consistent format
                 response_data = BookingDetailSerializer(service_result.data).data
                 return success_response(
                     message=service_result.message,

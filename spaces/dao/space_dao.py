@@ -3,7 +3,7 @@ from typing import Optional, List
 from django.db.models import QuerySet
 from core.dao import BaseDAO
 from spaces.models import Space, BookableAmenity  # , CustomUser # CustomUser 在 DAO 中通常不需要直接导入
-
+from guardian.shortcuts import get_objects_for_user
 
 class SpaceDAO(BaseDAO):
     model = Space
@@ -35,19 +35,14 @@ class SpaceDAO(BaseDAO):
         获取用户有权限管理的空间。
         这通常用于空间管理员，他们可以管理那些由他们或他们的团队管理的特定空间。
         """
-        # 如果用户是系统管理员或超级管理员，他们可以管理所有空间
-        if user.is_superuser or getattr(user, 'is_system_admin', False):
-            return self.get_queryset()
-
-        # 否则，列出用户通过 guardian 有 'can_manage_space_details' 权限的空间
-        # 确保只返回活跃且可预订的空间
-        return user.get_all_objects_with_perms(Space, perms=['spaces.can_manage_space_details']).filter(is_active=True,
-                                                                                                        is_bookable=True)
+        # 移除了所有 is_xxx 权限检查，现在由 Service 层/视图层装饰器处理
+        # 始终通过 guardian 过滤，因为这是对象级权限的列表视图
+        return get_objects_for_user(user, 'spaces.can_manage_space_details', klass=self.get_queryset()).filter(is_active=True, is_bookable=True)
 
     def space_has_children(self, space: Space) -> bool:
         """检查空间是否有子空间。"""
         # 使用 related_name 'children_spaces'
-        return space.children_spaces.exists()
+        return space.child_spaces.exists()
 
     def space_has_bookings(self, space: Space, BookingModel) -> bool:
         """

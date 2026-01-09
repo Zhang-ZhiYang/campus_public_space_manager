@@ -128,8 +128,15 @@ class Booking(models.Model):
         verbose_name_plural = verbose_name
         ordering = ['-start_time']
         permissions = (
-            ("can_approve_booking", "Can approve/reject any booking"),
-            ("can_check_in_booking", "Can check in/out any booking"),
+            # --- Global Admin Permissions for Bookings ---
+            ("can_view_all_bookings", "Can view all bookings across all spaces"),
+            ("can_create_booking", "Can create new bookings"), # <-- 修复：新增此权限
+            ("can_approve_any_booking", "Can approve/reject any booking in the system"),
+            ("can_check_in_any_booking", "Can check-in/out any booking in the system"),
+            ("can_cancel_any_booking", "Can cancel any booking in the system"),
+            ("can_edit_any_booking_notes", "Can edit admin notes of any booking"),
+            ("can_delete_any_booking", "Can delete any booking in the system"),
+            ("can_mark_no_show_and_create_violation", "Can mark no-show and create violation"),
         )
         indexes = [
             Index(fields=['user', 'start_time']),
@@ -323,8 +330,13 @@ class Violation(models.Model):
         verbose_name_plural = verbose_name
         ordering = ['-issued_at']
         permissions = (
-            ("can_resolve_violation", "Can resolve any violation"),
+            ("can_view_all_violations", "Can view all violation records"),
+            ("can_create_violation_record", "Can create new violation records"),
+            ("can_edit_violation_record", "Can edit any violation record"),
+            ("can_delete_violation_record", "Can delete any violation record"),
+            ("can_resolve_violation_record", "Can resolve any violation record"),
         )
+
         indexes = [
             Index(fields=['user']),
             Index(fields=['booking']),
@@ -390,6 +402,9 @@ class UserPenaltyPointsPerSpaceType(models.Model):
         verbose_name_plural = verbose_name
         unique_together = ('user', 'space_type')
         ordering = ['user__username', 'space_type__name']
+        permissions = [ # <-- 修复：新增此权限元选项
+            ("can_view_penalty_points", "Can view user penalty points records"),
+        ]
         indexes = [
             Index(fields=['user']),
             Index(fields=['space_type']),
@@ -455,7 +470,10 @@ class SpaceTypeBanPolicy(models.Model):
             Index(fields=['space_type', 'threshold_points']),
             Index(fields=['is_active']),
         ]
-
+        permissions = (
+            ("can_view_ban_policies", "Can view space type ban policies"),
+            ("can_manage_ban_policies", "Can create, edit, delete space type ban policies"),
+        )
     def __str__(self):
         space_type_name = self.space_type.name if self.space_type else "全局"
         return (
@@ -517,6 +535,10 @@ class UserSpaceTypeBan(models.Model):
         verbose_name = '用户禁用记录'
         verbose_name_plural = verbose_name
         ordering = ['-start_date']
+        permissions = (
+            ("can_view_user_bans", "Can view user ban records"),
+            ("can_manage_user_bans", "Can create, edit, delete user ban records"),
+        )
         indexes = [
             Index(fields=['user']),
             Index(fields=['space_type']),
@@ -590,6 +612,10 @@ class UserSpaceTypeExemption(models.Model):
         verbose_name_plural = verbose_name
         unique_together = ('user', 'space_type')
         ordering = ['user__username', 'space_type__name']
+        permissions = (
+            ("can_view_user_exemptions", "Can view user exemption records"),
+            ("can_manage_user_exemptions", "Can create, edit, delete user exemption records"),
+        )
         indexes = [
             Index(fields=['user']),
             Index(fields=['space_type']),
@@ -632,6 +658,10 @@ class DailyBookingLimit(models.Model):
         verbose_name = '每日预订限制'
         verbose_name_plural = verbose_name
         ordering = ['group__name']
+        permissions = [
+            ("can_view_daily_booking_limits", "Can view daily booking limits"),
+            ("can_manage_daily_booking_limits", "Can manage daily booking limits (add, change, delete)"),
+        ]
         indexes = [
             Index(fields=['group']),
             Index(fields=['is_active']),
