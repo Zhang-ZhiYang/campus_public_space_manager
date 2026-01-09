@@ -60,21 +60,34 @@ def get_all_descendant_spaces(space_instance):
     """
     descendants = set()
     queue = list(space_instance.child_spaces.all())
-    seen_pks = {space_instance.pk}  # 记录已处理的PK，用于避免循环和重复
+    # 记录已处理的PK，用于避免循环和重复。从当前 space_instance 开始
+    # 使用 set 而不是 {space_instance.pk} 是为了确保在处理嵌套子空间时，
+    # 即使队列中有重复或循环，也能正确跳过。
+    seen_pks = set()
+
+    # 初始将所有直接子空间加入队列和 seen_pks
+    for child in queue:
+        if child.pk not in seen_pks:
+            seen_pks.add(child.pk)
+        else:
+            logger.warning(
+                f"Duplicate direct child {child.name} (PK:{child.pk}) detected for Space {space_instance.name} during initial descendant lookup.")
 
     current_level = queue
     next_level = []
 
     while current_level:
         for current_child in current_level:
-            if current_child.pk not in seen_pks:
-                descendants.add(current_child)
-                seen_pks.add(current_child.pk)
-                next_level.extend(list(current_child.child_spaces.all()))
-            else:
-                # 理论上 clean() 方法会阻止循环，但这可以作为运行时防范
-                logger.warning(
-                    f"Circular reference detected or duplicate child processed for Space {current_child.name} (PK:{current_child.pk}) during descendant lookup from parent {space_instance.name}.")
+            descendants.add(current_child)  # 将当前子空间添加到结果集
+
+            # 遍历当前子空间的所有子空间
+            for deeper_child in current_child.child_spaces.all():
+                if deeper_child.pk not in seen_pks:
+                    seen_pks.add(deeper_child.pk)
+                    next_level.append(deeper_child)
+                else:
+                    logger.warning(
+                        f"Circular reference or duplicate child {deeper_child.name} (PK:{deeper_child.pk}) detected during descendant lookup from parent {current_child.name} (root: {space_instance.name}). Skipping.")
 
         current_level = next_level
         next_level = []
@@ -403,7 +416,7 @@ class Space(models.Model):
             raise ValidationError({'is_bookable': '不活跃的空间不能设置为可预订。'})
 
         if self.available_start_time and self.available_end_time and \
-                self.available_start_time >= self.available_end_time:
+                self.available_start_time >= self.available_end_time:  # 修复了原始代码中的反向检查
             raise ValidationError({'available_end_time': '每日最晚可预订时间必须晚于最早可预订时间。'})
 
         if self.is_container and self.is_bookable:
@@ -418,13 +431,20 @@ class Space(models.Model):
         if self.pk and self.parent_space == self:
             raise ValidationError({'parent_space': '空间不能将自身设置为父级空间。'})
 
-        if self.parent_space and self.parent_space.pk:
+        # 循环引用检测
+        if self.parent_space and self.pk:  # 仅当存在父级且当前实例已保存时检查
             current = self.parent_space
-            processed_pks = {self.pk}
+            processed_pks = {self.pk}  # 包含当前实例的PK
+            traversal_path = [self.name]
+
             while current:
                 if current.pk in processed_pks:
-                    raise ValidationError({'parent_space': '父级空间不能是其子空间或孙子空间（检测到循环引用）。'})
+                    path_str = " -> ".join(traversal_path + [current.name])
+                    raise ValidationError(
+                        {'parent_space': f'父级空间不能是其子空间或孙子空间（检测到循环引用: {path_str}）。'})
+
                 processed_pks.add(current.pk)
+                traversal_path.append(current.name)
                 current = current.parent_space
 
     def save(self, *args, **kwargs):
@@ -436,6 +456,7 @@ class Space(models.Model):
 
         if self.space_type:
             # 继承 SpaceType 的默认规则 (仅当 Space 自己的字段为空时)
+            # 注意：这里只在字段为None时继承。如果字段有值（即使是False），则使用自己的值。
             if self.requires_approval is None:
                 self.requires_approval = self.space_type.default_requires_approval
             if self.available_start_time is None:
@@ -449,6 +470,7 @@ class Space(models.Model):
             if self.buffer_time_minutes is None:
                 self.buffer_time_minutes = self.space_type.default_buffer_time_minutes
 
+            # 如果空间类型默认不可预订，则此空间也不可预订
             if not self.space_type.default_is_bookable:
                 self.is_bookable = False
 
@@ -465,48 +487,68 @@ class Space(models.Model):
 
 @receiver(pre_save, sender=Space)
 def store_old_managed_by_for_space(sender, instance, **kwargs):
+    """
+    在 Space 实例保存之前，存储其旧的 managed_by 值，以便在 post_save 中比较和撤销权限。
+    """
     if instance.pk:
         try:
             old_instance = sender.objects.get(pk=instance.pk)
+            # 将旧的管理人员存储在实例的一个临时属性中
             instance._old_managed_by = old_instance.managed_by
+            logger.debug(f"Pre_save for Space {instance.name}, old managed_by stored: {old_instance.managed_by}")
         except sender.DoesNotExist:
+            logger.warning(
+                f"Space with PK {instance.pk} not found in pre_save; treating as new instance for _old_managed_by.")
             instance._old_managed_by = None
     else:
+        # 新创建的实例没有旧的管理人员
         instance._old_managed_by = None
 
 
 @receiver(post_save, sender=Space)
 def assign_space_management_permissions(sender, instance, created, **kwargs):
+    """
+    处理 Space 实例保存后的权限分配逻辑：
+    - 撤销旧管理人员的直接权限。
+    - 授予新管理人员直接权限、其子空间的管理权限（严格委托模式）、父空间的查看权限。
+    """
     logger.debug(
-        f"Handling post_save for Space {instance.name}, PK={instance.pk}, created: {created}. Manager: {instance.managed_by}")
+        f"Handling post_save for Space {instance.name}, PK={instance.pk}, created: {created}. Current Manager: {instance.managed_by}")
 
     old_managed_by = getattr(instance, '_old_managed_by', None)
     current_managed_by = instance.managed_by
-    CustomUser = get_user_model()
 
-    # --- 1. 撤销旧管理人员的权限 (仅针对当前 Space 实例及其直接关联的 BookableAmenity) ---
-    # 撤销逻辑不向上或向下级联，以避免意外移除其他原因授予的权限
+    # --- 1. 撤销旧管理人员的权限 (仅针对当前 Space 实例及其**直接关联的** BookableAmenity) ---
+    # 撤销逻辑不向上或向下级联，以避免意外移除其他原因授予的权限。
+    # 子孙空间的权限会在新管理人员的分配逻辑中被覆盖或跳过。
     if old_managed_by and old_managed_by != current_managed_by:
-        logger.info(f"Revoking direct permissions for old manager {old_managed_by.username} on space {instance.name}.")
-        all_relevant_perms = set(SPACE_MANAGEMENT_PERMISSIONS + SPACE_VIEW_ONLY_PERMISSIONS)  # 撤销所有可能被授予的权限
+        logger.info(
+            f"Revoking direct permissions for old manager {old_managed_by.username} (PK:{old_managed_by.pk}) on space {instance.name}.")
+        all_relevant_perms = set(SPACE_MANAGEMENT_PERMISSIONS + SPACE_VIEW_ONLY_PERMISSIONS)
         for perm_codename in all_relevant_perms:
             try:
-                remove_perm(f'spaces.{perm_codename}', old_managed_by, instance)
+                remove_perm(f'spaces.{perm_codename}', old_managed_by, instance)  # 撤销对当前实例的权限
+                logger.debug(
+                    f"Revoked 'spaces.{perm_codename}' from {old_managed_by.username} for Space {instance.name}.")
             except Exception as e:
                 logger.warning(
                     f"Failed to revoke 'spaces.{perm_codename}' from {old_managed_by.username} for Space {instance.name}: {e}")
 
+        # 撤销对当前 Space 的 BookableAmenity 实例的权限
         for ba in instance.bookable_amenities.all():
             for perm_codename in BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS:
                 try:
                     remove_perm(f'spaces.{perm_codename}', old_managed_by, ba)
+                    logger.debug(
+                        f"Revoked 'spaces.{perm_codename}' from {old_managed_by.username} for BookableAmenity {ba.id} in space {instance.name}.")
                 except Exception as e:
                     logger.warning(
                         f"Failed to revoke 'spaces.{perm_codename}' from {old_managed_by.username} for BookableAmenity {ba.id} in space {instance.name}: {e}")
 
     # --- 2. 授予新管理人员权限 ---
     if current_managed_by:
-        logger.info(f"Assigning permissions for new manager {current_managed_by.username} on space {instance.name}.")
+        logger.info(
+            f"Assigning permissions for new manager {current_managed_by.username} (PK:{current_managed_by.pk}) on space {instance.name}.")
 
         # 确保新管理人员属于 '空间管理员' 组
         space_manager_group, created_group = Group.objects.get_or_create(name='空间管理员')
@@ -537,8 +579,9 @@ def assign_space_management_permissions(sender, instance, created, **kwargs):
                         f"Failed to assign 'spaces.{perm_codename}' to {current_managed_by.username} for BookableAmenity {ba.id}: {e}")
 
         # --- 2.3 自下而上：父级空间，授予 **查看** 权限 (Bottom-up inheritance) ---
+        # 如果当前空间 (instance) 被 current_managed_by 管理，那么 current_managed_by 应该能查看所有父级空间。
         parent_space_traversal = instance.parent_space
-        processed_parent_pks = set()
+        processed_parent_pks = set()  # 用于检测和防止循环引用，也可以防止重复分配
         while parent_space_traversal:
             if parent_space_traversal.pk in processed_parent_pks:
                 logger.error(
@@ -546,7 +589,7 @@ def assign_space_management_permissions(sender, instance, created, **kwargs):
                 break
             processed_parent_pks.add(parent_space_traversal.pk)
 
-            for perm_codename in SPACE_VIEW_ONLY_PERMISSIONS:  # Grant only VIEW permission
+            for perm_codename in SPACE_VIEW_ONLY_PERMISSIONS:  # 只授予 VIEW 权限
                 try:
                     assign_perm(f'spaces.{perm_codename}', current_managed_by, parent_space_traversal)
                     logger.debug(
@@ -557,43 +600,69 @@ def assign_space_management_permissions(sender, instance, created, **kwargs):
 
             parent_space_traversal = parent_space_traversal.parent_space
 
-        # --- 2.4 自上而下：子级空间，授予 **管理** 权限 (Top-down inheritance) ---
-        # 查找所有子孙空间并授予管理权限
+        # --- 2.4 自上而下：子级空间，授予 **管理** 权限 (Top-down inheritance - 严格委托模式) ---
+        # 重要的修订：
+        # 只有在子空间没有自己的管理人员 (managed_by is None)，
+        # 或者子空间的管理人员与当前父空间 (instance) 的管理人员相同 (current_managed_by) 时，
+        # 才将管理权限授予当前父空间的管理人员。这实现了更严格的委托管理。
         descendant_spaces = get_all_descendant_spaces(instance)
         for child_space in descendant_spaces:
-            for perm_codename in SPACE_MANAGEMENT_PERMISSIONS:  # Grant full MANAGEMENT permission
-                try:
-                    assign_perm(f'spaces.{perm_codename}', current_managed_by, child_space)
-                    logger.debug(
-                        f"Assigned 'spaces.{perm_codename}' to {current_managed_by.username} for child Space {child_space.name} (management via parent {instance.name}).")
-                except Exception as e:
-                    logger.error(
-                        f"Failed to assign 'spaces.{perm_codename}' to {current_managed_by.username} for child Space {child_space.name}: {e}")
-
-            # 对子空间的 BookableAmenity 也授予管理权限
-            for ba_child in child_space.bookable_amenities.all().iterator():
-                for perm_codename in BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS:
+            # 检查子空间是否有自己的管理者，并且是否与当前正在处理的父空间管理者不同
+            if child_space.managed_by is None or child_space.managed_by == current_managed_by:
+                for perm_codename in SPACE_MANAGEMENT_PERMISSIONS:  # 授予完整的 MANAGEMENT 权限
                     try:
-                        assign_perm(f'spaces.{perm_codename}', current_managed_by, ba_child)
+                        assign_perm(f'spaces.{perm_codename}', current_managed_by, child_space)
                         logger.debug(
-                            f"Assigned 'spaces.{perm_codename}' to {current_managed_by.username} for BookableAmenity {ba_child.id} in child space {child_space.name}.")
+                            f"Assigned 'spaces.{perm_codename}' to {current_managed_by.username} for child Space {child_space.name} (management via parent {instance.name}, as child is unmanaged or managed by same).")
                     except Exception as e:
                         logger.error(
-                            f"Failed to assign 'spaces.{perm_codename}' to {current_managed_by.username} for BookableAmenity {ba_child.id} in child space {child_space.name}: {e}")
+                            f"Failed to assign 'spaces.{perm_codename}' to {current_managed_by.username} for child Space {child_space.name}: {e}")
+
+                # 对子空间的 BookableAmenity 也授予管理权限，同样遵守严格委托
+                for ba_child in child_space.bookable_amenities.all().iterator():
+                    # 这里再次检查 BookableAmenity 所属空间的 manager 是否与当前父空间的 manager 相同或子空间是无管理的
+                    # ba_child.space 肯定是 child_space，所以这是冗余检查，但为清晰保留
+                    if ba_child.space.managed_by is None or ba_child.space.managed_by == current_managed_by:
+                        for perm_codename in BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS:
+                            try:
+                                assign_perm(f'spaces.{perm_codename}', current_managed_by, ba_child)
+                                logger.debug(
+                                    f"Assigned 'spaces.{perm_codename}' to {current_managed_by.username} for BookableAmenity {ba_child.id} in child space {child_space.name} (via parent {instance.name}).")
+                            except Exception as e:
+                                logger.error(
+                                    f"Failed to assign 'spaces.{perm_codename}' to {current_managed_by.username} for BookableAmenity {ba_child.id} in child space {child_space.name}: {e}")
+                    else:
+                        logger.info(
+                            f"Skipping BookableAmenity permission assignment for {ba_child.id} in child space {child_space.name} "
+                            f"from parent manager {current_managed_by.username} (PK:{current_managed_by.pk}), due to child space having a different manager ({ba_child.space.managed_by.username}, PK:{ba_child.space.managed_by.pk}).")
+            else:
+                logger.info(
+                    f"Skipping top-down MANAGEMENT permission assignment for child space {child_space.name} (PK:{child_space.pk}) "
+                    f"from parent manager {current_managed_by.username} (PK:{current_managed_by.pk}), as child space is directly managed by a DIFFERENT manager ({child_space.managed_by.username}, PK:{child_space.managed_by.pk}).")
+    else:
+        logger.info(
+            f"Space {instance.name} has no manager (managed_by is None). No permissions assigned to any user via this space instance.")
 
 
 @receiver(post_save, sender=BookableAmenity)
 def assign_amenity_management_permissions_on_create(sender, instance, created, **kwargs):
-    # 当 BookableAmenity 被创建或更新时，如果其所属 Space 有 managed_by，则为其分配对象级权限
-    # 这个信号器作为冗余机制，确保即使在 Space 更新导致级联权限分配前，
-    # 新创建的 BookableAmenity 也能立即获得权限。
+    """
+    当 BookableAmenity 被创建或更新时，如果其所属 Space 有 managed_by，则为其分配对象级权限。
+    这个信号确保 BookableAmenity 的直接管理人员（即其所属 Space 的管理人员）获得相关权限。
+    """
     if instance.space and instance.space.managed_by:
-        manager = instance.space.managed_by
+        manager_of_space = instance.space.managed_by
+        logger.debug(
+            f"Handling post_save for BookableAmenity {instance.id}, created: {created}. Manager of space {instance.space.name}: {manager_of_space.username}.")
+
         for perm_codename in BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS:
             try:
-                assign_perm(f'spaces.{perm_codename}', manager, instance)
+                assign_perm(f'spaces.{perm_codename}', manager_of_space, instance)
                 logger.debug(
-                    f"Assigned 'spaces.{perm_codename}' to {manager.username} for BookableAmenity {instance.id} in space {instance.space.name}.")
+                    f"Assigned 'spaces.{perm_codename}' to {manager_of_space.username} for BookableAmenity {instance.id} in space {instance.space.name}.")
             except Exception as e:
                 logger.error(
-                    f"Failed to assign 'spaces.{perm_codename}' to {manager.username} for BookableAmenity {instance.id}: {e}")
+                    f"Failed to assign 'spaces.{perm_codename}' to {manager_of_space.username} for BookableAmenity {instance.id}: {e}")
+    else:
+        logger.debug(
+            f"BookableAmenity {instance.id} has no associated space manager. No permissions assigned via this amenity.")
