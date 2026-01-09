@@ -1,10 +1,10 @@
-# bookings/admin/booking_admin.py (终极修正版 - 2026-01-09)
+# bookings/admin/booking_admin.py (终极修正版 - 2026-01-09 - 禁用 SpaceManager 的直接增删改权限)
 from django.contrib import admin
 from django.db import transaction, models
 from django.contrib import messages
 from django.utils import timezone
 from django.db.models import Q, Manager, QuerySet
-from django.core.exceptions import ValidationError  # <--- 确保已导入
+from django.core.exceptions import ValidationError
 
 from guardian.admin import GuardedModelAdmin
 from guardian.shortcuts import get_objects_for_user
@@ -279,6 +279,8 @@ class BookingAdmin(GuardedModelAdmin):
             messages.warning(request, "Space models not available. Bookings cannot be filtered by space permissions.")
             return qs.none()
 
+        # SpaceManager 的 get_queryset 依赖于对象级权限，需要模型级权限作前提
+        # 这里使用 'spaces.can_view_space_bookings' 作为 SpaceManager 的查看权限依据
         managed_spaces_ids = get_objects_for_user(
             request.user, 'spaces.can_view_space_bookings', klass=Space
         ).values_list('id', flat=True)
@@ -292,6 +294,7 @@ class BookingAdmin(GuardedModelAdmin):
         ).select_related('user', 'reviewed_by', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space')
 
     def has_module_permission(self, request):
+        # 空间管理员至少需要拥有任何一个空间的相关预订查看权限，才能看到 Booking 模块
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
         if getattr(request.user, 'is_space_manager', False) and SPACES_MODELS_LOADED:
@@ -302,6 +305,9 @@ class BookingAdmin(GuardedModelAdmin):
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
+
+        # 对于 SpaceManager，obj=None (列表页) 的查看权限由 has_module_permission 控制
+        # 对于 obj (详情页)，需要针对该对象的空间拥有查看权限
         if obj is None: return self.has_module_permission(request)
 
         target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
@@ -311,32 +317,24 @@ class BookingAdmin(GuardedModelAdmin):
     def has_add_permission(self, request):
         if not request.user.is_authenticated:
             return False
-        if request.user.is_superuser or request.user.is_system_admin:
+        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
             return True
-        if getattr(request.user, 'is_space_manager', False) and SPACES_MODELS_LOADED:
-            return get_objects_for_user(request.user, 'spaces.can_book_this_space', klass=Space).exists() or \
-                get_objects_for_user(request.user, 'spaces.can_book_amenities_in_space', klass=BookableAmenity).exists()
+        # <<--- 修改在这里：SpaceManager 不应能直接通过管理后台创建预订 ---
         return False
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        if obj is None: return self.has_module_permission(request)
 
-        target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
-        if not (target_space and SPACES_MODELS_LOADED): return False
-
-        # 允许修改的状态，通常需要批准/取消/签到/标记未到场等权限
-        return request.user.has_perm('spaces.can_approve_space_bookings', target_space) or \
-            request.user.has_perm('spaces.can_checkin_space_bookings', target_space) or \
-            request.user.has_perm('spaces.can_cancel_space_bookings', target_space)
+        # <<--- 修改在这里：SpaceManager 不应能直接通过管理后台修改预订 ---
+        # SpaceManagers 的修改权限应仅限于通过 Admin Actions (批准, 拒绝, 签到, 取消等)
+        return False
 
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        if obj is None: return False
-
-        return request.user.has_perm('bookings.can_delete_any_booking')
+        # SpaceManager 不拥有全局删除权限，并且 'delete_selected' 动作会被 get_actions 移除
+        return False
 
     def get_actions(self, request):
         if not request.user.is_authenticated: return {}
@@ -351,7 +349,6 @@ class BookingAdmin(GuardedModelAdmin):
             filtered_actions = {}
             for action_name in space_manager_specific_actions:
                 if action_name in actions:
-                    # actions[action_name] from super().get_actions() is already a tuple (func, name, description)
                     filtered_actions[action_name] = actions[action_name]
             return filtered_actions
         else:
@@ -369,8 +366,10 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法批准。", messages.ERROR)
                 continue
 
+            # 权限检查：是否对该空间拥有 'can_approve_space_bookings' 对象级权限
             if request.user.is_superuser or request.user.is_system_admin or \
-                    request.user.has_perm('spaces.can_approve_space_bookings', target_space):
+                    (request.user.is_space_manager and request.user.has_perm('spaces.can_approve_space_bookings',
+                                                                             target_space)):
                 if booking.status == 'PENDING':
                     booking.status = 'APPROVED'
                     booking.reviewed_by = request.user
@@ -394,8 +393,10 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法拒绝。", messages.ERROR)
                 continue
 
+            # 权限检查：是否对该空间拥有 'can_approve_space_bookings' 对象级权限 (拒绝通常与批准使用相同权限)
             if request.user.is_superuser or request.user.is_system_admin or \
-                    request.user.has_perm('spaces.can_approve_space_bookings', target_space):
+                    (request.user.is_space_manager and request.user.has_perm('spaces.can_approve_space_bookings',
+                                                                             target_space)):
                 if booking.status == 'PENDING':
                     booking.status = 'REJECTED'
                     booking.reviewed_by = request.user
@@ -419,8 +420,10 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法取消。", messages.ERROR)
                 continue
 
+            # 权限检查：是否对该空间拥有 'can_cancel_space_bookings' 对象级权限
             if request.user.is_superuser or request.user.is_system_admin or \
-                    request.user.has_perm('spaces.can_cancel_space_bookings', target_space):
+                    (request.user.is_space_manager and request.user.has_perm('spaces.can_cancel_space_bookings',
+                                                                             target_space)):
                 if booking.status in ['PENDING', 'APPROVED', 'CHECKED_IN']:
                     booking.status = 'CANCELLED'
                     booking.reviewed_by = request.user
@@ -444,8 +447,10 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法标记为已完成。", messages.ERROR)
                 continue
 
+            # 权限检查：是否对该空间拥有 'can_checkin_space_bookings' 对象级权限 (完成通常与签到使用相同权限)
             if request.user.is_superuser or request.user.is_system_admin or \
-                    request.user.has_perm('spaces.can_checkin_space_bookings', target_space):
+                    (request.user.is_space_manager and request.user.has_perm('spaces.can_checkin_space_bookings',
+                                                                             target_space)):
                 if booking.status == 'CHECKED_IN':
                     booking.status = 'COMPLETED'
                     booking.save(update_fields=['status'])
@@ -468,8 +473,10 @@ class BookingAdmin(GuardedModelAdmin):
                 self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法签到。", messages.ERROR)
                 continue
 
+            # 权限检查：是否对该空间拥有 'can_checkin_space_bookings' 对象级权限
             if request.user.is_superuser or request.user.is_system_admin or \
-                    request.user.has_perm('spaces.can_checkin_space_bookings', target_space):
+                    (request.user.is_space_manager and request.user.has_perm('spaces.can_checkin_space_bookings',
+                                                                             target_space)):
                 if booking.status in ['APPROVED', 'PENDING']:
                     booking.status = 'CHECKED_IN'
                     booking.save(update_fields=['status'])
@@ -493,8 +500,10 @@ class BookingAdmin(GuardedModelAdmin):
                                   messages.ERROR)
                 continue
 
+            # 权限检查：是否对该空间拥有 'can_checkin_space_bookings' 对象级权限 (未到场通常与签到使用相同权限)
             if request.user.is_superuser or request.user.is_system_admin or \
-                    request.user.has_perm('spaces.can_checkin_space_bookings', target_space):
+                    (request.user.is_space_manager and request.user.has_perm('spaces.can_checkin_space_bookings',
+                                                                             target_space)):
                 if booking.status in ['PENDING', 'APPROVED'] and booking.end_time < timezone.now():
                     booking.status = 'NO_SHOW'
                     booking.save(update_fields=['status'])

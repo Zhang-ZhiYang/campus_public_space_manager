@@ -1,10 +1,9 @@
-# bookings/admin/user_ban_admin.py (终极修正版)
+# bookings/admin/user_ban_admin.py (终极修正版 - SpaceManager 只读)
 from django.contrib import admin
 from django.contrib import messages
-from django.core.exceptions import ValidationError  # <-- 确保已导入
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
-
 
 from guardian.admin import GuardedModelAdmin
 from guardian.shortcuts import get_objects_for_user
@@ -216,6 +215,7 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
         (None, {'fields': ('user', 'space_type', ('start_date', 'end_date'), 'reason',)}),
         ('策略与记录', {'fields': ('ban_policy_applied', ('issued_by', 'issued_at'))}),
     )
+    # 对于空间管理员，issued_by 字段应该自动填充而不是手动修改
     readonly_fields = ('issued_at', 'issued_by')
 
     def save_model(self, request, obj, form, change):
@@ -223,23 +223,11 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
             messages.error(request, "您没有权限执行此操作，请先登录。", messages.ERROR)
             raise ValidationError('没有权限')
 
+        # 空间管理员不应能创建、修改或删除这些记录，该功能保留给系统管理员。
+        # has_add/change/delete_permission 会限制前端界面，这里是额外的后端验证。
         if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
-            target_space_type_for_perm = obj.space_type
-            if target_space_type_for_perm:
-                if not SPACES_MODELS_LOADED:
-                    messages.error(request, "Space models not available. Cannot check permissions.", messages.ERROR)
-                    raise ValidationError('模型不可用，无法检查权限')
-
-                managed_spaces = get_objects_for_user(request.user,
-                                                      'spaces.can_view_space_bookings',
-                                                      klass=Space)
-                if not managed_spaces.filter(space_type=target_space_type_for_perm).exists():
-                    messages.error(request, f"您没有权限修改此禁用记录(ID: {obj.pk})，因为您不管理其所属的空间类型。",
-                                   messages.ERROR)
-                    raise ValidationError('没有权限')
-            else:  # Global ban
-                messages.error(request, f"您没有权限修改全局禁用记录(ID: {obj.pk})。", messages.ERROR)
-                raise ValidationError('没有权限')
+            messages.error(request, f"您没有权限修改此禁用记录(ID: {obj.pk})。", messages.ERROR)
+            raise ValidationError('没有权限')
 
         if not obj.issued_by and isinstance(request.user, CustomUser): obj.issued_by = request.user
         super().save_model(request, obj, form, change)
@@ -274,6 +262,7 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
             messages.warning(request, "Space models not available. User bans cannot be filtered by space permissions.")
             return qs.none()
 
+        # 空间管理员只能查看其管理空间类型下的禁用记录
         managed_spaces = get_objects_for_user(
             request.user, 'spaces.can_view_space_bookings', klass=Space
         )
@@ -287,40 +276,36 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
         if getattr(request.user, 'is_space_manager', False):
-            return SPACES_MODELS_LOADED and get_objects_for_user(request.user, 'spaces.can_view_space_bookings',
-                                                                 klass=Space).exists()
+            # 空间管理员至少需要有某个空间类型的查看预订权限，才能看到此模块
+            if not SPACES_MODELS_LOADED: return False
+            return get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space).exists()
         return False
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        if obj is None: return self.has_module_permission(request)
+        if obj is None: return self.has_module_permission(request)  # 对于列表页，依赖 module 权限
 
         if not SPACES_MODELS_LOADED: return False
 
         if obj.space_type:
+            # 对于特定对象，检查用户是否管理该空间类型下的某个空间
             managed_spaces = get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space)
             return managed_spaces.filter(space_type=obj.space_type).exists()
-        else:  # Global ban
+        else:  # 全局禁用记录，只有系统管理员可见
             return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
 
     def has_add_permission(self, request):
         if not request.user.is_authenticated: return False
+        # 空间管理员不能添加
         return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
-        if obj is None: return self.has_module_permission(request)
-
-        if not SPACES_MODELS_LOADED: return False
-
-        if obj.space_type:
-            managed_spaces = get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space)
-            return managed_spaces.filter(space_type=obj.space_type).exists()
-        else:
-            return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        # 空间管理员不能修改
+        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
 
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
+        # 空间管理员不能删除
         return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
