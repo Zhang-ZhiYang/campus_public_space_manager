@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Register Test</title>
+    <title>用户注册</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f8; }
         .container { max-width: 500px; margin: 0 auto; padding: 25px; background-color: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
         h1 { text-align: center; color: #333; margin-bottom: 25px; }
         .form-group { margin-bottom: 18px; }
         label { display: block; margin-bottom: 6px; font-weight: bold; color: #555; }
-        input[type="text"], input[type="password"], input[type="email"], input[type="tel"] {
+        input[type="text"], input[type="password"], input[type="email"], input[type="tel"], select { /* Added select */
             width: calc(100% - 24px);
             padding: 10px 12px;
             border: 1px solid #ddd;
@@ -18,6 +18,9 @@
             box-sizing: border-box;
             font-size: 1em;
             color: #333;
+        }
+        select {
+            width: 100%; /* Adjust select width to match others */
         }
         button {
             width: 100%;
@@ -68,8 +71,8 @@
             </div>
 
             <div class="form-group">
-                <label for="fullName">姓名 (可选):</label>
-                <input type="text" id="fullName" name="full_name">
+                <label for="name">姓名 (可选):</label> <!-- Changed id/name from fullName to name -->
+                <input type="text" id="name" name="name">
             </div>
 
             <div class="form-group">
@@ -97,6 +100,15 @@
                 <input type="text" id="studentClass" name="student_class">
             </div>
 
+            <div class="form-group">
+                <label for="gender">性别 (可选):</label>
+                <select id="gender" name="gender">
+                    <option value="U">未知</option>
+                    <option value="M">男</option>
+                    <option value="F">女</option>
+                </select>
+            </div>
+
             <button type="submit">注册</button>
         </form>
 
@@ -113,41 +125,47 @@
             messageContainer.className = `message-container ${type}`;
         }
 
-        // === 新增辅助函数：格式化错误信息 ===
         function formatApiErrors(errorObject) {
-            if (!errorObject || typeof errorObject !== 'object') {
-                return "未知错误。";
+            if (!errorObject || typeof errorObject !== 'object' || Array.isArray(errorObject)) {
+                // If errorObject itself is an array or not a proper object, just stringify or return it
+                return JSON.stringify(errorObject);
             }
-            let errorMessages = [];
-            for (const field in errorObject) {
-                if (Object.hasOwnProperty.call(errorObject, field)) {
-                    const messages = errorObject[field];
-                    // 尝试将下划线分隔的字段名转换为更友好的格式，例如 "work_id" -> "工号/学号"
-                    let displayField;
-                    switch (field) {
-                        case 'username': displayField = '用户名'; break;
-                        case 'password': displayField = '密码'; break;
-                        case 'password2': displayField = '确认密码'; break;
-                        case 'full_name': displayField = '姓名'; break;
-                        case 'email': displayField = '电子邮件'; break;
-                        case 'phone_number': displayField = '手机号'; break;
-                        case 'work_id': displayField = '工号/学号'; break;
-                        case 'major': displayField = '专业'; break;
-                        case 'student_class': displayField = '班级'; break;
-                        case 'gender': displayField = '性别'; break;
-                        default: displayField = field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' '); break;
-                    }
+            if (errorObject.details) { // Check for the 'details' key in the unified error response
+                 if (typeof errorObject.details === 'object' && !Array.isArray(errorObject.details)) {
+                    let detailMessages = [];
+                    for (const field in errorObject.details) {
+                        if (Object.hasOwnProperty.call(errorObject.details, field)) {
+                            const messages = errorObject.details[field];
+                            let displayField;
+                            switch (field) {
+                                case 'username': displayField = '用户名'; break;
+                                case 'password': displayField = '密码'; break;
+                                case 'password2': displayField = '确认密码'; break;
+                                case 'name': displayField = '姓名'; break; // Changed from full_name to name
+                                case 'email': displayField = '电子邮件'; break;
+                                case 'phone_number': displayField = '手机号'; break;
+                                case 'work_id': displayField = '工号/学号'; break;
+                                case 'major': displayField = '专业'; break;
+                                case 'student_class': displayField = '班级'; break;
+                                case 'gender': displayField = '性别'; break;
+                                default: displayField = field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' '); break;
+                            }
 
-                    if (Array.isArray(messages)) {
-                        errorMessages.push(`${displayField}: ${messages.join(' ')}`);
-                    } else {
-                        errorMessages.push(`${displayField}: ${messages}`);
+                            if (Array.isArray(messages)) {
+                                detailMessages.push(`${displayField}: ${messages.join(' ')}`);
+                            } else {
+                                detailMessages.push(`${displayField}: ${messages}`);
+                            }
+                        }
                     }
-                }
+                    return detailMessages.join('; ') || errorObject.message || "未知错误。";
+                 } else if (typeof errorObject.details === 'string') {
+                    return errorObject.details; // If details is a string directly
+                 }
+                return errorObject.message || "未知错误。"; // Fallback to main message
             }
-            return errorMessages.join('; ') || "未知错误。";
+            return errorObject.message || "未知错误。"; // Direct message from the error object
         }
-        // ============================================
 
         registerForm.addEventListener('submit', async function(event) {
             event.preventDefault();
@@ -155,12 +173,13 @@
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
             const password2 = document.getElementById('password2').value;
-            const fullName = document.getElementById('fullName').value;
+            const name = document.getElementById('name').value; // Changed from fullName to name
             const email = document.getElementById('email').value;
             const phoneNumber = document.getElementById('phoneNumber').value;
             const workId = document.getElementById('workId').value;
             const major = document.getElementById('major').value;
             const studentClass = document.getElementById('studentClass').value;
+            const gender = document.getElementById('gender').value; // Added gender
 
             if (password !== password2) {
                 displayMessage('两次输入的密码不一致！', 'error');
@@ -173,19 +192,18 @@
                 username: username,
                 password: password,
                 password2: password2,
-                work_id: workId,
-                full_name: fullName || undefined,
+                work_id: workId, // Required
+                name: name || undefined, // Use name, send undefined if empty
                 email: email || undefined,
                 phone_number: phoneNumber || undefined,
                 major: major || undefined,
                 student_class: studentClass || undefined,
+                gender: (gender === 'U' || gender === '') ? undefined : gender, // Send undefined if 'U' or empty
             };
 
-            for (const key in registrationData) {
-                if (registrationData[key] === '') {
-                    delete registrationData[key];
-                }
-            }
+            // Backend already converts empty strings to None, but sending undefined for optional fields
+            // can sometimes be cleaner if specific fields are truly optional from the client perspective.
+            // Keeping it as `field || undefined` for clarity.
 
             try {
                 const response = await fetch('/api/v1/users/register/', {
@@ -204,7 +222,6 @@
                         window.location.href = '/login-test/';
                     }, 3000);
                 } else {
-                    // === 关键修改：使用 formatApiErrors 处理具体错误 ===
                     const errorDetails = data.error ? formatApiErrors(data.error) : (data.message || '未知错误');
                     displayMessage(`注册失败: ${errorDetails}`, 'error');
                     console.error("Registration failed:", data);

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Profile</title>
+    <title>我的个人资料</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f8; }
         .container { max-width: 600px; margin: 0 auto; padding: 25px; background-color: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
@@ -46,6 +46,15 @@
         .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .loading { background-color: #e0f2f7; color: #0c5460; border: 1px solid #bee5eb; }
+
+        .button-group {
+            display: flex;
+            gap: 10px; /* Adjust spacing between buttons */
+            margin-top: 20px;
+        }
+        .button-group button {
+            flex: 1; /* Make buttons take equal width */
+        }
     </style>
 </head>
 <body>
@@ -53,13 +62,18 @@
         <h1>我的个人资料</h1>
         <form id="profileForm">
             <div class="form-group">
+                <label for="id">用户ID:</label> <!-- Display user ID -->
+                <input type="text" id="userIdDisplay" name="id" readonly>
+            </div>
+
+            <div class="form-group">
                 <label for="username">用户名:</label>
                 <input type="text" id="username" name="username" readonly>
             </div>
 
             <div class="form-group">
-                <label for="fullName">姓名:</label>
-                <input type="text" id="fullName" name="full_name">
+                <label for="name">姓名:</label> <!-- Changed id/name from fullName to name -->
+                <input type="text" id="name" name="name">
             </div>
 
             <div class="form-group">
@@ -96,7 +110,10 @@
                 </select>
             </div>
 
-            <button type="submit">保存修改</button>
+            <div class="button-group">
+                <button type="submit">保存修改</button>
+                <button type="button" onclick="logout()">退出登录</button> <!-- Added logout button -->
+            </div>
         </form>
 
         <div id="message-container"></div>
@@ -111,38 +128,43 @@
             messageContainer.className = `message-container ${type}`;
         }
 
-        // === 新增辅助函数：格式化错误信息 ===
         function formatApiErrors(errorObject) {
-            if (!errorObject || typeof errorObject !== 'object') {
-                return "未知错误。";
-            }
-            let errorMessages = [];
-            for (const field in errorObject) {
-                if (Object.hasOwnProperty.call(errorObject, field)) {
-                    const messages = errorObject[field];
-                    let displayField;
-                    switch (field) {
-                        case 'username': displayField = '用户名'; break;
-                        case 'full_name': displayField = '姓名'; break;
-                        case 'email': displayField = '电子邮件'; break;
-                        case 'phone_number': displayField = '手机号'; break;
-                        case 'work_id': displayField = '工号/学号'; break;
-                        case 'major': displayField = '专业'; break;
-                        case 'student_class': displayField = '班级'; break;
-                        case 'gender': displayField = '性别'; break;
-                        default: displayField = field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' '); break;
-                    }
+             if (!errorObject || typeof errorObject !== 'object') {
+                 return "未知错误。";
+             }
+             if (errorObject.details) {
+                  if (typeof errorObject.details === 'object' && !Array.isArray(errorObject.details)) {
+                     let detailMessages = [];
+                     for (const field in errorObject.details) {
+                         if (Object.hasOwnProperty.call(errorObject.details, field)) {
+                             const messages = errorObject.details[field];
+                             let displayField;
+                             // Map backend field names to friendly frontend labels
+                             switch (field) {
+                                 case 'name': displayField = '姓名'; break; // Changed from full_name to name
+                                 case 'email': displayField = '电子邮件'; break;
+                                 case 'phone_number': displayField = '手机号'; break;
+                                 case 'major': displayField = '专业'; break;
+                                 case 'student_class': displayField = '班级'; break;
+                                 case 'gender': displayField = '性别'; break;
+                                 default: displayField = field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' '); break;
+                             }
 
-                    if (Array.isArray(messages)) {
-                        errorMessages.push(`${displayField}: ${messages.join(' ')}`);
-                    } else {
-                        errorMessages.push(`${displayField}: ${messages}`);
-                    }
-                }
-            }
-            return errorMessages.join('; ') || "未知错误。";
-        }
-        // ============================================
+                             if (Array.isArray(messages)) {
+                                 detailMessages.push(`${displayField}: ${messages.join(' ')}`);
+                             } else {
+                                 detailMessages.push(`${displayField}: ${messages}`);
+                             }
+                         }
+                     }
+                     return detailMessages.join('; ') || errorObject.message || "未知错误。";
+                  } else if (typeof errorObject.details === 'string') {
+                     return errorObject.details;
+                  }
+                 return errorObject.message || "未知错误。";
+             }
+             return errorObject.message || "未知错误。";
+         }
 
         async function fetchUserProfile() {
             const accessToken = localStorage.getItem('access_token');
@@ -157,7 +179,7 @@
             displayMessage('正在加载个人资料...', 'loading');
 
             try {
-                const userResponse = await fetch(`/api/v1/users/profile/${userId}/`, {
+                const userResponse = await fetch(`/api/v1/users/profile/me/`, { // Changed to 'me' endpoint for current user
                     method: 'GET',
                     headers: {
                         'Authorization': `Bearer ${accessToken}`,
@@ -169,8 +191,9 @@
 
                 if (userResponse.ok && userData.success) {
                     const userProfile = userData.data;
+                    document.getElementById('userIdDisplay').value = userProfile.id || ''; // Display user ID
                     document.getElementById('username').value = userProfile.username || '';
-                    document.getElementById('fullName').value = userProfile.full_name || '';
+                    document.getElementById('name').value = userProfile.name || ''; // Changed from fullName to name
                     document.getElementById('email').value = userProfile.email || '';
                     document.getElementById('phoneNumber').value = userProfile.phone_number || '';
                     document.getElementById('workId').value = userProfile.work_id || '';
@@ -181,11 +204,7 @@
                     displayMessage('个人资料加载成功', 'success');
                 } else if (userResponse.status === 403 || userResponse.status === 401) {
                      displayMessage('无权访问或登录已过期，请重新登录。', 'error');
-                     localStorage.removeItem('access_token');
-                     localStorage.removeItem('refresh_token');
-                     localStorage.removeItem('user_id');
-                     localStorage.removeItem('username');
-                     window.location.href = '/login-test/';
+                     logout(); // Call logout to clear tokens and redirect
                 }
                 else {
                     const errorDetails = userData.error ? formatApiErrors(userData.error) : (userData.message || '未知错误');
@@ -213,7 +232,7 @@
             displayMessage('正在保存修改...', 'loading');
 
             const profileData = {
-                full_name: document.getElementById('fullName').value,
+                name: document.getElementById('name').value, // Changed from fullName to name
                 email: document.getElementById('email').value,
                 phone_number: document.getElementById('phoneNumber').value,
                 major: document.getElementById('major').value,
@@ -222,13 +241,19 @@
             };
 
             for (const key in profileData) {
-                if (profileData[key] === '') {
+                if (profileData[key] === '' || profileData[key] === 'U') { // Also handle 'U' for gender as empty
                     delete profileData[key];
                 }
             }
 
+            // If gender is set to 'U', send null or omit based on backend expectation
+            if (profileData.gender === 'U') {
+                profileData.gender = null; // Backend expects null for 'U' or empty
+            }
+
             try {
-                const response = await fetch(`/api/v1/users/profile/${userId}/`, {
+                // Using '/me/' endpoint for updating current user's profile
+                const response = await fetch(`/api/v1/users/profile/me/`, {
                     method: 'PATCH',
                     headers: {
                         'Authorization': `Bearer ${accessToken}`,
@@ -241,17 +266,12 @@
 
                 if (response.ok && data.success) {
                     displayMessage('个人资料更新成功！', 'success');
-                    fetchUserProfile();
+                    fetchUserProfile(); // Refresh data after successful update
                 } else if (response.status === 403 || response.status === 401) {
                      displayMessage('无权操作或登录已过期，请重新登录。', 'error');
-                     localStorage.removeItem('access_token');
-                     localStorage.removeItem('refresh_token');
-                     localStorage.removeItem('user_id');
-                     localStorage.removeItem('username');
-                     window.location.href = '/login-test/';
+                     logout(); // Call logout to clear tokens and redirect
                 }
                 else {
-                    // === 关键修改：使用 formatApiErrors 处理具体错误 ===
                     const errorDetails = data.error ? formatApiErrors(data.error) : (data.message || '未知错误');
                     displayMessage(`更新失败: ${errorDetails}`, 'error');
                     console.error('Failed to update profile:', data);
@@ -262,6 +282,39 @@
             }
         });
 
+        async function logout() {
+            const refreshToken = localStorage.getItem('refresh_token');
+            const accessToken = localStorage.getItem('access_token'); // Logout endpoint might require access token too
+
+            if (refreshToken) {
+                try {
+                    await fetch('/api/v1/token/blacklist/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${accessToken}`
+                        },
+                        body: JSON.stringify({ refresh: refreshToken })
+                    });
+                    console.log("Logged out successfully from backend.");
+                } catch (error) {
+                    console.error("Logout backend error:", error);
+                }
+            }
+
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            localStorage.removeItem('user_id');
+            localStorage.removeItem('username');
+            localStorage.removeItem('name'); // Also remove name from localStorage
+
+            displayMessage('已退出登录，正在跳转到登录页面...', 'success');
+            setTimeout(() => {
+                window.location.href = '/login-test/';
+            }, 1500);
+        }
+
+        // Initial load
         window.addEventListener('load', fetchUserProfile);
     </script>
 </body>

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login Test</title>
+    <title>登录测试</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
         .container { max-width: 400px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
@@ -41,30 +41,30 @@
             font-family: monospace;
             font-size: 0.9em;
         }
-        .success-msg { color: green; font-weight: bold; } /* Changed class name to avoid conflict */
-        .error-msg { color: red; font-weight: bold; }   /* Changed class name to avoid conflict */
+        .success-msg { color: green; font-weight: bold; }
+        .error-msg { color: red; font-weight: bold; }
         .loading-msg { color: blue; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Login Test</h1>
+        <h1>登录测试</h1>
         <form id="loginForm">
-            <label for="username">Username:</label>
-            <input type="text" id="username" name="username" required value="testuser">
+            <label for="username">用户名:</label>
+            <input type="text" id="username" name="username" required value="testuser_apipost"> <!-- 默认值方便测试 -->
 
-            <label for="password">Password:</label>
-            <input type="password" id="password" name="password" required value="Test@123">
+            <label for="password">密码:</label>
+            <input type="password" id="password" name="password" required value="StrongPassword123"> <!-- 默认值方便测试 -->
 
-            <button type="submit">Login</button>
+            <button type="submit">登录</button>
         </form>
 
         <div id="response-container">
-            <p><strong>Response Data:</strong></p>
+            <p><strong>响应数据:</strong></p>
             <pre id="response-data"></pre>
         </div>
-        <div id="message-container" style="margin-top: 15px; text-align: center;"></div> <!-- Changed ID to avoid conflict -->
-                <a href="/register-test/" style="display: block; text-align: center; margin-top: 20px;">
+        <div id="message-container" style="margin-top: 15px; text-align: center;"></div>
+        <a href="/register-test/" style="display: block; text-align: center; margin-top: 20px;">
             没有账号？去注册
         </a>
     </div>
@@ -76,12 +76,12 @@
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
             const responseDataElement = document.getElementById('response-data');
-            const messageContainer = document.getElementById('message-container'); // Changed ID
+            const messageContainer = document.getElementById('message-container');
 
             responseDataElement.className = '';
             responseDataElement.textContent = ''; // 清空响应数据
             messageContainer.className = 'loading-msg';
-            messageContainer.textContent = 'Logging in...';
+            messageContainer.textContent = '正在登录...';
 
             try {
                 const response = await fetch('/api/v1/token/', {
@@ -101,28 +101,33 @@
                     // 存储 token 和 user_id 到 localStorage
                     localStorage.setItem('access_token', data.data.access);
                     localStorage.setItem('refresh_token', data.data.refresh);
-                    localStorage.setItem('user_id', data.data.user_id); // <--- 存储 user_id
-                    localStorage.setItem('username', data.data.username); // <--- 存储 username (可选)
+                    localStorage.setItem('user_id', data.data.user_id);
+                    localStorage.setItem('username', data.data.username);
+
+                    // 同时也存储 name，因为 profile page 使用 name 字段
+                    localStorage.setItem('name', data.data.name || '');
 
                     messageContainer.className = 'success-msg';
                     messageContainer.innerHTML = `
                         登录成功！用户名: ${data.data.username}, ID: ${data.data.user_id}
                         <button onclick="window.location.href='/profile-page/'" style="margin-top: 15px;">
-                            Go to My Profile
+                            前往我的资料页
                         </button>
                     `;
-                    console.log("Login successful! Tokens and User ID stored.", data.data);
+                    console.log("登录成功！Token和用户ID已存储。", data.data);
 
                 } else {
                     responseDataElement.classList.add('error-msg');
                     responseDataElement.textContent = JSON.stringify(data, null, 2);
                     messageContainer.className = 'error-msg';
-                    messageContainer.textContent = `登录失败: ${data.message || '未知错误'}`;
-                    console.error("Login failed or API reported error:", data);
+                    // 统一错误处理，如果后端返回了 `error.message` 则使用它
+                    const errorMessage = data.error && data.error.message ? data.error.message : (data.message || '未知错误');
+                    messageContainer.textContent = `登录失败: ${errorMessage}`;
+                    console.error("登录失败或API报错:", data);
                 }
             } catch (error) {
                 responseDataElement.classList.add('error-msg');
-                responseDataElement.textContent = `Network error or unexpected response: ${error.message}`;
+                responseDataElement.textContent = `网络错误或非预期响应: ${error.message}`;
                 messageContainer.className = 'error-msg';
                 messageContainer.textContent = `网络错误: ${error.message}`;
                 console.error("Fetch error:", error);

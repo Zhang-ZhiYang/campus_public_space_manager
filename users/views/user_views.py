@@ -12,6 +12,7 @@ from users.serializers import CustomUserSerializer, AdminUserUpdateSerializer, \
 # 导入自定义权限装饰器
 from core.decorators import is_system_admin_required
 
+
 class UserRegisterView(generics.CreateAPIView):
     """
     用户注册 API 视图。
@@ -19,7 +20,7 @@ class UserRegisterView(generics.CreateAPIView):
     """
     queryset = CustomUser.objects.all()
     serializer_class = UserRegistrationSerializer
-    permission_classes = [permissions.AllowAny] # 注册接口允许所有人访问
+    permission_classes = [permissions.AllowAny]  # 注册接口允许所有人访问
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -29,7 +30,6 @@ class UserRegisterView(generics.CreateAPIView):
             headers = self.get_success_headers(serializer.data)
             return success_response(
                 message=MSG_CREATED,
-                data=CustomUserSerializer(user).data,
                 status_code=HTTP_201_CREATED,
                 headers=headers
             )
@@ -47,7 +47,9 @@ class UserRegisterView(generics.CreateAPIView):
                     raise ConflictException(detail="Phone number already registered.", code="phone_number_exists")
                 elif 'work_id' in str(e):
                     raise ConflictException(detail="Student ID already registered.", code="work_id_exists")
+            # 否则抛出原始异常（或更通用的 InternalServerError）
             raise
+
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
     """
@@ -56,19 +58,23 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
     """
     queryset = CustomUser.objects.all()
     serializer_class = CustomUserSerializer
-    permission_classes = [permissions.IsAuthenticated] # 必须认证
+    permission_classes = [permissions.IsAuthenticated]  # 必须认证
 
     def get_object(self):
         # 允许通过 PK 获取，但必须是当前登录用户
-        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field  # 通常是 'pk'
+
+        # 如果 URL 中提供了 PK，则检查 PK 是否与当前用户匹配
         if lookup_url_kwarg in self.kwargs:
-            if self.request.user.pk != self.kwargs[lookup_url_kwarg]:
+            if str(self.request.user.pk) != str(self.kwargs[lookup_url_kwarg]):
                 raise ForbiddenException(detail="您没有权限访问其他用户的个人资料。")
-        return self.request.user # 始终返回当前请求的用户
+
+        # 始终返回当前请求的用户 (或其PK匹配)
+        return self.request.user
 
     def get_serializer_class(self):
         if self.request.method in ['PUT', 'PATCH']:
-            return UserProfileUpdateSerializer # 普通用户更新自己的资料时使用
+            return UserProfileUpdateSerializer  # 普通用户更新自己的资料时使用
         return CustomUserSerializer
 
     def retrieve(self, request, *args, **kwargs):
@@ -78,7 +84,7 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
-        instance = self.get_object()
+        instance = self.get_object()  # 确保获取的是当前用户的对象
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -87,68 +93,91 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
             instance._prefetched_objects_cache = {}
 
         return success_response(message=MSG_SUCCESS, data=serializer.data, status_code=HTTP_200_OK)
+
 
 # --- 管理员用户管理视图集 ---
 class UserAdminViewSet(viewsets.ModelViewSet):
     """
     管理员对用户的 CRUD 操作（包含组/角色管理）。
     只允许系统管理员（包括is_superuser）使用。
+    AdminUserUpdateSerializer 内部包含详细的权限校验。
     """
     queryset = CustomUser.objects.all()
     serializer_class = CustomUserSerializer
-    permission_classes = [permissions.IsAuthenticated] # 认证用户才能访问，但具体操作需要装饰器权限
+    permission_classes = [permissions.IsAuthenticated]  # 认证用户才能访问，具体权限由装饰器和序列化器内部逻辑控制
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
+            # 对于管理员更新用户，需要在序列化器中传入 request context
             return AdminUserUpdateSerializer
         return CustomUserSerializer
 
-    @is_system_admin_required # 系统管理员才能列出所有用户
+    def get_serializer_context(self):
+        """
+        在序列化器中传入 request context，以便进行权限验证。
+        """
+        return {'request': self.request, 'view': self}
+
+    @is_system_admin_required
     def list(self, request, *args, **kwargs):
-        response = super().list(request, *args, **kwargs)
+
+        qs = self.get_queryset()
+        serializer = self.get_serializer(qs, many=True)
         return success_response(
             message=MSG_SUCCESS,
-            data=response.data,
+            data=serializer.data,
             status_code=HTTP_200_OK
         )
 
-    @is_system_admin_required # 系统管理员才能检索特定用户
+    @is_system_admin_required
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return success_response(message=MSG_SUCCESS, data=serializer.data)
 
-    @is_system_admin_required # 系统管理员才能创建用户
+    @is_system_admin_required
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        # 序列化器内部会进行权限验证，例如系统管理员不能直接创建新的系统管理员
+        serializer = self.get_serializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
+        # 在这里执行创建操作
         user = serializer.save()
 
         return success_response(
             message=MSG_CREATED,
-            data=self.get_serializer(user).data,
+            data=self.get_serializer(user).data,  # 使用 CustomUserSerializer 返回完整数据
             status_code=HTTP_201_CREATED
         )
 
-    @is_system_admin_required # 系统管理员才能更新用户
+    @is_system_admin_required
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        instance = self.get_object()  # 获取要更新的用户实例
+        # 序列化器内部会进行权限验证
+        serializer = self.get_serializer(instance, data=request.data, partial=partial,
+                                         context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
 
         if getattr(instance, '_prefetched_objects_cache', None):
             instance._prefetched_objects_cache = {}
 
-        return success_response(message=MSG_SUCCESS, data=serializer.data, status_code=HTTP_200_OK)
+        return success_response(message=MSG_SUCCESS, data=self.get_serializer(instance).data, status_code=HTTP_200_OK)
 
-    @is_system_admin_required # 系统管理员才能部分更新用户
+    @is_system_admin_required
     def partial_update(self, request, *args, **kwargs):
         return self.update(request, *args, **kwargs, partial=True)
 
-    @is_system_admin_required # 系统管理员才能删除用户
+    @is_system_admin_required
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
+
+        # (非超级用户) 不能删除超级用户或另一个系统管理员 ---
+        if getattr(request.user, 'is_system_admin', False) and not request.user.is_superuser:
+            if instance.is_superuser:
+                raise ForbiddenException(detail="系统管理员不能删除超级用户。")
+            if getattr(instance, 'is_system_admin', False) and instance.pk != request.user.pk:  # 不能删除其他系统管理员
+                raise ForbiddenException(detail="系统管理员不能删除其他系统管理员用户。")
+
         self.perform_destroy(instance)
         return success_response(message=MSG_SUCCESS, data={}, status_code=HTTP_200_OK)
