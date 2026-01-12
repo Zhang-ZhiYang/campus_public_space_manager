@@ -42,7 +42,6 @@ INSTALLED_APPS = [
     'corsheaders',                 # 跨域处理
     'django_filters',              # 高级过滤
     'django_celery_beat',          # 定时任务调度
-
     'drf_spectacular',
     'guardian',  # <-- 确保这一行在这里
     # --- 自定义业务模块 ---

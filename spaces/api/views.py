@@ -1,22 +1,17 @@
 # spaces/api/views.py
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView, ListAPIView, RetrieveAPIView
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 # 导入我们自定义的全局分页器
 from core.pagination import CustomPageNumberPagination
 
 import logging
 
-from django.core.exceptions import ValidationError as DjangoValidationError
+from core.utils.response import success_response
+from core.utils.exceptions import CustomAPIException, InternalServerError  # 导入 InternalServerError
 
-from rest_framework.exceptions import ValidationError as DRFValidationError, NotFound as DRFNotFound, \
-    PermissionDenied as DRFPermissionDenied, AuthenticationFailed, NotAuthenticated
-
-from core.utils.response import success_response, error_response
-from core.utils.exceptions import CustomAPIException, ServiceException, BadRequestException, NotFoundException, \
-    ForbiddenException, InternalServerError  # 导入 InternalServerError
-
-from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_201_CREATED, HTTP_200_OK, HTTP_204_NO_CONTENT, \
-    MSG_INTERNAL_ERROR, CODE_SERVER_ERROR
+from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_201_CREATED, HTTP_200_OK, HTTP_204_NO_CONTENT
+from spaces.api.filters import SpaceFilter
 
 # 导入所有 Service
 from spaces.service.space_service import SpaceService
@@ -41,6 +36,8 @@ logger = logging.getLogger(__name__)
 class SpaceListCreateAPIView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPageNumberPagination
+    filter_backends = [DjangoFilterBackend]  # 添加过滤器后端
+    filterset_class = SpaceFilter  # 指定SpaceFilter类
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
