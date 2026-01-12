@@ -77,6 +77,7 @@ class CustomUser(AbstractUser):
         max_length=1,
         choices=GENDER_CHOICES,
         default='U',
+        null=True,
         blank=True,  # 允许为空
         verbose_name="性别"
     )
