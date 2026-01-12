@@ -1,13 +1,12 @@
 # core/service/base.py
-from core.dao import DAOFactory
+import logging
 from typing import Type, Dict, Any, Optional, List, Tuple
-import logging # 导入 logging
 
-# 导入 Django 的 ValidationError，以便在服务层捕获模型验证错误
-from django.core.exceptions import ValidationError as DjangoValidationError
+# 导入 Django 的 ValidationError 和 ObjectDoesNotExist，以便在服务层捕获模型验证错误和未找到错误
+from django.core.exceptions import ValidationError as DjangoValidationError, ObjectDoesNotExist
 
 from core.service.service_result import ServiceResult
-from core.utils.exceptions import CustomAPIException, ForbiddenException, NotFoundException, ConflictException, ServiceException, BadRequestException # 确保 ServiceException 也导入
+from core.utils.exceptions import CustomAPIException, ForbiddenException, NotFoundException, ConflictException, ServiceException, BadRequestException, InternalServerError # 确保所有自定义异常都导入
 
 logger = logging.getLogger(__name__) # 初始化 logger for the base service
 
@@ -20,7 +19,16 @@ class BaseService:
     def __init__(self):
         self._daos = {}
         for service_attr, dao_name in self._dao_map.items():
-            setattr(self, service_attr, DAOFactory.get_dao(dao_name))
+            # 使用 helper 函数获取 DAO 实例，有助于避免潜在的循环依赖问题
+            setattr(self, service_attr, self._get_dao_instance(dao_name))
+
+    def _get_dao_instance(self, dao_name: str):
+        """
+        获取 DAO 实例的辅助函数。
+        局部导入 DAOFactory，有助于避免某些条件下的循环导入问题，并确保 DAO 惰性加载。
+        """
+        from core.dao import DAOFactory
+        return DAOFactory.get_dao(dao_name)
 
     def _handle_exception(self, exc: Exception, default_message: str = "发生未知错误",
                           default_code: str = "service_error",
@@ -32,7 +40,8 @@ class BaseService:
         if isinstance(exc, CustomAPIException):
             return ServiceResult.error_result(
                 message=exc.detail if isinstance(exc.detail, str) else exc.default_detail,
-                errors=[str(exc.detail)] if isinstance(exc.detail, str) else ([value for key, value in exc.detail.items()] if isinstance(exc.detail, dict) else [exc.default_detail]), # 确保 errors 是列表
+                errors=[str(exc.detail)] if isinstance(exc.detail, str) else (
+                    [value for key, value in exc.detail.items()] if isinstance(exc.detail, dict) else [exc.default_detail]), # 确保 errors 是列表
                 error_code=exc.code,
                 status_code=exc.status_code
             )
@@ -49,9 +58,11 @@ class BaseService:
             errors_list = []
             if hasattr(exc, 'error_dict'): # 字段验证错误
                 for field, field_errors in exc.error_dict.items():
+                    # 恢复到前一个版本，包含字段名的错误格式
                     errors_list.extend([f"[{field}]: {str(err)}" for err in field_errors])
             elif hasattr(exc, 'message_dict'): # 非字段错误或表单错误
                 for field, field_errors in exc.message_dict.items():
+                    # 恢复到前一个版本，包含字段名的错误格式
                     errors_list.extend([f"[{field}]: {str(err)}" for err in field_errors])
             else: # 单个验证消息
                 errors_list = [str(exc)]
@@ -79,7 +90,7 @@ class BaseService:
                 status_code=BadRequestException.status_code # 400 Bad Request
             )
         # 6. 模型未找到异常 (例如通过 DAO.get() 或 get_queryset().get() 找不到时)
-        elif isinstance(exc, self._get_model_does_not_exist_exception()):
+        elif isinstance(exc, ObjectDoesNotExist): # 通用处理所有 DoesNotExist 异常 (包括 Model.DoesNotExist)
              return ServiceResult.error_result(
                 message=NotFoundException.default_detail,
                 errors=[str(exc)],
@@ -92,7 +103,7 @@ class BaseService:
             return ServiceResult.error_result(
                 message=default_message,
                 errors=[str(exc)], # 确保 errors 是列表
-                error_code=default_code,
+                error_code="platform_error", # 修改为更通用的平台错误码
                 status_code=default_status_code
             )
 
@@ -100,16 +111,19 @@ class BaseService:
         """
         尝试获取与当前服务相关的 DAO 模型的 DoesNotExist 异常。
         用于更精确地捕获模型未找到错误。
+        这个方法在 Python 3.6+ 中可以通过 `Model.DoesNotExist` 和 `ObjectDoesNotExist` 的父子关系来统一。
+        所以，直接返回 `ObjectDoesNotExist` 是安全的。
         """
+        # 如果 self._dao_map 存在且有至少一个 DAO 关联，理论上可以尝试获取其特定的 DoesNotExist
         if self._dao_map:
-            first_dao_attr = next(iter(self._dao_map))
-            dao_instance = getattr(self, first_dao_attr, None)
+            first_dao_key = next(iter(self._dao_map))
+            dao_instance = getattr(self, first_dao_key, None)
             if dao_instance and hasattr(dao_instance, 'model') and dao_instance.model:
+                # 返回特定模型的 DoesNotExist 异常类，它是 ObjectDoesNotExist 的一个子类
                 return dao_instance.model.DoesNotExist
-        # 如果没有找到对应的模型异常，返回一个通用的 ObjectDoesNotExist 异常。
+        # 如果没有找到特定的模型异常，返回一个通用的 ObjectDoesNotExist 异常。
         # Django 的 ObjectDoesNotExist 是所有模型 DoesNotExist 的基类。
-        from django.core.exceptions import ObjectDoesNotExist
-        return ObjectDoesNotExist # 返回一个通用的异常类型
+        return ObjectDoesNotExist
 
     @classmethod
     def get_instance(cls):

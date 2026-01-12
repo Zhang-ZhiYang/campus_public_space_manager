@@ -5,7 +5,8 @@ from django.db import transaction
 from django.db.models import QuerySet
 
 from core.service import BaseService, ServiceResult
-from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException
+# 移除 ForbiddenException 导入
+from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException
 from spaces.models import SpaceType
 from django.contrib.auth import get_user_model
 
@@ -19,11 +20,9 @@ class SpaceTypeService(BaseService):
 
     def get_all_space_types(self, user: CustomUser) -> ServiceResult[QuerySet[SpaceType]]:
         """
-        获取所有空间类型。视图层确保用户已认证。
-        所有认证用户可见所有空间类型列表。
+        获取所有空间类型。所有认证用户可见所有空间类型列表。
         """
         try:
-            # 移除了所有 is_xxx 权限检查，现在由视图层的装饰器处理，并假设基础认证已完成
             space_types = self.space_type_dao.get_all()
             return ServiceResult.success_result(
                 data=space_types,
@@ -31,15 +30,14 @@ class SpaceTypeService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception("获取空间类型列表失败。")
             return self._handle_exception(e, default_message="获取空间类型列表失败。")
 
     def get_space_type_by_id(self, user: CustomUser, pk: int) -> ServiceResult[SpaceType]:
         """
-        根据ID获取单个空间类型详情。视图层确保用户已认证。
-        所有认证用户可见空间类型详情。
+        根据ID获取单个空间类型详情。所有认证用户可见空间类型详情。
         """
         try:
-            # 移除了所有 is_xxx 权限检查，现在由视图层的装饰器处理，并假设基础认证已完成
             space_type = self.space_type_dao.get_by_id(pk)
             if not space_type:
                 return ServiceResult.error_result(
@@ -54,15 +52,14 @@ class SpaceTypeService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"获取空间类型详情失败 (ID: {pk})。")
             return self._handle_exception(e, default_message="获取空间类型详情失败。")
 
     @transaction.atomic
     def create_space_type(self, user: CustomUser, space_type_data: dict) -> ServiceResult[SpaceType]:
         """
-        创建新的空间类型。
-        权限已在视图层通过装饰器检查。
+        创建新的空间类型。权限已在视图层通过装饰器检查。
         """
-        # 移除了所有的 is_xxx 权限检查，现在由视图层的装饰器处理
         try:
             new_space_type = self.space_type_dao.create(**space_type_data)
             return ServiceResult.success_result(
@@ -71,15 +68,14 @@ class SpaceTypeService(BaseService):
                 status_code=201
             )
         except Exception as e:
+            logger.exception(f"创建空间类型失败 (数据: {space_type_data})。")
             return self._handle_exception(e, default_message="创建空间类型失败。")
 
     @transaction.atomic
     def update_space_type(self, user: CustomUser, pk: int, space_type_data: dict) -> ServiceResult[SpaceType]:
         """
-        更新空间类型。
-        权限已在视图层通过装饰器检查。
+        更新空间类型。权限已在视图层通过装饰器检查。
         """
-        # 移除了所有的 is_xxx 权限检查，现在由视图层的装饰器处理
         try:
             space_type = self.space_type_dao.get_by_id(pk)
             if not space_type:
@@ -96,15 +92,14 @@ class SpaceTypeService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"更新空间类型失败 (ID: {pk}, 数据: {space_type_data})。")
             return self._handle_exception(e, default_message="更新空间类型失败。")
 
     @transaction.atomic
     def delete_space_type(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         """
-        删除空间类型。
-        权限已在视图层通过装饰器检查。
+        删除空间类型。权限已在视图层通过装饰器检查。
         """
-        # 移除了所有的 is_xxx 权限检查，现在由视图层的装饰器处理
         try:
             space_type = self.space_type_dao.get_by_id(pk)
             if not space_type:
@@ -128,4 +123,5 @@ class SpaceTypeService(BaseService):
                 status_code=204
             )
         except Exception as e:
+            logger.exception(f"删除空间类型失败 (ID: {pk})。")
             return self._handle_exception(e, default_message="删除设施类型失败。")

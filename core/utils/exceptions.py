@@ -69,7 +69,10 @@ class UserBlacklistedException(ForbiddenException):
     default_detail = 'This user is currently blacklisted and cannot perform this action.'
     default_code = 'user_blacklisted'
 
-
+class InternalServerError(CustomAPIException): # <-- 新增
+    status_code = HTTP_500_INTERNAL_SERVER_ERROR
+    default_detail = MSG_INTERNAL_ERROR
+    default_code = 'server_error'
 class BookingConflictException(ConflictException):
     default_detail = 'The requested time slot is already booked or conflicts with existing bookings.'
     default_code = 'booking_conflict'

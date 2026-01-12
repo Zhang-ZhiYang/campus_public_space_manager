@@ -5,7 +5,8 @@ from django.db import transaction
 from django.db.models import QuerySet
 
 from core.service import BaseService, ServiceResult
-from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException
+# 移除 ForbiddenException 导入，因为服务层不再直接抛出它来处理角色权限
+from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException # 确保 CustomAPIException 在这里是为了 _handle_exception 的清晰度
 from spaces.models import Amenity
 from django.contrib.auth import get_user_model
 
@@ -20,7 +21,7 @@ class AmenityService(BaseService):
     def get_all_amenities(self, user: CustomUser) -> ServiceResult[QuerySet[Amenity]]:
         """
         获取所有设施类型列表。
-        视图层确保用户已认证。服务层无需额外权限检查，所有认证用户可见所有设施类型列表。
+        所有认证用户可见所有设施类型列表。
         """
         try:
             amenities = self.amenity_dao.get_all()
@@ -30,12 +31,13 @@ class AmenityService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception("获取设施类型列表失败。") # 记录异常
             return self._handle_exception(e, default_message="获取设施类型列表失败。")
 
     def get_amenity_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Amenity]:
         """
         根据ID获取单个设施类型详情。
-        视图层确保用户已认证。服务层无需额外权限检查，所有认证用户可见设施类型详情。
+        所有认证用户可见设施类型详情。
         """
         try:
             amenity = self.amenity_dao.get_by_id(pk)
@@ -51,15 +53,14 @@ class AmenityService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"获取设施类型详情失败 (ID: {pk})。")
             return self._handle_exception(e, default_message="获取设施类型详情失败。")
 
     @transaction.atomic
     def create_amenity(self, user: CustomUser, amenity_data: dict) -> ServiceResult[Amenity]:
         """
-        创建新的设施类型。
-        权限已在视图层通过装饰器检查。
+        创建新的设施类型。权限已在视图层通过装饰器检查。
         """
-        # 移除了所有的 is_xxx 权限检查，现在由视图层的装饰器处理
         try:
             new_amenity = self.amenity_dao.create(**amenity_data)
             return ServiceResult.success_result(
@@ -68,15 +69,14 @@ class AmenityService(BaseService):
                 status_code=201
             )
         except Exception as e:
+            logger.exception(f"创建设施类型失败 (数据: {amenity_data})。")
             return self._handle_exception(e, default_message="创建设施类型失败。")
 
     @transaction.atomic
     def update_amenity(self, user: CustomUser, pk: int, amenity_data: dict) -> ServiceResult[Amenity]:
         """
-        更新设施类型。
-        权限已在视图层通过装饰器检查。
+        更新设施类型。权限已在视图层通过装饰器检查。
         """
-        # 移除了所有的 is_xxx 权限检查，现在由视图层的装饰器处理
         try:
             amenity = self.amenity_dao.get_by_id(pk)
             if not amenity:
@@ -93,15 +93,14 @@ class AmenityService(BaseService):
                 status_code=200
             )
         except Exception as e:
+            logger.exception(f"更新设施类型失败 (ID: {pk}, 数据: {amenity_data})。")
             return self._handle_exception(e, default_message="更新设施类型失败。")
 
     @transaction.atomic
     def delete_amenity(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         """
-        删除设施类型。
-        权限已在视图层通过装饰器检查。
+        删除设施类型。权限已在视图层通过装饰器检查。
         """
-        # 移除了所有的 is_xxx 权限检查，现在由视图层的装饰器处理
         try:
             amenity = self.amenity_dao.get_by_id(pk)
             if not amenity:
@@ -125,4 +124,5 @@ class AmenityService(BaseService):
                 status_code=204
             )
         except Exception as e:
+            logger.exception(f"删除设施类型失败 (ID: {pk})。")
             return self._handle_exception(e, default_message="删除设施类型失败。")
