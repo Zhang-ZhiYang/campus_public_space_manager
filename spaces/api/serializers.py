@@ -1,17 +1,18 @@
 # spaces/serializers.py
+from typing import Any
+
 from rest_framework import serializers
-import datetime  # 导入 datetime 模块，用于处理 TimeField 和 DurationField
-from django.contrib.auth import get_user_model  # 导入 get_user_model
+import datetime
+from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 
-# 从 bookings.api.serializers 导入，避免在 core 层次创建新的文件，保持一致性
-from bookings.api.serializers import UserSerializerMinimal
+from bookings.api.serializers import UserSerializerMinimal  # Assuming this is correct
 
 from spaces.models import Amenity, Space, SpaceType, BookableAmenity
+from spaces.service.space_service import SpaceService  # Import SpaceService
+from spaces.service.amenity_service import AmenityService  # Import AmenityService
+from spaces.service.space_type_service import SpaceTypeService  # Import SpaceTypeService
 
-# from core.utils.constants import MSG_BAD_REQUEST # 暂时注释，如果需要可以取消
-
-# 获取 CustomUser 模型
 CustomUser = get_user_model()
 
 
@@ -51,12 +52,12 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
     """
     空间基础序列化器，包含所有字段，并新增了**有效预订规则**的计算字段。
     """
+    # These will be instances from DRF's default behavior, or from to_dict()
     space_type = SpaceTypeSerializerMinimal(read_only=True)
     managed_by = UserSerializerMinimal(read_only=True)
     bookable_amenities = BookableAmenitySerializer(many=True, read_only=True)
     permitted_groups_display = serializers.SerializerMethodField()
 
-    # ====== 新增的有效预订规则字段 ======
     effective_requires_approval = serializers.SerializerMethodField()
     effective_available_start_time = serializers.SerializerMethodField()
     effective_available_end_time = serializers.SerializerMethodField()
@@ -64,68 +65,86 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
     effective_max_booking_duration = serializers.SerializerMethodField()
     effective_buffer_time_minutes = serializers.SerializerMethodField()
 
-    # ====================================
-
     class Meta:
         model = Space
-        fields = '__all__'  # 使用 __all__ 会包含所有模型字段及 SerializerMethodField
-        read_only_fields = ('id', 'created_at', 'updated_at')
+        fields = '__all__'  # Use __all__ will include all model fields and SerializerMethodField
+        read_only_fields = ('id', 'created_at', 'updated_at')  # Add these as read-only
 
-    def get_permitted_groups_display(self, obj: Space) -> str:
-        """
-        根据 permitted_groups 和 space_type.is_basic_infrastructure 综合判断显示文本。
-        """
+    def get_permitted_groups_display(self,
+                                     obj: Any) -> str:  # Use Any for obj to handle Model instance or CachedDictObject
+        # obj could be a Model instance or a CachedDictObject (which is dict-like)
+        if hasattr(obj, '_data') and isinstance(obj._data, dict):  # Check for CachedDictObject
+            # If `obj` is a dict (from cache), directly access its 'permitted_groups' key
+            # which will contain a list of PKs.
+            if 'permitted_groups' in obj._data and obj._data['permitted_groups']:
+                group_pks = set(obj._data['permitted_groups'])
+                # Fetch Group names from DB as only PKs are in cached dict
+                # Consider caching Group names if this is a frequent lookup
+                groups = Group.objects.filter(pk__in=group_pks).values_list('name', flat=True)
+                return ", ".join(groups)
+
+            is_basic_infrastructure = obj._data.get('space_type', {}).get('is_basic_infrastructure')
+            if is_basic_infrastructure:
+                return "所有人"
+            return "无特定限制 (需权限)"
+
+        # Original logic for model instance directly
         if obj.permitted_groups.exists():
             return ", ".join([group.name for group in obj.permitted_groups.all()])
 
-        # 如果没有指定用户组，且是基础型基础设施，则认为是“所有人”可预订
         if obj.space_type and obj.space_type.is_basic_infrastructure:
-            return "所有人"  # 意味着所有认证用户默认可预订/访问
+            return "所有人"
+        return "无特定限制 (需权限)"
 
-        # 如果没有指定用户组，且非基础型基础设施，则表示仅限管理员/空间管理者访问
-        return "无特定限制 (需权限)"  # 非管理员用户可能需要特定权限才能访问
+    def _get_field_value_from_obj(self, obj: Any, field_name: str, default_field_name: str,
+                                  default_value_if_no_spacetype=None):
+        if hasattr(obj, '_data') and isinstance(obj._data, dict):  # Handle CachedDictObject
+            obj_val = obj._data.get(field_name)
+            if obj_val is not None:
+                return obj_val
+            spacetype_data = obj._data.get('space_type')
+            if spacetype_data and spacetype_data.get(default_field_name) is not None:
+                return spacetype_data.get(default_field_name)
+            return default_value_if_no_spacetype
 
-    # --- 有效预订规则的 SerializerMethodField 实现 ---
+        # Original logic for model instance
+        obj_val = getattr(obj, field_name, None)
+        if obj_val is not None:
+            return obj_val
+        spacetype = obj.space_type
+        if spacetype and getattr(spacetype, default_field_name, None) is not None:
+            return getattr(spacetype, default_field_name)
+        return default_value_if_no_spacetype
 
-    def get_effective_requires_approval(self, obj: Space) -> bool:
-        # 如果空间本身设置了值，则使用空间的值，否则使用空间类型默认值，最后默认 False
-        if obj.requires_approval is not None:
-            return obj.requires_approval
-        if obj.space_type and obj.space_type.default_requires_approval is not None:
-            return obj.space_type.default_requires_approval
-        return False  # 默认不需审批
+    def get_effective_requires_approval(self, obj: Any) -> bool:
+        return self._get_field_value_from_obj(obj, 'requires_approval', 'default_requires_approval', False)
 
-    def get_effective_available_start_time(self, obj: Space) -> str | None:
-        # 如果空间本身设置了值，则使用空间的值，否则使用空间类型默认值
-        time_obj = obj.available_start_time or \
-                   (obj.space_type.default_available_start_time if obj.space_type else None)
+    def get_effective_available_start_time(self, obj: Any) -> str | None:
+        time_obj = self._get_field_value_from_obj(obj, 'available_start_time', 'default_available_start_time')
+        if isinstance(time_obj, (str, bytes)):  # Already string from cache
+            return time_obj
+        return time_obj.strftime('%H:%M:%S') if time_obj else None  # datetime.time object
+
+    def get_effective_available_end_time(self, obj: Any) -> str | None:
+        time_obj = self._get_field_value_from_obj(obj, 'available_end_time', 'default_available_end_time')
+        if isinstance(time_obj, (str, bytes)):
+            return time_obj
         return time_obj.strftime('%H:%M:%S') if time_obj else None
 
-    def get_effective_available_end_time(self, obj: Space) -> str | None:
-        # 如果空间本身设置了值，则使用空间的值，否则使用空间类型默认值
-        time_obj = obj.available_end_time or \
-                   (obj.space_type.default_available_end_time if obj.space_type else None)
-        return time_obj.strftime('%H:%M:%S') if time_obj else None
+    def get_effective_min_booking_duration(self, obj: Any) -> str | None:
+        duration_obj = self._get_field_value_from_obj(obj, 'min_booking_duration', 'default_min_booking_duration')
+        if isinstance(duration_obj, (str, bytes)):  # Already string from cache
+            return duration_obj
+        return str(duration_obj) if duration_obj else None  # timedelta object
 
-    def get_effective_min_booking_duration(self, obj: Space) -> str | None:
-        # 如果空间本身设置了值，则使用空间的值，否则使用空间类型默认值
-        duration_obj = obj.min_booking_duration or \
-                       (obj.space_type.default_min_booking_duration if obj.space_type else None)
+    def get_effective_max_booking_duration(self, obj: Any) -> str | None:
+        duration_obj = self._get_field_value_from_obj(obj, 'max_booking_duration', 'default_max_booking_duration')
+        if isinstance(duration_obj, (str, bytes)):
+            return duration_obj
         return str(duration_obj) if duration_obj else None
 
-    def get_effective_max_booking_duration(self, obj: Space) -> str | None:
-        # 如果空间本身设置了值，则使用空间的值，否则使用空间类型默认值
-        duration_obj = obj.max_booking_duration or \
-                       (obj.space_type.default_max_booking_duration if obj.space_type else None)
-        return str(duration_obj) if duration_obj else None
-
-    def get_effective_buffer_time_minutes(self, obj: Space) -> int | None:
-        # 如果空间本身设置了值，则使用空间的值，否则使用空间类型默认值，最后默认 0
-        if obj.buffer_time_minutes is not None:
-            return obj.buffer_time_minutes
-        if obj.space_type and obj.space_type.default_buffer_time_minutes is not None:
-            return obj.space_type.default_buffer_time_minutes
-        return 0  # 默认没有缓冲时间
+    def get_effective_buffer_time_minutes(self, obj: Any) -> int | None:
+        return self._get_field_value_from_obj(obj, 'buffer_time_minutes', 'default_buffer_time_minutes', 0)
 
 
 class SpaceListSerializer(SpaceBaseSerializer):
@@ -136,7 +155,6 @@ class SpaceListSerializer(SpaceBaseSerializer):
     """
 
     class Meta(SpaceBaseSerializer.Meta):
-        # 显式列出列表视图所需的字段，包括所有 effective_ 字段
         fields = [
             'id', 'name', 'location', 'capacity', 'image', 'description',
             'is_active', 'is_bookable', 'is_container',
@@ -148,27 +166,25 @@ class SpaceListSerializer(SpaceBaseSerializer):
             'effective_min_booking_duration',
             'effective_max_booking_duration',
             'effective_buffer_time_minutes',
-            'bookable_amenities',  # 通常在列表只显示少量信息，但根据你提供的json这里保留
+            'bookable_amenities',
         ]
-        # read_only_fields 应保持为只读的，但这些计算字段本身都是只读的，故不对这里做修改
-        # 它们在 SpaceBaseSerializer.Meta 中已经从 read_only_fields 中被移除了，因此这里不需要重复
-        # 如果需要更严格的控制，可以在此添加新的 read_only_fields
 
 
 class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
     """
     空间创建和更新序列化器。
     """
-    space_type_id = serializers.PrimaryKeyRelatedField(
-        queryset=SpaceType.objects.all(), source='space_type', write_only=True, required=False, allow_null=True,
+    # These fields using `source='...'` will ensure `validated_data` contains model instances, not just PKs.
+    space_type = serializers.PrimaryKeyRelatedField(
+        queryset=SpaceType.objects.all(), write_only=True, required=False, allow_null=True,
         help_text="空间类型的ID，例如：1"
     )
-    parent_space_id = serializers.PrimaryKeyRelatedField(
-        queryset=Space.objects.all(), source='parent_space', write_only=True, required=False, allow_null=True,
+    parent_space = serializers.PrimaryKeyRelatedField(
+        queryset=Space.objects.all(), write_only=True, required=False, allow_null=True,
         help_text="父级空间的ID，例如：2"
     )
-    managed_by_id = serializers.PrimaryKeyRelatedField(
-        queryset=CustomUser.objects.all(), source='managed_by', write_only=True, required=False, allow_null=True,
+    managed_by = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.all(), write_only=True, required=False, allow_null=True,
         help_text="主要管理人员的ID，例如：3"
     )
 
@@ -180,6 +196,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         help_text="以整数列表形式传入设施ID, 例如: [1, 2, 3]"
     )
 
+    # This field already correctly resolves to Group instances thanks to `many=True` and `PrimaryKeyRelatedField`
     permitted_groups = serializers.PrimaryKeyRelatedField(
         queryset=Group.objects.all(), many=True,
         required=False,
@@ -193,7 +210,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             'is_bookable', 'is_active', 'is_container', 'requires_approval', 'image',
             'available_start_time', 'available_end_time',
             'min_booking_duration', 'max_booking_duration', 'buffer_time_minutes',
-            'space_type_id', 'parent_space_id', 'managed_by_id', 'permitted_groups',
+            'space_type', 'parent_space', 'managed_by', 'permitted_groups',  # Direct instances
             'amenity_ids'
         ]
         read_only_fields = ('id',)
@@ -238,7 +255,8 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             )
 
         # 3. SpaceType.default_is_bookable 与 Space.is_bookable 的一致性
-        space_type_new = data.get('space_type', instance.space_type if instance else None)
+        space_type_new = data.get('space_type',
+                                  instance.space_type if instance else None)  # space_type_new is SpaceType instance
         if space_type_new and not space_type_new.default_is_bookable and is_bookable_new:
             raise serializers.ValidationError(
                 {'is_bookable': f"所属空间类型 '{space_type_new.name}' 默认不可预订，此空间不能设置为可预订。"},
@@ -246,16 +264,16 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             )
 
         # 4. 父级空间不能是自身
-        parent_space_new = data.get('parent_space', instance.parent_space if instance else None)
+        parent_space_new = data.get('parent_space',
+                                    instance.parent_space if instance else None)  # parent_space_new is Space instance
         if parent_space_new and instance and parent_space_new == instance:
             raise serializers.ValidationError(
-                {'parent_space_id': '空间不能将自身设置为父级空间。'},
+                {'parent_space': '空间不能将自身设置为父级空间。'},
                 code='self_parent_space'
             )
 
         # 5. 确保 is_bookable_individually 为 False 的 Amenity 不会尝试单独预订
         amenity_ids = data.get('amenity_ids', None)
-        # 在更新时，如果 amenity_ids 没有传入，则不进行验证
         if amenity_ids is not None:
             non_bookable_amenities = Amenity.objects.filter(id__in=amenity_ids, is_bookable_individually=False)
             if non_bookable_amenities.exists():
@@ -268,56 +286,49 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
+        user = self.context['request'].user
+
+        # Pop custom fields that are to be handled as separate arguments by the service
         amenity_ids = validated_data.pop('amenity_ids', [])
-        permitted_groups = validated_data.pop('permitted_groups', [])
+        permitted_groups = validated_data.pop('permitted_groups', [])  # This contains Group instances
 
-        instance = super().create(validated_data)
-        instance.permitted_groups.set(permitted_groups)
+        # Delegating creation and related object handling entirely to SpaceService.
+        service_result = SpaceService().create_space(
+            user=user,
+            space_data=validated_data,  # Contains resolved FK instances like `space_type:<instance>`
+            permitted_groups_data=permitted_groups,  # List of Group instances
+            amenity_ids_data=amenity_ids  # List of int for Amenity PKs
+        )
 
-        # 处理 amenity_ids，确保生成 BookableAmenity 实例
-        for amenity_id in amenity_ids:
-            try:
-                amenity = Amenity.objects.get(id=amenity_id)
-                # 默认数量为1，活跃和可预订状态与 amenities.is_bookable_individually 关联 (虽然模型save会处理)
-                BookableAmenity.objects.create(space=instance, amenity=amenity, quantity=1,
-                                               is_bookable=amenity.is_bookable_individually,  # 初始设置，模型保存时会再次校验
-                                               is_active=True)
-            except Amenity.DoesNotExist:
-                # 可以在这里记录警告，或者抛出 ValidationError，取决于业务需求
-                pass  # 忽略不存在的 amenity_id，或者在此处抛出错误
-
-        return instance
+        if service_result.success:
+            # We must return the actual Space model instance, NOT a dict from the service.
+            # So, retrieve the newly created model instance from DB by ID.
+            return Space.objects.get(pk=service_result.data['id'])
+        else:
+            raise service_result.to_exception()
 
     def update(self, instance, validated_data):
+        user = self.context['request'].user
+
+        # Pop custom fields
         amenity_ids = validated_data.pop('amenity_ids', None)
         permitted_groups = validated_data.pop('permitted_groups', None)
 
-        instance = super().update(instance, validated_data)
+        # Delegating update and related object handling entirely to SpaceService.
+        service_result = SpaceService().update_space(
+            user=user,
+            pk=instance.pk,  # instance is the real model instance here
+            space_data=validated_data,  # Contains resolved FK instances
+            permitted_groups_data=permitted_groups,
+            amenity_ids_data=amenity_ids
+        )
 
-        if permitted_groups is not None:
-            instance.permitted_groups.set(permitted_groups)
-
-        # 处理 amenity_ids 的更新逻辑（添加或移除 BookableAmenity）
-        if amenity_ids is not None:
-            current_amenity_ids = set(instance.bookable_amenities.values_list('amenity__id', flat=True))
-            new_amenity_ids = set(amenity_ids)
-
-            # 需要删除的设施实例
-            amenities_to_remove = current_amenity_ids - new_amenity_ids
-            instance.bookable_amenities.filter(amenity__id__in=amenities_to_remove).delete()
-
-            # 需要添加的设施实例
-            amenities_to_add = new_amenity_ids - current_amenity_ids
-            for amenity_id in amenities_to_add:
-                try:
-                    amenity = Amenity.objects.get(id=amenity_id)
-                    BookableAmenity.objects.create(space=instance, amenity=amenity, quantity=1,
-                                                   is_bookable=amenity.is_bookable_individually,
-                                                   is_active=True)
-                except Amenity.DoesNotExist:
-                    pass  # 忽略不存在的 amenity_id
-
-        return instance
+        if service_result.success:
+            # Service.update_space should return a Dict[str, Any] which is a serialized model.
+            # So, retrieve the updated model instance from DB by ID.
+            return Space.objects.get(pk=service_result.data['id'])
+        else:
+            raise service_result.to_exception()
 
 
 # --------- Amenity Type Serializers ---------
@@ -346,6 +357,24 @@ class AmenityCreateUpdateSerializer(serializers.ModelSerializer):
     def validate(self, data):
         return data
 
+    def create(self, validated_data):
+        user = self.context['request'].user
+        service_result = AmenityService().create_amenity(user=user, amenity_data=validated_data)
+        if service_result.success:
+            # Service returns dict, load model from DB to satisfy serializer.save() contract
+            return Amenity.objects.get(pk=service_result.data['id'])
+        else:
+            raise service_result.to_exception()
+
+    def update(self, instance, validated_data):
+        user = self.context['request'].user
+        service_result = AmenityService().update_amenity(user=user, pk=instance.pk, amenity_data=validated_data)
+        if service_result.success:
+            # Service returns dict, load model from DB to satisfy serializer.save() contract
+            return Amenity.objects.get(pk=service_result.data['id'])
+        else:
+            raise service_result.to_exception()
+
 
 # --------- Space Type Serializers ---------
 
@@ -356,7 +385,7 @@ class SpaceTypeBaseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SpaceType
-        fields = '__all__'  # 字段已在模型中移除，此处无需特别处理
+        fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at')
 
 
@@ -367,7 +396,7 @@ class SpaceTypeCreateUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SpaceType
-        fields = '__all__'  # 字段已在模型中移除，此处无需特别处理
+        fields = '__all__'
         read_only_fields = ('id',)
         extra_kwargs = {
             'default_available_start_time': {'allow_null': True},
@@ -390,3 +419,21 @@ class SpaceTypeCreateUpdateSerializer(serializers.ModelSerializer):
                 code='invalid_default_time_range'
             )
         return data
+
+    def create(self, validated_data):
+        user = self.context['request'].user
+        service_result = SpaceTypeService().create_space_type(user=user, space_type_data=validated_data)
+        if service_result.success:
+            # Service returns dict, load model from DB to satisfy serializer.save() contract
+            return SpaceType.objects.get(pk=service_result.data['id'])
+        else:
+            raise service_result.to_exception()
+
+    def update(self, instance, validated_data):
+        user = self.context['request'].user
+        service_result = SpaceTypeService().update_space_type(user=user, pk=instance.pk, space_type_data=validated_data)
+        if service_result.success:
+            # Service returns dict, load model from DB to satisfy serializer.save() contract
+            return SpaceType.objects.get(pk=service_result.data['id'])
+        else:
+            raise service_result.to_exception()

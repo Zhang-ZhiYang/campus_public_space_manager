@@ -1,34 +1,40 @@
 # spaces/service/space_type_service.py
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from django.db import transaction
-# from django.db.models import QuerySet # 现在返回 List[Dict]
+from django.db.models import QuerySet
 from core.service import BaseService, ServiceResult
-from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException
+from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException, ForbiddenException # Added ForbiddenException
 from spaces.models import SpaceType
 from django.contrib.auth import get_user_model
-from core.cache import CacheService # 导入 CacheService
-# from django.forms.models import model_to_dict # 不再需要，使用模型自身的 .to_dict()
+from core.cache import CacheService # Use the now updated CacheService
 
 logger = logging.getLogger(__name__)
 CustomUser = get_user_model()
 
 class SpaceTypeService(BaseService):
+    """
+    负责处理 SpaceType 模型相关的业务逻辑。
+    """
     _dao_map = {
         'space_type_dao': 'space_type',
     }
+    _allowed_prefetch_related = []
+    _allowed_select_related = []
 
-    @CacheService.cache_method(key_prefix='spaces:spacetype:list_all', is_list_cache=True, list_fixed_custom_postfix='list_all')
-    def get_all_space_types(self, user: CustomUser) -> ServiceResult[List[Dict[str, Any]]]: # 返回类型改为 List[Dict]
+    # NO @CacheService.cache_method here. List caching now happens in the View.
+    def get_all_space_types(self, user: CustomUser) -> ServiceResult[QuerySet[SpaceType]]:
         """
-        获取所有空间类型列表。所有认证用户可见所有空间类型列表。
+        获取所有空间类型列表的 QuerySet。
+        DAO 负责基础数据获取和预加载。
         """
         try:
-            space_types_qs = self.space_type_dao.get_all() # DAO 返回 QuerySet
-            # 转换为字典列表，用于缓存
-            space_types_data = [st.to_dict() for st in space_types_qs]
+            space_types_qs = self.space_type_dao.get_all(
+                prefetch_related=self._allowed_prefetch_related,
+                select_related=self._allowed_select_related
+            )
             return ServiceResult.success_result(
-                data=space_types_data,
+                data=space_types_qs,  # Direct QuerySet
                 message="成功获取空间类型列表。",
                 status_code=200
             )
@@ -36,68 +42,69 @@ class SpaceTypeService(BaseService):
             logger.exception("获取空间类型列表失败。")
             return self._handle_exception(e, default_message="获取空间类型列表失败。")
 
-    @CacheService.cache_method(key_prefix='spaces:spacetype:detail')
-    def get_space_type_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]: # 返回类型改为 Dict
+    @CacheService.cache_method(key_prefix='spaces:spacetype:detail', identifier_arg='pk') # Explicit identifier_arg
+    def get_space_type_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]:
         """
-        根据ID获取单个空间类型详情。所有认证用户可见空间类型详情。
+        根据ID获取单个空间类型详情。
+        此方法将从DAO获取Model实例，转换为Dict后进行缓存。
         """
         try:
-            space_type = self.space_type_dao.get_by_id(pk) # DAO 返回 Model 实例
+            space_type = self.space_type_dao.get_by_id(
+                pk,
+                prefetch_related=self._allowed_prefetch_related,
+                select_related=self._allowed_select_related
+            )
             if not space_type:
-                return ServiceResult.error_result(
-                    message="空间类型未找到。",
-                    error_code=NotFoundException.default_code,
-                    status_code=NotFoundException.status_code
-                )
-            # 转换为字典，用于缓存
+                raise NotFoundException(detail="空间类型未找到。")
+
             space_type_data = space_type.to_dict()
             return ServiceResult.success_result(
                 data=space_type_data,
                 message="成功获取空间类型详情。",
                 status_code=200
             )
+        except CustomAPIException as e:
+            raise e
         except Exception as e:
             logger.exception(f"获取空间类型详情失败 (ID: {pk})。")
             return self._handle_exception(e, default_message="获取空间类型详情失败。")
 
     @transaction.atomic
-    def create_space_type(self, user: CustomUser, space_type_data: dict) -> ServiceResult[Dict[str, Any]]: # 返回类型改为 Dict
+    def create_space_type(self, user: CustomUser, space_type_data: dict) -> ServiceResult[Dict[str, Any]]:
         """
-        创建新的空间类型。权限已在视图层通过装饰器检查。
-        创建成功后，依赖于 signal 触发缓存失效。
+        创建新的空间类型。
         """
         try:
             new_space_type = self.space_type_dao.create(**space_type_data)
             return ServiceResult.success_result(
-                data=new_space_type.to_dict(), # 转换为字典
+                data=new_space_type.to_dict(),
                 message="空间类型创建成功。",
                 status_code=201
             )
+        except CustomAPIException as e:
+            raise e
         except Exception as e:
             logger.exception(f"创建空间类型失败 (数据: {space_type_data})。")
             return self._handle_exception(e, default_message="创建空间类型失败。")
 
     @transaction.atomic
-    def update_space_type(self, user: CustomUser, pk: int, space_type_data: dict) -> ServiceResult[Dict[str, Any]]: # 返回类型改为 Dict
+    def update_space_type(self, user: CustomUser, pk: int, space_type_data: dict) -> ServiceResult[Dict[str, Any]]:
         """
-        更新空间类型。权限已在视图层通过装饰器检查。
-        更新成功后，依赖于 signal 触发缓存失效。
+        更新空间类型。
         """
         try:
             space_type = self.space_type_dao.get_by_id(pk)
             if not space_type:
-                return ServiceResult.error_result(
-                    message="空间类型未找到。",
-                    error_code=NotFoundException.default_code,
-                    status_code=NotFoundException.status_code
-                )
+                raise NotFoundException(detail="空间类型未找到。")
 
             updated_space_type = self.space_type_dao.update(space_type, **space_type_data)
             return ServiceResult.success_result(
-                data=updated_space_type.to_dict(), # 转换为字典
+                data=updated_space_type.to_dict(),
                 message="空间类型更新成功。",
                 status_code=200
             )
+        except CustomAPIException as e:
+            raise e
         except Exception as e:
             logger.exception(f"更新空间类型失败 (ID: {pk}, 数据: {space_type_data})。")
             return self._handle_exception(e, default_message="更新空间类型失败。")
@@ -105,31 +112,24 @@ class SpaceTypeService(BaseService):
     @transaction.atomic
     def delete_space_type(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         """
-        删除空间类型。权限已在视图层通过装饰器检查。
-        删除成功后，依赖于 signal 触发缓存失效。
+        删除空间类型。
         """
         try:
             space_type = self.space_type_dao.get_by_id(pk)
             if not space_type:
-                return ServiceResult.error_result(
-                    message="空间类型未找到。",
-                    error_code=NotFoundException.default_code,
-                    status_code=NotFoundException.status_code
-                )
+                raise NotFoundException(detail="空间类型未找到。")
 
             if space_type.spaces.exists():
-                return ServiceResult.error_result(
-                    message="存在关联的空间，无法删除此空间类型。",
-                    error_code=BadRequestException.default_code,
-                    status_code=BadRequestException.status_code,
-                    errors=["请先解除所有空间与此类型的绑定。"]
-                )
+                # Fix: Remove 'errors' argument
+                raise BadRequestException(detail="存在关联的空间，无法删除此空间类型。请先解除所有空间与此类型的绑定。")
 
             self.space_type_dao.delete(space_type)
             return ServiceResult.success_result(
                 message="空间类型删除成功。",
                 status_code=204
             )
+        except CustomAPIException as e:
+            raise e
         except Exception as e:
             logger.exception(f"删除空间类型失败 (ID: {pk})。")
             return self._handle_exception(e, default_message="删除设施类型失败。")
