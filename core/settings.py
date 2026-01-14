@@ -219,15 +219,32 @@ CORS_ALLOW_CREDENTIALS = True
 # 10. Celery & Redis 配置 (缺失部分已补全)
 # ==============================================================================
 
-# 从 .env 读取配置
-CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://127.0.0.1:6379/1')
-CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://127.0.0.1:6379/2')
+REDIS_CACHE_URL = config('REDIS_URL', default='redis://127.0.0.1:6379/0') # 假设你的 .env 中定义了 REDIS_URL
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': REDIS_CACHE_URL, # 使用 REDIS_CACHE_URL
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'CONNECTION_POOL_KWARGS': {
+                'max_connections': config('REDIS_MAX_CONNECTIONS', default=100, cast=int),
+                'retry_on_timeout': True,
+            },
+        },
+        'KEY_PREFIX': config('CACHE_KEY_PREFIX', default='campus_public_space_manager_cache'), # 你项目的独特前缀
+        'TIMEOUT': config('CACHE_TIMEOUT', default=300, cast=int),
+    }
+}
+
+# 从 .env 读取 Celery 配置
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://127.0.0.1:6379/1') # 你的 .env 定义了 /1
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://127.0.0.1:6379/2') # 你的 .env 定义了 /2
 
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
-
 # ==============================================================================
 # 11. 其他
 # ==============================================================================
