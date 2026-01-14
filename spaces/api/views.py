@@ -2,42 +2,37 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
-# 导入我们自定义的全局分页器
 from core.pagination import CustomPageNumberPagination
 
 import logging
 
 from core.utils.response import success_response
-from core.utils.exceptions import CustomAPIException, InternalServerError  # 导入 InternalServerError
+from core.utils.exceptions import CustomAPIException, InternalServerError
 
 from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_201_CREATED, HTTP_200_OK, HTTP_204_NO_CONTENT
 from spaces.api.filters import SpaceFilter
 
-# 导入所有 Service
 from spaces.service.space_service import SpaceService
 from spaces.service.space_type_service import SpaceTypeService
 from spaces.service.amenity_service import AmenityService
 
-# 导入所有 Serializer
 from spaces.api.serializers import (
     SpaceListSerializer, SpaceCreateUpdateSerializer, SpaceBaseSerializer,
     AmenityBaseSerializer, AmenityCreateUpdateSerializer,
     SpaceTypeBaseSerializer, SpaceTypeCreateUpdateSerializer
 )
 
-# 导入自定义权限装饰器
 from core.decorators import is_system_admin_required, is_admin_or_space_manager_required
 
 logger = logging.getLogger(__name__)
-
 
 # --- Space API Views ---
 
 class SpaceListCreateAPIView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPageNumberPagination
-    filter_backends = [DjangoFilterBackend]  # 添加过滤器后端
-    filterset_class = SpaceFilter  # 指定SpaceFilter类
+    filter_backends = [DjangoFilterBackend]
+    filterset_class = SpaceFilter
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -48,27 +43,32 @@ class SpaceListCreateAPIView(ListCreateAPIView):
         user = self.request.user
         service_result = SpaceService().get_all_spaces(user)
         if service_result.success:
+            # 注意: SpaceService.get_all_spaces 返回 List[Dict]，但 DRF 的 ListCreateAPIView
+            # 期望 get_queryset() 返回 QuerySet。这里为了兼容已修改的服务层，
+            # get_queryset 返回的将是 List[Dict]。这意味着分页和过滤可能需要适应其行为。
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
         try:
+            # self.get_queryset() 返回的是 List[Dict]，而不是 QuerySet
             queryset = self.filter_queryset(self.get_queryset())
 
             page = None
             if self.pagination_class:
-                request.successful_response_status = HTTP_200_OK  # 确保分页器能拿到正确状态码
-                page = self.paginate_queryset(queryset)
+                request.successful_response_status = HTTP_200_OK
+                page = self.paginate_queryset(queryset) # 如果 queryset 是 list，Pagination 也能处理
 
             serializer = self.get_serializer(page if page is not None else queryset, many=True)
 
             if page is not None:
                 return self.get_paginated_response(serializer.data)
             else:
+                # FIX: 使用 len(queryset) 而不是 queryset.count()
                 return success_response(
                     message=MSG_SUCCESS,
-                    data={"count": queryset.count(), "next": None, "previous": None, "results": serializer.data},
+                    data={"count": len(queryset), "next": None, "previous": None, "results": serializer.data},
                     status_code=HTTP_200_OK
                 )
         except CustomAPIException as e:
@@ -76,7 +76,6 @@ class SpaceListCreateAPIView(ListCreateAPIView):
             raise e
         except Exception as e:
             logger.exception("列出空间失败，发生未知错误。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_admin_or_space_manager_required
@@ -123,9 +122,7 @@ class SpaceListCreateAPIView(ListCreateAPIView):
             raise e
         except Exception as e:
             logger.exception("创建空间失败，发生未知错误。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
-
 
 class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
@@ -160,7 +157,6 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"获取空间详情失败 (ID: {self.kwargs[self.lookup_field]})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_admin_or_space_manager_required
@@ -177,7 +173,6 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
         space_data_for_service = validated_data.copy()
 
-        # 处理 managed_by_id，确保 Service 层接收 ID
         if 'managed_by' in space_data_for_service:
             mb_instance = space_data_for_service.pop('managed_by')
             space_data_for_service['managed_by_id'] = mb_instance.pk if mb_instance else None
@@ -213,7 +208,6 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"更新空间失败 (ID: {instance.pk})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_admin_or_space_manager_required
@@ -227,7 +221,7 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             if service_result.success:
                 return success_response(
                     message="空间删除成功。",
-                    data=None,  # 删除成功通常不返回数据
+                    data=None,
                     status_code=HTTP_204_NO_CONTENT
                 )
             else:
@@ -239,15 +233,13 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"删除空间失败 (ID: {instance.pk})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
-
 
 # --- SpaceType API Views ---
 
 class SpaceTypeListView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
-    pagination_class = None
+    pagination_class = None # Explicitly no pagination for this view
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -258,17 +250,20 @@ class SpaceTypeListView(ListCreateAPIView):
         user = self.request.user
         service_result = SpaceTypeService().get_all_space_types(user)
         if service_result.success:
+            # 这里返回的是 List[Dict]，而不是 QuerySet
             return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
         try:
+            # self.filter_queryset 也将接收并处理 List[Dict] (如果 filterset 支持)
             queryset = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset, many=True)
             return success_response(
                 message=MSG_SUCCESS,
-                data={"results": serializer.data, "count": queryset.count()},
+                # FIX: 使用 len() 获取列表长度
+                data={"results": serializer.data, "count": len(queryset)},
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
@@ -276,7 +271,6 @@ class SpaceTypeListView(ListCreateAPIView):
             raise e
         except Exception as e:
             logger.exception("列出空间类型失败，发生未知错误。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_system_admin_required
@@ -305,9 +299,7 @@ class SpaceTypeListView(ListCreateAPIView):
             raise e
         except Exception as e:
             logger.exception("创建空间类型失败，发生未知错误。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
-
 
 class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
@@ -342,7 +334,6 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"获取空间类型详情失败 (ID: {self.kwargs[self.lookup_field]})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_system_admin_required
@@ -374,7 +365,6 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"更新空间类型失败 (ID: {instance.pk})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_system_admin_required
@@ -400,9 +390,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"删除空间类型失败 (ID: {instance.pk})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
-
 
 # --- Amenity API Views ---
 
@@ -419,6 +407,7 @@ class AmenityListView(ListCreateAPIView):
         user = self.request.user
         service_result = AmenityService().get_all_amenities(user)
         if service_result.success:
+            # 这里返回的是 List[Dict]
             return service_result.data
         else:
             raise service_result.to_exception()
@@ -429,7 +418,8 @@ class AmenityListView(ListCreateAPIView):
             serializer = self.get_serializer(queryset, many=True)
             return success_response(
                 message=MSG_SUCCESS,
-                data={"results": serializer.data, "count": queryset.count()},
+                # FIX: 使用 len() 获取列表长度
+                data={"results": serializer.data, "count": len(queryset)},
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
@@ -437,7 +427,6 @@ class AmenityListView(ListCreateAPIView):
             raise e
         except Exception as e:
             logger.exception("列出设施类型失败，发生未知错误。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_system_admin_required
@@ -466,9 +455,7 @@ class AmenityListView(ListCreateAPIView):
             raise e
         except Exception as e:
             logger.exception("创建设施类型失败，发生未知错误。")
-            # 移除 errors 参数
-            raise InternalServerError(detail=str(e))  # 修正 detail 接受错误信息
-
+            raise InternalServerError(detail=str(e))
 
 class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
@@ -503,7 +490,6 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"获取设施类型详情失败 (ID: {self.kwargs[self.lookup_field]})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_system_admin_required
@@ -535,7 +521,6 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"更新设施类型失败 (ID: {instance.pk})。")
-            # 移除 errors 参数
             raise InternalServerError(detail="服务器内部错误。")
 
     @is_system_admin_required
@@ -561,5 +546,4 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise e
         except Exception as e:
             logger.exception(f"删除设施类型失败 (ID: {instance.pk})。")
-            # 移除 errors 参数。这里的 detail 可以更具体，例如包含异常信息
-            raise InternalServerError(detail=f"服务器内部错误: {str(e)}")  # 更好的错误详情
+            raise InternalServerError(detail=f"服务器内部错误: {str(e)}")

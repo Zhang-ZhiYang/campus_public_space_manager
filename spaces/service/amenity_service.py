@@ -1,14 +1,14 @@
 # spaces/service/amenity_service.py
 import logging
-from typing import List
+from typing import List, Dict, Any
 from django.db import transaction
-from django.db.models import QuerySet
-
+# from django.db.models import QuerySet # 不再返回 QuerySet
 from core.service import BaseService, ServiceResult
-# 移除 ForbiddenException 导入，因为服务层不再直接抛出它来处理角色权限
-from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException # 确保 CustomAPIException 在这里是为了 _handle_exception 的清晰度
+from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException
 from spaces.models import Amenity
 from django.contrib.auth import get_user_model
+from core.cache import CacheService # 导入 CacheService
+# from django.forms.models import model_to_dict # 不再需要，使用模型自身的 .to_dict()
 
 logger = logging.getLogger(__name__)
 CustomUser = get_user_model()
@@ -18,23 +18,26 @@ class AmenityService(BaseService):
         'amenity_dao': 'amenity',
     }
 
-    def get_all_amenities(self, user: CustomUser) -> ServiceResult[QuerySet[Amenity]]:
+    @CacheService.cache_method(key_prefix='spaces:amenity:list_all', is_list_cache=True, list_fixed_custom_postfix='list_all')
+    def get_all_amenities(self, user: CustomUser) -> ServiceResult[List[Dict[str, Any]]]: # 返回类型改为 List[Dict]
         """
         获取所有设施类型列表。
         所有认证用户可见所有设施类型列表。
         """
         try:
-            amenities = self.amenity_dao.get_all()
+            amenities_qs = self.amenity_dao.get_all()
+            amenities_data = [amenity.to_dict() for amenity in amenities_qs] # 调用 .to_dict()
             return ServiceResult.success_result(
-                data=amenities,
+                data=amenities_data,
                 message="成功获取设施类型列表。",
                 status_code=200
             )
         except Exception as e:
-            logger.exception("获取设施类型列表失败。") # 记录异常
+            logger.exception("获取设施类型列表失败。")
             return self._handle_exception(e, default_message="获取设施类型列表失败。")
 
-    def get_amenity_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Amenity]:
+    @CacheService.cache_method(key_prefix='spaces:amenity:detail')
+    def get_amenity_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]: # 返回类型改为 Dict
         """
         根据ID获取单个设施类型详情。
         所有认证用户可见设施类型详情。
@@ -47,8 +50,9 @@ class AmenityService(BaseService):
                     error_code=NotFoundException.default_code,
                     status_code=NotFoundException.status_code
                 )
+            amenity_data = amenity.to_dict() # 调用 .to_dict()
             return ServiceResult.success_result(
-                data=amenity,
+                data=amenity_data,
                 message="成功获取设施类型详情。",
                 status_code=200
             )
@@ -57,14 +61,15 @@ class AmenityService(BaseService):
             return self._handle_exception(e, default_message="获取设施类型详情失败。")
 
     @transaction.atomic
-    def create_amenity(self, user: CustomUser, amenity_data: dict) -> ServiceResult[Amenity]:
+    def create_amenity(self, user: CustomUser, amenity_data: dict) -> ServiceResult[Dict[str, Any]]: # 返回类型改为 Dict
         """
         创建新的设施类型。权限已在视图层通过装饰器检查。
+        创建成功后，异步触发缓存失效。
         """
         try:
             new_amenity = self.amenity_dao.create(**amenity_data)
             return ServiceResult.success_result(
-                data=new_amenity,
+                data=new_amenity.to_dict(), # 调用 .to_dict()
                 message="设施类型创建成功。",
                 status_code=201
             )
@@ -73,9 +78,10 @@ class AmenityService(BaseService):
             return self._handle_exception(e, default_message="创建设施类型失败。")
 
     @transaction.atomic
-    def update_amenity(self, user: CustomUser, pk: int, amenity_data: dict) -> ServiceResult[Amenity]:
+    def update_amenity(self, user: CustomUser, pk: int, amenity_data: dict) -> ServiceResult[Dict[str, Any]]: # 返回类型改为 Dict
         """
         更新设施类型。权限已在视图层通过装饰器检查。
+        更新成功后，异步触发缓存失效。
         """
         try:
             amenity = self.amenity_dao.get_by_id(pk)
@@ -88,7 +94,7 @@ class AmenityService(BaseService):
 
             updated_amenity = self.amenity_dao.update(amenity, **amenity_data)
             return ServiceResult.success_result(
-                data=updated_amenity,
+                data=updated_amenity.to_dict(), # 调用 .to_dict()
                 message="设施类型更新成功。",
                 status_code=200
             )
@@ -100,6 +106,7 @@ class AmenityService(BaseService):
     def delete_amenity(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         """
         删除设施类型。权限已在视图层通过装饰器检查。
+        删除成功后，异步触发缓存失效。
         """
         try:
             amenity = self.amenity_dao.get_by_id(pk)

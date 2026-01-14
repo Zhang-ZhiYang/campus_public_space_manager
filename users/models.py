@@ -1,9 +1,9 @@
-# users/models.py (修订版)
+# users/models.py (修订版，添加 to_dict_minimal 方法)
 from django.db import models
 from django.contrib.auth.models import AbstractUser, UserManager, Group, Permission
 from django.db.models import Index
 from guardian.shortcuts import get_perms_for_model
-from django.contrib.contenttypes.models import ContentType  # 导入 ContentType
+from django.contrib.contenttypes.models import ContentType
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,6 @@ GENDER_CHOICES = (
     ('F', '女'),
     ('U', '未知'),
 )
-
 
 # ====================================================================
 # CustomUser Model (自定义用户)
@@ -31,7 +30,6 @@ class CustomUserManager(UserManager):
         if email == '':
             email = None
         return super().create_superuser(username, email, password, **extra_fields)
-
 
 class CustomUser(AbstractUser):
     objects = CustomUserManager()
@@ -119,6 +117,24 @@ class CustomUser(AbstractUser):
             Index(fields=['name']),
         ]
 
+    # --- 新增的 to_dict_minimal 方法 ---
+    def to_dict_minimal(self):
+        """
+        将用户实例的重要字段转换为字典，用于嵌套显示或缓存，避免循环引用。
+        """
+        if not self: # 如果实例是 None，返回 None
+            return None
+        return {
+            'id': self.pk,
+            'username': self.username,
+            'name': self.name,
+            'email': self.email,
+            'phone_number': self.phone_number,
+            'work_id': self.work_id,
+            # 可以根据需要添加其他少量重要字段
+        }
+    # --- 方法结束 ---
+
     @property
     def is_system_admin(self):
         """
@@ -168,8 +184,6 @@ class CustomUser(AbstractUser):
         如果用户是超级用户，则默认对所有对象拥有所有权限 (概念上，不需要额外查询逐一检查)。
         """
         if self.is_superuser:
-            # Superuser implicitly has all permissions. This is a conceptual bypass.
-            # To get actual codenames for a model, query permissions for that model's ContentType
             content_type = ContentType.objects.get_for_model(obj.__class__)
             return set([f"{content_type.app_label}.{perm.codename}" for perm in
                         Permission.objects.filter(content_type=content_type)])
@@ -198,30 +212,17 @@ class CustomUser(AbstractUser):
         if self.email == '':
             self.email = None
 
-        is_new_user = not self.pk
+        super().save(*args, **kwargs)
 
-        # 在调用 super().save() 之前确保 is_staff 字段的更新不会导致递归
-        # 正确的做法是使用 post_save 信号或明确 update_fields
-        # 这里的逻辑是确保 is_staff 在用户创建或组关系变化时更新
-        if self.pk:  # Only process if user already exists in DB
-            old_is_staff = CustomUser.objects.filter(pk=self.pk).values_list('is_staff', flat=True).first()
-            if old_is_staff is None:  # Should not happen if self.pk exists, but for safety
-                old_is_staff = self.is_staff  # Fallback to current instance value
-
-        super().save(*args, **kwargs)  # Call original save
-
-        # 确保只在用户对象已经存在（有主键）时才执行组相关的 is_staff 逻辑
         if self.pk:
-            current_is_staff_status = self.is_staff  # Load current value fresh from DB AFTER base save
+            current_is_staff_status = self.is_staff
 
-            # Check for changes in group membership or is_superuser status that would affect is_staff
             should_be_staff = self.is_superuser or \
                               self.groups.filter(name='系统管理员').exists() or \
                               self.groups.filter(name='空间管理员').exists()
 
             if current_is_staff_status != should_be_staff:
                 self.is_staff = should_be_staff
-                # Only save the 'is_staff' field to prevent recursion
                 super().save(update_fields=['is_staff'])
 
     def __str__(self):

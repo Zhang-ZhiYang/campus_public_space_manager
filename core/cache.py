@@ -5,9 +5,9 @@ import hashlib
 from django.core.cache import cache
 from django.conf import settings
 from functools import wraps
+import inspect # 导入 inspect 模块
 
 logger = logging.getLogger(__name__)
-
 
 class CacheService:
     """
@@ -39,6 +39,8 @@ class CacheService:
         'spaces:space:detail': 300,  # 单个空间详情 (5分钟) - 可能会频繁变动
         'spaces:space:list_all': 120,  # 所有空间列表 (2分钟)
         'spaces:space:list_by_parent': 120,  # 某个父空间下的子空间列表 (2分钟)
+        'spaces:space:list_by_manager': 120, # 某个管理人员管理的空间列表 (2分钟)
+        'spaces:space:list_filtered': 60, # 复杂的过滤列表，例如通过 `SpaceFilter` 过滤出的数据 (1分钟)
 
         # --- bookings 应用相关的缓存 ---
         'bookings:booking:detail': 60,  # 单个预订详情 (1分钟) - 实时性要求高
@@ -73,6 +75,7 @@ class CacheService:
         :param key_prefix: 缓存类型前缀，例如 'spaces:spacetype:detail'。
         :param identifier: 对象的唯一标识，例如主键 (PK)。
         :param custom_postfix: 自定义后缀，用于表示列表的特定状态（如 'active', 'pending'）或复杂查询的类型（如 'by_user'）。
+                                如果是简单的“所有列表”，建议明确使用 'list_all'。
         :param kwargs: 用于生成复杂列表键的额外参数，会被哈希化以保证唯一性。
         :return: 完整的缓存键字符串。
         """
@@ -93,13 +96,15 @@ class CacheService:
                 return f"{base_key}:{custom_postfix}:{kwargs_hash}"
             return f"{base_key}:{custom_postfix}"
         else:
-            # 默认的全局列表键（不带任何特定标识或参数）
-            # 通常用于非常简单的“列出所有”操作，但更推荐使用 custom_postfix='list_all'
+            # 如果没有 identifier 也没有 custom_postfix (或为空字符串)，
+            # 这通常是一个逻辑问题，因为列表应该有明确的 custom_postfix
             logger.warning(
-                f"[CacheService] Using generic list key for prefix '{key_prefix}'. "
-                "Consider using `custom_postfix='list_all'` for clarity."
+                f"[CacheService] Using implicit list key for prefix '{key_prefix}'. "
+                "Consider providing an explicit `custom_postfix` (e.g., 'list_all') "
+                "or using `list_fixed_custom_postfix` in @cache_method for clarity."
             )
-            return f"{base_key}:list_generic"  # 或者直接 return f"{base_key}:list_all"
+            # 更改为更明确的 'list_implicit' 来区分
+            return f"{base_key}:list_implicit"
 
     @staticmethod
     def get(key_prefix: str, identifier=None, custom_postfix: str = None, **kwargs):
@@ -149,12 +154,7 @@ class CacheService:
         """
         cache_key = CacheService.generate_key(key_prefix, identifier, custom_postfix, **kwargs)
         try:
-            if cache_key.endswith(':list_all'):  # 优化：如果删的是全局列表，直接删除
-                # 这里可以考虑做更激进的模糊匹配删除，但这通常不是推荐做法，
-                # 因为可能误删。精确定位键是更好的方式。
-                cache.delete(cache_key)
-            else:
-                cache.delete(cache_key)
+            cache.delete(cache_key)
             logger.debug(f"[CacheService] Deleted key '{cache_key}' from cache.")
             return True
         except Exception as e:
@@ -171,7 +171,6 @@ class CacheService:
         count = 0
         try:
             # 构造匹配模式，例如 'campus_public_space_manager_cache:spaces:space:*'
-            # 确保你的 Redis 连接支持 keys 命令，或者在生产环境中使用 scan_iter
             # 使用 settings 中项目级的 KEY_PREFIX 进行拼接
             project_key_prefix = settings.CACHES['default'].get('KEY_PREFIX', 'default')
             pattern = f"{project_key_prefix}:{key_prefix}:*"
@@ -191,7 +190,10 @@ class CacheService:
             identifier_arg: str = 'pk',  # 方法参数中作为唯一标识符的参数名 (例如 'id', 'pk')
             is_list_cache: bool = False,  # 是否是列表数据缓存，如果是，则 identifier_arg 会被忽略
             custom_postfix_arg: str = None,  # 方法参数中作为自定义后缀的参数名 (例如 'status', 'user_id')
-            list_key_kwargs: list = None  # 如果是列表，哪些 kwargs 需要参与 key 哈希
+            list_key_kwargs: list = None,  # 如果是列表，哪些 kwargs 需要参与 key 哈希
+            # 新增参数: 对于列表缓存，可以硬编码一个 custom_postfix，避免从方法参数中提取
+            # 例如对于 'get_all_amenities' 就可以直接用 list_fixed_custom_postfix='list_all'
+            list_fixed_custom_postfix: str = None
     ):
         """
         一个用于服务层方法的缓存装饰器。
@@ -202,7 +204,6 @@ class CacheService:
             @wraps(func)
             def wrapper(*args, **kwargs):
                 # 获取方法的签名，以便按参数名获取参数值
-                import inspect
                 sig = inspect.signature(func)
                 bound_args = sig.bind(*args, **kwargs)
                 bound_args.apply_defaults()  # 填充默认值
@@ -211,16 +212,21 @@ class CacheService:
                 if not is_list_cache and identifier_arg:
                     actual_identifier = bound_args.arguments.get(identifier_arg)
 
+                # 优先使用 list_fixed_custom_postfix
                 actual_custom_postfix = None
-                if custom_postfix_arg:
+                if is_list_cache and list_fixed_custom_postfix:
+                    actual_custom_postfix = list_fixed_custom_postfix
+                elif custom_postfix_arg:
                     actual_custom_postfix = bound_args.arguments.get(custom_postfix_arg)
                 elif is_list_cache and not actual_custom_postfix:
-                    actual_custom_postfix = 'list_generic'  # 默认列表后缀
+                    # 如果是列表缓存，但既没有固定后缀也没有通过参数传递，采用默认通用后缀
+                    actual_custom_postfix = 'list_generic'
 
                 # 收集用于列表键哈希的 kwargs
                 key_kwargs_for_hash = {}
                 if is_list_cache and list_key_kwargs:
                     for arg_name in list_key_kwargs:
+                        # 确保 arg_name 存在于方法参数中，并且值不是 None
                         if arg_name in bound_args.arguments and bound_args.arguments[arg_name] is not None:
                             key_kwargs_for_hash[arg_name] = bound_args.arguments[arg_name]
 
@@ -263,9 +269,12 @@ class CacheService:
     @staticmethod
     def invalidate_list_cache(key_prefix: str, custom_postfix: str = None, **kwargs):
         """使特定条件的列表缓存失效。"""
-        CacheService.delete(key_prefix, custom_postfix=custom_postfix, **kwargs)
+        # 确保如果 custom_postfix 是 None，我们使用一致的 'list_implicit' 来进行删除
+        # 这与 generate_key 的兜底逻辑一致
+        actual_postfix = custom_postfix if custom_postfix is not None else 'list_implicit'
+        CacheService.delete(key_prefix, custom_postfix=actual_postfix, **kwargs)
         logger.info(
-            f"Invalidated list cache for key_prefix='{key_prefix}' (postfix='{custom_postfix}', kwargs={kwargs}).")
+            f"Invalidated list cache for key_prefix='{key_prefix}' (custom_postfix='{custom_postfix}', kwargs={kwargs}).")
 
     @staticmethod
     def invalidate_all_related_cache(key_prefix_root: str):

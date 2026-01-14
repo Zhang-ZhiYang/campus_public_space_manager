@@ -9,7 +9,7 @@ class SpacesConfig(AppConfig):
         # 导入 DAOFactory 和 ServiceFactory
         from core.dao import DAOFactory
         from core.service import ServiceFactory
-
+        import spaces.signals # <--- 确保导入你的信号模块
         # 导入所有 DAO 类
         from spaces.dao.space_type_dao import SpaceTypeDAO
         from spaces.dao.amenity_dao import AmenityDAO
