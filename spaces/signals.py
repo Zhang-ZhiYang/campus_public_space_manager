@@ -3,19 +3,21 @@ import logging
 from django.db.models.signals import post_save, pre_save, post_delete
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group  # 确保导入 Group
 from guardian.shortcuts import assign_perm, remove_perm
-import inspect  # For debugging/logging method args
 
+from core.cache import CacheService
 # 从 spaces.tasks 导入所有的 Celery 缓存失效任务
 from spaces.tasks import (
     invalidate_amenity_cache,
     invalidate_space_cache,
     invalidate_bookable_amenity_cache,
     invalidate_spacetype_cache,
-    invalidate_space_cache_for_manager,
-    invalidate_all_spaces_dependent_on_spacetype,  # 新增的任务
-    invalidate_all_bookable_amenities_and_parent_spaces_dependent_on_amenity,  # 新增的任务
+    # invalidate_space_cache_for_manager, # REMOVED: 移除此任务的导入
+    invalidate_all_spaces_dependent_on_spacetype,
+    invalidate_all_bookable_amenities_and_parent_spaces_dependent_on_amenity,
+    invalidate_space_details_and_amenity_lists_in_bulk,  # NEW: 导入新的批量任务
+    invalidate_all_spaces_dependent_on_group,  # NEW: 导入 Group 相关的失效任务
 )
 
 # 从 .models 导入模型和权限常量、辅助函数
@@ -136,11 +138,12 @@ def bookable_amenity_post_save_handler(sender, instance, created, **kwargs):
     logger.debug(f"Post_save signal for BookableAmenity (PK:{instance.pk}). Triggered cache invalidation task.")
 
     # 因为 BookableAmenity 的变化直接影响所属 Space 的详情和所有 Space 列表，
-    # 所以需要触发所属 Space 及其列表的缓存失效。
-    if space_pk:
-        invalidate_space_cache.delay(space_pk, affected_parent_pks=[])
-        logger.debug(
-            f"Triggered invalidate_space_cache for parent Space (PK:{space_pk}) due to BookableAmenity change.")
+    # Space 详情的缓存失效由 invalidate_bookable_amenity_cache 任务内部处理。
+    # 对于所有 Space 列表，我们在这里触发全局失效 (而不是特定的 Space 列表)，
+    # 因为 BookableAmenity 的变化可能影响到 Space 列表的过滤或显示。
+    # CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_all') # 已经 moved into invalidate_bookable_amenity_cache
+    # CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_filtered') # already moved into invalidate_bookable_amenity_cache
+    # logger.debug(f"Triggered global Space list cache invalidation due to BookableAmenity change for PK:{instance.pk}.")
 
 
 @receiver(post_delete, sender=BookableAmenity)
@@ -154,10 +157,9 @@ def bookable_amenity_post_delete_handler(sender, instance, **kwargs):
     logger.debug(f"Post_delete signal for BookableAmenity (PK:{instance.pk}). Triggered cache invalidation task.")
 
     # 同理，删除 BookableAmenity 也会影响所属 Space 的详情和列表
-    if space_pk:
-        invalidate_space_cache.delay(space_pk, affected_parent_pks=[])
-        logger.debug(
-            f"Triggered invalidate_space_cache for parent Space (PK:{space_pk}) due to BookableAmenity deletion.")
+    # CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_all') # already moved into invalidate_bookable_amenity_cache
+    # CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_filtered') # already moved into invalidate_bookable_amenity_cache
+    # logger.debug(f"Triggered global Space list cache invalidation due to BookableAmenity deletion for PK:{instance.pk}.")
 
 
 # ====================================================================
@@ -175,21 +177,25 @@ def store_old_managed_by_and_parent_for_space(sender, instance, **kwargs):
             instance._old_managed_by = old_instance.managed_by
             instance._old_parent_space_pk = old_instance.parent_space.pk if old_instance.parent_space else None
             instance._old_space_type_pk = old_instance.space_type.pk if old_instance.space_type else None  # 新增
+            # 存储旧的 permitted_groups PKs，用于 M2M 字段变化检测
+            instance._old_permitted_groups_pks = set(old_instance.permitted_groups.values_list('pk', flat=True))
 
             logger.debug(
-                f"Pre_save for Space {instance.name}, old managed_by stored: {old_instance.managed_by}, old_parent_pk: {instance._old_parent_space_pk}, old_space_type_pk: {instance._old_space_type_pk}"
+                f"Pre_save for Space {instance.name}, old managed_by stored: {old_instance.managed_by}, old_parent_pk: {instance._old_parent_space_pk}, old_space_type_pk: {instance._old_space_type_pk}, old_permitted_groups_pks: {instance._old_permitted_groups_pks}"
             )
         except sender.DoesNotExist:
             logger.warning(
-                f"Space with PK {instance.pk} not found in pre_save; treating as new instance for _old_managed_by, _old_parent_space_pk, _old_space_type_pk."
+                f"Space with PK {instance.pk} not found in pre_save; treating as new instance for _old_managed_by, _old_parent_space_pk, _old_space_type_pk, _old_permitted_groups_pks."
             )
             instance._old_managed_by = None
             instance._old_parent_space_pk = None
             instance._old_space_type_pk = None
+            instance._old_permitted_groups_pks = set()  # For new instances, it's an empty set
     else:
         instance._old_managed_by = None
         instance._old_parent_space_pk = None
         instance._old_space_type_pk = None
+        instance._old_permitted_groups_pks = set()  # For new instances, it's an empty set
 
 
 @receiver(post_save, sender=Space)
@@ -208,6 +214,10 @@ def assign_space_management_permissions_and_invalidate_cache(sender, instance, c
 
     old_space_type_pk = getattr(instance, '_old_space_type_pk', None)
     current_space_type_pk = instance.space_type.pk if instance.space_type else None
+
+    # 获取 current permitted_groups 的 PKs
+    current_permitted_groups_pks = set(instance.permitted_groups.values_list('pk', flat=True))
+    old_permitted_groups_pks = getattr(instance, '_old_permitted_groups_pks', set())
 
     # --- 1. 权限分配逻辑 (保持现有逻辑) ---
     # 撤销旧管理人员的权限
@@ -311,22 +321,35 @@ def assign_space_management_permissions_and_invalidate_cache(sender, instance, c
     if current_parent_pk:  # 新的父空间可能不同或被新分配
         affected_parent_pks.add(current_parent_pk)
 
-    # 如果 managed_by 发生变化，失效旧/新管理者的列表缓存
-    if old_managed_by and (old_managed_by != current_managed_by):
-        invalidate_space_cache_for_manager.delay(old_managed_by.pk)
-    # 如果有新的管理者，或者空间被创建且指定了管理者
-    if current_managed_by and (old_managed_by != current_managed_by or created):
-        invalidate_space_cache_for_manager.delay(current_managed_by.pk)
+    # 如果 managed_by 发生变化，需要清除所有 Space 的通用列表缓存
+    # 因为 managed_by 的变化可能影响用户能看到的 Space 列表。
+    if old_managed_by and (old_managed_by != current_managed_by) or \
+            current_managed_by and (old_managed_by != current_managed_by or created):
+        CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_all')
+        CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_filtered')
+        logger.info(
+            f"Triggered global Space list cache invalidation due to managed_by change for Space (PK:{instance.pk}).")
 
     # 如果 space_type 发生变化 (或从无到有，或从有到无，或从一个类型到另一个类型)
     if old_space_type_pk != current_space_type_pk:
-        # 触发所有依赖此 SpaceType 的 Space 的缓存失效
+        # 触发所有依赖此 SpaceType 的 Space 的缓存失效（包括列表和详情）
+        # 这里会清除所有 Space 的列表，所以再次在这里清除不需要
         if old_space_type_pk:
             invalidate_all_spaces_dependent_on_spacetype.delay(old_space_type_pk)
         if current_space_type_pk:
             invalidate_all_spaces_dependent_on_spacetype.delay(current_space_type_pk)
+        logger.info(
+            f"Triggered dependent Space cache invalidation due to space_type change for Space (PK:{instance.pk}).")
 
-    # 触发核心 Space 缓存失效任务 (处理详情、general list_all、list_by_parent 等)
+    # 如果 permitted_groups 发生变化，也需要清除所有 Space 的通用列表缓存
+    # 因为 permitted_groups 的变化可能影响用户能看到的 Space 列表 (即使是公共列表， permitted_groups_display 也会变)
+    if old_permitted_groups_pks != current_permitted_groups_pks:
+        CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_all')
+        CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_filtered')
+        logger.info(
+            f"Triggered global Space list cache invalidation due to permitted_groups change for Space (PK:{instance.pk}).")
+
+    # 触发核心 Space 缓存失效任务 (处理详情、list_by_parent 和 bookable_amenity 列表)
     invalidate_space_cache.delay(instance.pk, list(affected_parent_pks))
     logger.debug(f"Post_save signal for Space (PK:{instance.pk}). Triggered cache invalidation task.")
 
@@ -339,16 +362,45 @@ def space_post_delete_handler(sender, instance, **kwargs):
     # 获取被删除空间的父空间PKs，用于失效其父空间的子空间列表缓存
     affected_parent_pks = [instance.parent_space_id] if instance.parent_space_id else []
 
-    # 如果此空间有管理者，失效其管理者的 Space 列表缓存
+    # 如果此空间有管理者，清除所有 Space 的通用列表缓存
+    # 因为删除一个空间会影响该管理者能看到的列表。
     if instance.managed_by_id:
-        invalidate_space_cache_for_manager.delay(instance.managed_by_id)
+        CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_all')
+        CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_filtered')
+        logger.info(
+            f"Triggered global Space list cache invalidation for manager {instance.managed_by_id} due to Space (PK:{instance.pk}) deletion.")
 
-    # 如果此空间关联了 SpaceType，则其删除可能影响 SpaceType 关联的某些聚合 （虽然目前没有）
-    # 但由于 SpaceType 的 change_list 可能列出其下 Space 数量，Space 删除会影响到它。
-    # 并且，SpaceType 的改变影响所有依赖它的 Space 的缓存。
+    # 如果此空间关联了 SpaceType，触发所有依赖此 SpaceType 的 Space 的缓存失效
     if instance.space_type_id:
         invalidate_all_spaces_dependent_on_spacetype.delay(instance.space_type_id)
+        logger.info(
+            f"Triggered dependent Space cache invalidation due to Space (PK:{instance.pk}) deletion affecting SpaceType {instance.space_type_id}.")
 
-    # 触发核心 Space 缓存失效任务
+    # 如果此空间有 permitted_groups，清除所有 Space 的通用列表缓存
+    # 因为删除一个空间会影响这些组能看到的列表。
+    # (注意: M2M 关系在删除 Space 实例时会自动断开，但 for loop in pre_delete 才能获取旧关系)
+    # 可以在 pre_delete 中获取 instance.permitted_groups.all()
+    # 鉴于此，更简单的做法是直接全局清除列表缓存，反正上面也清过了。
+    # new changes to capture _old_permitted_groups_pks in pre_delete could be added for more precision
+
+    # 触发核心 Space 缓存失效任务 (处理详情、list_by_parent 和 bookable_amenity 列表)
     invalidate_space_cache.delay(instance.pk, affected_parent_pks)
     logger.debug(f"Post_delete signal for Space (PK:{instance.pk}). Triggered cache invalidation task.")
+
+
+# ====================================================================
+# NEW: Group 模型的信号处理
+# ====================================================================
+@receiver(post_save, sender=Group)
+@receiver(post_delete, sender=Group)
+def group_change_handler(sender, instance, **kwargs):
+    """
+    当 Group 实例保存 (创建/更新) 或删除后，触发所有可能依赖此 Group 的 Space 列表缓存失效。
+    因为 Space.permitted_groups_display 依赖 Group 名称，所以 Group 变化会影响 Space 的显示。
+    """
+    logger.info(
+        f"Group '{instance.name}' (PK:{instance.pk}) changed/deleted. Triggering dependent Space cache invalidation.")
+
+    # 当 Group 信息（名称等）发生变化时，可能影响所有显示 `permitted_groups_display` 的 Space。
+    # 最安全且高效的方式是全局清除所有 Space 的列表缓存。
+    invalidate_all_spaces_dependent_on_group.delay(instance.pk)  # 调用新的 Celery 任务
