@@ -3,8 +3,9 @@ import logging
 from typing import Optional, List
 
 from celery import shared_task
-from core.cache import CacheService
-from spaces.models import Space, BookableAmenity, SpaceType
+from core.service.cache import CacheService
+from spaces.models import Space, BookableAmenity
+
 logger = logging.getLogger(__name__)
 
 # --- SpaceType related cache invalidation tasks ---

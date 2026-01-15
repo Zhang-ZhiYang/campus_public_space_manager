@@ -2,10 +2,9 @@
 import logging
 from django.core.management.base import BaseCommand, CommandError
 from django.contrib.auth import get_user_model
-from django.conf import settings
 from spaces.service.amenity_service import AmenityService
 from spaces.models import Amenity
-from core.cache import CacheService
+from core.service.cache import CacheService
 from time import sleep
 
 logger = logging.getLogger(__name__)

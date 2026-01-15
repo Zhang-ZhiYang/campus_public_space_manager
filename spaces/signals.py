@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group  # 确保导入 Group
 from guardian.shortcuts import assign_perm, remove_perm
 
-from core.cache import CacheService
+from core.service.cache import CacheService
 # 从 spaces.tasks 导入所有的 Celery 缓存失效任务
 from spaces.tasks import (
     invalidate_amenity_cache,
@@ -16,7 +16,7 @@ from spaces.tasks import (
     # invalidate_space_cache_for_manager, # REMOVED: 移除此任务的导入
     invalidate_all_spaces_dependent_on_spacetype,
     invalidate_all_bookable_amenities_and_parent_spaces_dependent_on_amenity,
-    invalidate_space_details_and_amenity_lists_in_bulk,  # NEW: 导入新的批量任务
+    # NEW: 导入新的批量任务
     invalidate_all_spaces_dependent_on_group,  # NEW: 导入 Group 相关的失效任务
 )
 

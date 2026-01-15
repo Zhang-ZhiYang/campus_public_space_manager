@@ -1,7 +1,4 @@
 # spaces/api/views.py
-import hashlib  # For hashing query parameters for cache key
-import json  # For serializing query parameters for hashing
-from typing import Dict, Any, List, Optional  # Add Optional for type hinting
 
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.permissions import IsAuthenticated
@@ -15,7 +12,7 @@ from core.utils.exceptions import CustomAPIException, InternalServerError, NotFo
 
 from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_201_CREATED, HTTP_200_OK, HTTP_204_NO_CONTENT
 from spaces.api.filters import SpaceFilter  # Assume SpaceFilter exists or replace if not needed
-from core.cache import CacheService, CachedDictObject  # Import CachedDictObject from core.cache
+from core.service.cache import CacheService, CachedDictObject  # Import CachedDictObject from core.cache
 
 from spaces.service.space_service import SpaceService
 from spaces.service.space_type_service import SpaceTypeService

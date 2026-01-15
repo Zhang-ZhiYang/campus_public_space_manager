@@ -1,13 +1,13 @@
 # spaces/service/space_type_service.py
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 from django.db import transaction
 from django.db.models import QuerySet
 from core.service import BaseService, ServiceResult
-from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException, ForbiddenException # Added ForbiddenException
+from core.utils.exceptions import BadRequestException, NotFoundException, CustomAPIException  # Added ForbiddenException
 from spaces.models import SpaceType
 from django.contrib.auth import get_user_model
-from core.cache import CacheService # Use the now updated CacheService
+from core.service.cache import CacheService # Use the now updated CacheService
 
 logger = logging.getLogger(__name__)
 CustomUser = get_user_model()

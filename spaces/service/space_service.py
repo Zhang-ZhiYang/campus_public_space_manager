@@ -2,16 +2,16 @@
 import logging
 import hashlib
 import json
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Optional
 from django.db.models import QuerySet, Q
 from django.db import transaction
 
 from core.service import BaseService, ServiceResult
 from core.dao import DAOFactory
-from core.cache import CacheService
-from core.utils.exceptions import ServiceException, NotFoundException, BadRequestException, \
+from core.service.cache import CacheService
+from core.utils.exceptions import NotFoundException, BadRequestException, \
     ForbiddenException, CustomAPIException
-from spaces.models import Space, SpaceType, Amenity, BookableAmenity
+from spaces.models import Space
 from users.models import CustomUser
 from django.contrib.auth.models import Group
 
