@@ -74,19 +74,25 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
                                      obj: Any) -> str:  # Use Any for obj to handle Model instance or CachedDictObject
         # obj could be a Model instance or a CachedDictObject (which is dict-like)
         if hasattr(obj, '_data') and isinstance(obj._data, dict):  # Check for CachedDictObject
-            # If `obj` is a dict (from cache), directly access its 'permitted_groups' key
-            # which will contain a list of PKs.
-            if 'permitted_groups' in obj._data and obj._data['permitted_groups']:
-                group_pks = set(obj._data['permitted_groups'])
+            space_data = obj._data  # Use direct reference to the dictionary
+
+            # If `permitted_groups` explicitly exist in the cached data and it's not empty,
+            # we prioritize displaying them.
+            if 'permitted_groups' in space_data and space_data['permitted_groups']:
+                group_pks = set(space_data['permitted_groups'])
                 # Fetch Group names from DB as only PKs are in cached dict
-                # Consider caching Group names if this is a frequent lookup
                 groups = Group.objects.filter(pk__in=group_pks).values_list('name', flat=True)
                 return ", ".join(groups)
 
-            is_basic_infrastructure = obj._data.get('space_type', {}).get('is_basic_infrastructure')
+            # If no explicit permitted_groups, determine display based on space_type.is_basic_infrastructure
+            # FIX: Safely get space_type dict, defaulting to an empty dict if space_type is None or missing.
+            # This handles the case where space_type in _data is explicitly None.
+            space_type_info = space_data.get('space_type') or {}
+            is_basic_infrastructure = space_type_info.get('is_basic_infrastructure', False)
+
             if is_basic_infrastructure:
-                return "所有人"
-            return "无特定限制 (需权限)"
+                return "所有人"  # Display if basic infrastructure
+            return "无特定限制 (需权限)"  # Default if not basic infrastructure and no specific groups
 
         # Original logic for model instance directly
         if obj.permitted_groups.exists():
@@ -102,9 +108,12 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
             obj_val = obj._data.get(field_name)
             if obj_val is not None:
                 return obj_val
-            spacetype_data = obj._data.get('space_type')
-            if spacetype_data and spacetype_data.get(default_field_name) is not None:
-                return spacetype_data.get(default_field_name)
+
+            # FIX: Safely get space_type_data, defaulting to an empty dict if space_type is None or missing.
+            space_type_data = obj._data.get('space_type') or {}
+
+            if space_type_data.get(default_field_name) is not None:
+                return space_type_data.get(default_field_name)
             return default_value_if_no_spacetype
 
         # Original logic for model instance
@@ -135,13 +144,15 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
         duration_obj = self._get_field_value_from_obj(obj, 'min_booking_duration', 'default_min_booking_duration')
         if isinstance(duration_obj, (str, bytes)):  # Already string from cache
             return duration_obj
-        return str(duration_obj) if duration_obj else None  # timedelta object
+        # Ensure DurationField is stringified consistently
+        return str(duration_obj) if duration_obj is not None else None  # `is not None` is more precise
 
     def get_effective_max_booking_duration(self, obj: Any) -> str | None:
         duration_obj = self._get_field_value_from_obj(obj, 'max_booking_duration', 'default_max_booking_duration')
         if isinstance(duration_obj, (str, bytes)):
             return duration_obj
-        return str(duration_obj) if duration_obj else None
+        # Ensure DurationField is stringified consistently
+        return str(duration_obj) if duration_obj is not None else None
 
     def get_effective_buffer_time_minutes(self, obj: Any) -> int | None:
         return self._get_field_value_from_obj(obj, 'buffer_time_minutes', 'default_buffer_time_minutes', 0)

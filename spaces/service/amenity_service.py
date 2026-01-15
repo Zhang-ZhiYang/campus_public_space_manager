@@ -29,6 +29,8 @@ class AmenityService(BaseService):
         DAO 负责基础数据获取和预加载。
         """
         try:
+            # Amenity 列表默认是全局的，不根据用户过滤。
+            # 如果未来需要用户权限过滤，此处也要传入 user 并调整 DAO。
             amenities_qs = self.amenity_dao.get_all(
                 prefetch_related=self._allowed_prefetch_related,
                 select_related=self._allowed_select_related
@@ -42,7 +44,7 @@ class AmenityService(BaseService):
             logger.exception("获取设施类型列表失败。")
             return self._handle_exception(e, default_message="获取设施类型列表失败。")
 
-    @CacheService.cache_method(key_prefix='spaces:amenity:detail', identifier_arg='pk') # Explicit identifier_arg
+    @CacheService.cache_method(key_prefix='spaces:amenity') # General key_prefix for Amenity model
     def get_amenity_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]:
         """
         根据ID获取单个设施类型详情。
@@ -56,10 +58,6 @@ class AmenityService(BaseService):
             )
             if not amenity:
                 raise NotFoundException(detail="设施类型未找到。")
-
-            # 权限检查（如果需要，尽管Amenity通常是公开可看的）
-            # if not user.is_superuser and not self._user_has_view_permission(user, amenity):
-            #     raise PermissionDeniedException(detail="您没有权限查看此设施类型。")
 
             amenity_data = amenity.to_dict()  # 调用 .to_dict()
             return ServiceResult.success_result(
@@ -124,7 +122,6 @@ class AmenityService(BaseService):
                 raise NotFoundException(detail="设施类型未找到。")
 
             if amenity.bookable_instances.exists():
-                # Fix: Remove 'errors' argument from BadRequestException
                 raise BadRequestException(detail="存在关联的设施实例，无法删除此设施类型。请先解除所有设施实例与此类型的绑定。")
 
             self.amenity_dao.delete(amenity)

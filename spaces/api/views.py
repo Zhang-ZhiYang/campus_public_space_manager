@@ -1,7 +1,7 @@
 # spaces/api/views.py
 import hashlib  # For hashing query parameters for cache key
 import json  # For serializing query parameters for hashing
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional  # Add Optional for type hinting
 
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.permissions import IsAuthenticated
@@ -14,8 +14,8 @@ from core.utils.response import success_response
 from core.utils.exceptions import CustomAPIException, InternalServerError, NotFoundException
 
 from core.utils.constants import MSG_CREATED, MSG_SUCCESS, HTTP_201_CREATED, HTTP_200_OK, HTTP_204_NO_CONTENT
-from spaces.api.filters import SpaceFilter  # Ensure SpaceFilter exists or replace if not needed
-from core.cache import CacheService  # Import the actual CacheService from core.cache
+from spaces.api.filters import SpaceFilter  # Assume SpaceFilter exists or replace if not needed
+from core.cache import CacheService, CachedDictObject  # Import CachedDictObject from core.cache
 
 from spaces.service.space_service import SpaceService
 from spaces.service.space_type_service import SpaceTypeService
@@ -33,52 +33,8 @@ from spaces.models import Amenity, Space, SpaceType  # Used for get_object/pk er
 logger = logging.getLogger(__name__)
 
 
-# --- Helper for get_object when Service returns dict from cache ---
-class CachedDictObject:
-    """
-    A simple wrapper for dictionary data that mimics a Django model instance
-    enough for DRF's `get_object()` to work, specifically by providing a `pk` attribute.
-    It also stores the original `_model_class` for resolution in update/delete.
-    """
-
-    def __init__(self, data: Dict[str, Any], model_class=None):
-        self._data = data
-        self._model_class = model_class
-
-    def __getattr__(self, name):
-        """Allow direct access to dict keys as attributes. Modified to handle nested dicts (related objects)."""
-        if name in self._data:
-            value = self._data[name]
-            # Recursively wrap nested dictionaries for related fields if they are also expected as objects
-            if isinstance(value, dict) and name in ['space_type', 'managed_by',
-                                                    'parent_space']:  # Add other related fields if needed
-                return CachedDictObject(value)
-            return value
-        elif name == 'pk' and 'id' in self._data:  # For `instance.pk` lookup
-            return self._data['id']
-        elif name == 'permitted_groups':  # For obj.permitted_groups.exists() or iteration
-            # Return a list (or empty list) of PKs. The serializer should handle this for display.
-            # In cached dict, permitted_groups will be a list of PKs.
-            return self._data.get('permitted_groups', [])
-        # For non-existent attributes, raise AttributeError
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-
-        # Required for some DRF validation/lookup to work with instance context
-
-    def __eq__(self, other):
-        if isinstance(other, self.__class__):
-            return self.pk == other.pk
-        if self._model_class and isinstance(other, self._model_class):  # Compare with actual model instance
-            return self.pk == other.pk
-        if hasattr(other, 'pk') and self.pk == other.pk:  # For comparison with other DRF objects
-            return True
-        if isinstance(other, dict) and 'id' in other:  # Compare with dict if needed
-            return self.pk == other['id']
-        return NotImplemented
-
-    def __hash__(self):
-        return hash(self.pk)
-
+# Note: CachedDictObject is now defined in core.cache and imported.
+# Its definition should be updated there to handle M2M field serialization.
 
 # --- Space API Views ---
 
@@ -94,45 +50,46 @@ class SpaceListCreateAPIView(ListCreateAPIView):
         return SpaceListSerializer
 
     def get_queryset(self):
+        """
+        Service层仍然返回QuerySet，便于FilterBackend和Pagination处理，
+        权限过滤在Service层处理。
+        """
         user = self.request.user
         space_service = SpaceService()
 
         service_result = space_service.get_all_spaces(user)
         if service_result.success:
-            return service_result.data  # This is a QuerySet
+            return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
+        """
+        列出所有空间，包含缓存逻辑。
+        公共列表不再根据用户角色生成不同的缓存键，仅根据查询参数哈希区分。
+        """
         try:
             user = request.user
-            # === Part 1: Prepare Cache Key ===
-            cache_key_prefix = 'spaces:space:list_all'
+            space_service = SpaceService()
+            cache_key_prefix = 'spaces:space'
 
-            # Combine user ID and all query parameters to create a unique hash for the cache key
-            dynamic_parts = {
-                'user_id': user.pk,
-                **request.query_params  # Include all query params (filters, pagination, etc.)
-            }
-            # Convert to a stable string representation for hashing
-            sorted_dynamic_parts = dict(sorted(dynamic_parts.items()))
-            dynamic_key_string = json.dumps(sorted_dynamic_parts, sort_keys=True)
-            dynamic_key_hash = hashlib.md5(dynamic_key_string.encode('utf-8')).hexdigest()
+            # === Part 1: Prepare Cache Key Components (Only Query Params Hash now) ===
+            # `get_dynamic_list_cache_key_parts` 现在只返回 {'query_params_hash': 'abcde'}
+            dynamic_cache_kwargs = space_service.get_dynamic_list_cache_key_parts(request.query_params)
 
-            # Use 'filtered_paginated_results' as a constant custom_postfix,
-            # and rely on dynamic_key_hash for unique variations
-            list_cache_custom_postfix = 'filtered_paginated_results'
+            # 使用 'list_all' 作为列表的固定 custom_postfix
+            fixed_custom_postfix = 'list_all'
 
             # === Part 2: Try to get data from cache ===
-            # The `CacheService.get_list_cache` will use the `dynamic_hash` in its kwargs to build the key.
             cached_full_response_data = CacheService.get_list_cache(
-                cache_key_prefix, list_cache_custom_postfix, dynamic_hash=dynamic_key_hash
+                key_prefix=cache_key_prefix,
+                custom_postfix=fixed_custom_postfix,
+                **dynamic_cache_kwargs  # 直接传递包含查询参数哈希的字典
             )
 
             if cached_full_response_data is not None:
-                logger.debug(f"View 层缓存命中空间列表数据 (User: {user.username}, PostfixHash: {dynamic_key_hash}).")
-                # If cached_full_response_data is a dict containing 'count', 'next', 'previous', 'results'
-                # it's already in the format we need to return.
+                logger.debug(
+                    f"View 层缓存命中空间列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
                 return success_response(
                     message=MSG_SUCCESS,
                     data=cached_full_response_data,
@@ -140,31 +97,28 @@ class SpaceListCreateAPIView(ListCreateAPIView):
                 )
 
             # === Part 3: Cache Miss - Get data from database, serialize, and then set cache ===
-            queryset_unpaginated_filtered = self.filter_queryset(self.get_queryset())  # Apply filters to QuerySet
+            # 应用过滤器到 QuerySet (DjangoFilterBackend)
+            queryset_unpaginated_filtered = self.filter_queryset(self.get_queryset())
 
             total_count = queryset_unpaginated_filtered.count()
 
             page_data = None
-            final_serialised_results = []
-
             if self.pagination_class:
                 self.request.successful_response_status = HTTP_200_OK
                 paginator = self.pagination_class()
                 page_data = paginator.paginate_queryset(queryset_unpaginated_filtered, self.request, view=self)
             else:
-                # If no pagination, simply convert the filtered queryset to a list
                 page_data = list(queryset_unpaginated_filtered)
 
             serializer = self.get_serializer(page_data, many=True)
-            final_serialised_results = serializer.data  # This is List[Dict] (current page's results)
+            final_serialised_results = serializer.data
 
-            # Construct the final response data structure, including pagination info if applicable
             final_response_data_for_cache = None
             if self.pagination_class and paginator:
-                # Use the paginator's method to get the full paginated response structure
+                # 使用分页器的方法获取完整的带分页信息的响应结构
                 final_response_data_for_cache = paginator.get_paginated_response(final_serialised_results).data
             else:
-                # For non-paginated lists, manually build the response structure
+                # 对于无分页的列表，手动构建响应结构
                 final_response_data_for_cache = {
                     "count": total_count,
                     "next": None,
@@ -173,17 +127,22 @@ class SpaceListCreateAPIView(ListCreateAPIView):
                 }
 
             # === Part 4: Set the new data into cache ===
-            timeout = CacheService.get_timeout_for_key_prefix(cache_key_prefix)
+            # 从 TIMEOUTS_MAP 获取过期时间（例如 'spaces:space:list_all'）
+            timeout = CacheService.get_timeout_for_key_prefix('spaces:space:list_all')
             CacheService.set_list_cache(
-                cache_key_prefix, list_cache_custom_postfix, final_response_data_for_cache,
-                timeout, dynamic_hash=dynamic_key_hash
+                key_prefix=cache_key_prefix,
+                custom_postfix=fixed_custom_postfix,
+                value=final_response_data_for_cache,
+                timeout=timeout,
+                **dynamic_cache_kwargs  # 再次传递查询参数哈希
             )
-            logger.debug(f"View 层缓存空间列表数据 (User: {user.username}, PostfixHash: {dynamic_key_hash}).")
+            logger.debug(
+                f"View 层缓存空间列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
 
             # === Part 5: Return the response ===
             return success_response(
                 message=MSG_SUCCESS,
-                data=final_response_data_for_cache,  # return the prepared data
+                data=final_response_data_for_cache,
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
@@ -195,6 +154,7 @@ class SpaceListCreateAPIView(ListCreateAPIView):
 
     @is_admin_or_space_manager_required
     def create(self, request, *args, **kwargs):
+        """创建新的空间。"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -224,15 +184,21 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
         return SpaceBaseSerializer
 
     def get_object(self):
+        """
+        获取单个空间对象。Service层通过装饰器处理缓存，这里获取的是缓存或DB的ServiceResult数据。
+        然后包装为 `CachedDictObject` 供 DRF 使用。
+        """
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
         service_result = SpaceService().get_space_by_id(user, pk)
         if service_result.success:
+            # CachedDictObject 已经修复，可以正确处理 M2M 字段
             return CachedDictObject(service_result.data, model_class=Space)
         else:
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
+        """获取单个空间详情。"""
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
@@ -251,18 +217,19 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
     @is_admin_or_space_manager_required
     def update(self, request, *args, **kwargs):
-        # The `self.get_object()` here returns a CachedDictObject, solely for permissions and quick PK access.
+        """更新空间。"""
+        # `get_object()` 返回 CachedDictObject，用于快速获取PK或进行权限检查，
+        # 但更新操作需要真实的模型实例。
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
 
         try:
-            # For `serializer.update` and direct DB operations, we need the REAL model instance.
             # First, verify user has permission to view/update via service layer.
             service_get_result = SpaceService().get_space_by_id(self.request.user, pk_from_url)
             if not service_get_result.success:
                 raise service_get_result.to_exception()
 
-            # Then, fetch the actual Django model instance.
+            # Then, fetch the actual Django model instance for the serializer.
             real_instance = Space.objects.get(pk=pk_from_url)
         except Space.DoesNotExist:
             raise NotFoundException(detail="空间未找到。")
@@ -289,15 +256,15 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
     @is_admin_or_space_manager_required
     def destroy(self, request, *args, **kwargs):
-        # The `self.get_object()` here returns a CachedDictObject, solely for permissions and quick PK access.
+        """删除空间。"""
+        # `get_object()` 返回 CachedDictObject，用于快速获取PK或进行权限检查，
+        # 删除操作直接通过 Service.delete_space() 处理
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
 
         user = request.user
 
         try:
-            # We don't need `real_instance` for service.delete in the same way as serializer.update,
-            # as service.delete directly takes PK
             service_result = SpaceService().delete_space(user, pk_from_url)
 
             if service_result.success:
@@ -322,7 +289,7 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
 class SpaceTypeListView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
-    pagination_class = None  # No pagination for SpaceType list
+    pagination_class = None
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -334,42 +301,65 @@ class SpaceTypeListView(ListCreateAPIView):
         space_type_service = SpaceTypeService()
         service_result = space_type_service.get_all_space_types(user)
         if service_result.success:
-            return service_result.data  # This is a QuerySet
+            return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
+        """列出所有空间类型，包含缓存逻辑。"""
         try:
             user = request.user
-            # === Part 1: Prepare Cache Key ===
-            cache_key_prefix = 'spaces:spacetype:list_all'
-            cache_postfix = 'list_all'  # Static for this general list. Could also include `user.pk` for user-specific caching.
+            cache_key_prefix = 'spaces:spacetype'
+            fixed_custom_postfix = 'list_all'
+
+            query_params_hash_kwargs = {}
+            if request.query_params:
+                # 如果有查询参数，哈希它们作为缓存键的一部分
+                query_params_hash_val = SpaceService()._get_request_query_params_hash(request.query_params)
+                query_params_hash_kwargs = {'query_params_hash': query_params_hash_val}
 
             # === Part 2: Try to get data from cache ===
-            cached_data = CacheService.get_list_cache(cache_key_prefix, cache_postfix)
+            cached_data = CacheService.get_list_cache(
+                key_prefix=cache_key_prefix,
+                custom_postfix=fixed_custom_postfix,
+                **query_params_hash_kwargs
+            )
             if cached_data is not None:
-                logger.debug(f"View 层缓存命中空间类型列表数据 (User: {user.username}, Postfix: {cache_postfix}).")
-                # Since pagination_class is None, the cached_data is already a list of dicts.
+                logger.debug(
+                    f"View 层缓存命中空间类型列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {query_params_hash_kwargs.get('query_params_hash', 'N/A')}).")
                 return success_response(
                     message=MSG_SUCCESS,
-                    data={"results": cached_data, "count": len(cached_data)},
+                    data={"results": cached_data['results'], "count": cached_data['count']},
                     status_code=HTTP_200_OK
                 )
 
             # === Part 3: Cache Miss - Get data from database, serialize, and then set cache ===
-            queryset_filtered = self.filter_queryset(self.get_queryset())  # Apply filters to QuerySet
+            queryset_filtered = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset_filtered, many=True)
-            response_data = serializer.data  # This is List[Dict]
+            response_data = serializer.data
+            total_count = queryset_filtered.count()
+
+            final_response_data_for_cache = {
+                "results": response_data,
+                "count": total_count
+            }
 
             # === Part 4: Set the new data into cache ===
-            timeout = CacheService.get_timeout_for_key_prefix(cache_key_prefix)
-            CacheService.set_list_cache(cache_key_prefix, cache_postfix, response_data, timeout)
-            logger.debug(f"View 层缓存空间类型列表数据 (User: {user.username}, Postfix: {cache_postfix}).")
+            timeout = CacheService.get_timeout_for_key_prefix('spaces:spacetype:list_all')
+            CacheService.set_list_cache(
+                key_prefix=cache_key_prefix,
+                custom_postfix=fixed_custom_postfix,
+                value=final_response_data_for_cache,
+                timeout=timeout,
+                **query_params_hash_kwargs
+            )
+            logger.debug(
+                f"View 层缓存空间类型列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {query_params_hash_kwargs.get('query_params_hash', 'N/A')}).")
 
             # === Part 5: Return the response ===
             return success_response(
                 message=MSG_SUCCESS,
-                data={"results": response_data, "count": queryset_filtered.count()},
+                data={"results": response_data, "count": total_count},
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
@@ -381,6 +371,7 @@ class SpaceTypeListView(ListCreateAPIView):
 
     @is_system_admin_required
     def create(self, request, *args, **kwargs):
+        """创建新的空间类型。"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -410,6 +401,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
         return SpaceTypeBaseSerializer
 
     def get_object(self):
+        """获取单个空间类型对象。Service层通过装饰器处理缓存。"""
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
         service_result = SpaceTypeService().get_space_type_by_id(user, pk)
@@ -419,6 +411,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
+        """获取单个空间类型详情。"""
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
@@ -437,6 +430,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
     @is_system_admin_required
     def update(self, request, *args, **kwargs):
+        """更新空间类型。"""
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
 
@@ -470,6 +464,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
     @is_system_admin_required
     def destroy(self, request, *args, **kwargs):
+        """删除空间类型。"""
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
 
@@ -500,7 +495,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
 class AmenityListView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
-    pagination_class = None  # No pagination for Amenity list
+    pagination_class = None
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -508,46 +503,71 @@ class AmenityListView(ListCreateAPIView):
         return AmenityBaseSerializer
 
     def get_queryset(self):
+        """
+        Service层仍然返回QuerySet，便于FilterBackend和Pagination处理。
+        """
         user = self.request.user
         amenity_service = AmenityService()
         service_result = amenity_service.get_all_amenities(user)
         if service_result.success:
-            return service_result.data  # This is a QuerySet
+            return service_result.data
         else:
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
+        """列出所有设施类型，包含缓存逻辑。"""
         try:
             user = request.user
-            # === Part 1: Prepare Cache Key ===
-            cache_key_prefix = 'spaces:amenity:list_all'
-            cache_postfix = 'list_all'  # Static for this general list. Could also include `user.pk` for user-specific caching.
+            cache_key_prefix = 'spaces:amenity'
+            fixed_custom_postfix = 'list_all'
+
+            query_params_hash_kwargs = {}
+            if request.query_params:
+                query_params_hash_val = SpaceService()._get_request_query_params_hash(request.query_params)
+                query_params_hash_kwargs = {'query_params_hash': query_params_hash_val}
 
             # === Part 2: Try to get data from cache ===
-            cached_data = CacheService.get_list_cache(cache_key_prefix, cache_postfix)
+            cached_data = CacheService.get_list_cache(
+                key_prefix=cache_key_prefix,
+                custom_postfix=fixed_custom_postfix,
+                **query_params_hash_kwargs
+            )
             if cached_data is not None:
-                logger.debug(f"View 层缓存命中设施类型列表数据 (User: {user.username}, Postfix: {cache_postfix}).")
-                # Since pagination_class is None, the cached_data is already a list of dicts.
+                logger.debug(
+                    f"View 层缓存命中设施类型列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {query_params_hash_kwargs.get('query_params_hash', 'N/A')}).")
                 return success_response(
                     message=MSG_SUCCESS,
-                    data={"results": cached_data, "count": len(cached_data)},
+                    data={"results": cached_data['results'], "count": cached_data['count']},
                     status_code=HTTP_200_OK
                 )
 
             # === Part 3: Cache Miss - Get data from database, serialize, and then set cache ===
-            queryset_filtered = self.filter_queryset(self.get_queryset())  # Apply filters to QuerySet
+            queryset_filtered = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset_filtered, many=True)
-            response_data = serializer.data  # This is List[Dict]
+            response_data = serializer.data
+            total_count = queryset_filtered.count()
+
+            final_response_data_for_cache = {
+                "results": response_data,
+                "count": total_count
+            }
 
             # === Part 4: Set the new data into cache ===
-            timeout = CacheService.get_timeout_for_key_prefix(cache_key_prefix)
-            CacheService.set_list_cache(cache_key_prefix, cache_postfix, response_data, timeout)
-            logger.debug(f"View 层缓存设施类型列表数据 (User: {user.username}, Postfix: {cache_postfix}).")
+            timeout = CacheService.get_timeout_for_key_prefix('spaces:amenity:list_all')
+            CacheService.set_list_cache(
+                key_prefix=cache_key_prefix,
+                custom_postfix=fixed_custom_postfix,
+                value=final_response_data_for_cache,
+                timeout=timeout,
+                **query_params_hash_kwargs
+            )
+            logger.debug(
+                f"View 层缓存设施类型列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {query_params_hash_kwargs.get('query_params_hash', 'N/A')}).")
 
             # === Part 5: Return the response ===
             return success_response(
                 message=MSG_SUCCESS,
-                data={"results": response_data, "count": queryset_filtered.count()},
+                data={"results": response_data, "count": total_count},
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
@@ -559,6 +579,7 @@ class AmenityListView(ListCreateAPIView):
 
     @is_system_admin_required
     def create(self, request, *args, **kwargs):
+        """创建新的设施类型。"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -588,6 +609,7 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
         return AmenityBaseSerializer
 
     def get_object(self):
+        """获取单个设施类型对象。Service层通过装饰器处理缓存。"""
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
         service_result = AmenityService().get_amenity_by_id(user, pk)
@@ -597,6 +619,7 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
+        """获取单个设施类型详情。"""
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance)
@@ -615,6 +638,7 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
     @is_system_admin_required
     def update(self, request, *args, **kwargs):
+        """更新设施类型。"""
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
 
@@ -648,6 +672,7 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
 
     @is_system_admin_required
     def destroy(self, request, *args, **kwargs):
+        """删除设施类型。"""
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
 

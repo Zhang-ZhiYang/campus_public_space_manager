@@ -29,6 +29,8 @@ class SpaceTypeService(BaseService):
         DAO 负责基础数据获取和预加载。
         """
         try:
+            # SpaceType 列表默认是全局的，不根据用户过滤。
+            # 如果未来需要用户权限过滤，此处也要传入 user 并调整 DAO。
             space_types_qs = self.space_type_dao.get_all(
                 prefetch_related=self._allowed_prefetch_related,
                 select_related=self._allowed_select_related
@@ -42,7 +44,7 @@ class SpaceTypeService(BaseService):
             logger.exception("获取空间类型列表失败。")
             return self._handle_exception(e, default_message="获取空间类型列表失败。")
 
-    @CacheService.cache_method(key_prefix='spaces:spacetype:detail', identifier_arg='pk') # Explicit identifier_arg
+    @CacheService.cache_method(key_prefix='spaces:spacetype') # General key_prefix for SpaceType model
     def get_space_type_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]:
         """
         根据ID获取单个空间类型详情。
@@ -120,7 +122,6 @@ class SpaceTypeService(BaseService):
                 raise NotFoundException(detail="空间类型未找到。")
 
             if space_type.spaces.exists():
-                # Fix: Remove 'errors' argument
                 raise BadRequestException(detail="存在关联的空间，无法删除此空间类型。请先解除所有空间与此类型的绑定。")
 
             self.space_type_dao.delete(space_type)
