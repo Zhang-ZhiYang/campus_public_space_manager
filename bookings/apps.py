@@ -1,20 +1,24 @@
 # bookings/apps.py
 from django.apps import AppConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 class BookingsConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'bookings'
+    verbose_name = "预订管理"
 
     def ready(self):
-        # 1. 导入信号（信号通常在这里导入）
-        import bookings.signals
+        # 1. 导入信号，确保信号处理器被连接 (如果你保留 signals.py)
+        # import bookings.signals
+        # logger.info("Bookings signals loaded.")
 
-        # 2. 导入 DAOFactory 和 ServiceFactory
-        from core.dao import DAOFactory
-        from core.service import ServiceFactory
+        # 2. 导入 DAOFactory & ServiceFactory
+        from core.dao.factory import DAOFactory
+        from core.service.factory import ServiceFactory # <-- 确保从 core.service.factory 导入
 
-        # 3. 在 ready() 方法内部导入所有 DAO 类。
-        #    这确保了 DAO 模块及其内部的模型导入仅在应用注册表准备就绪之后才发生。
+        # 3. 导入所有 DAO 类
         from bookings.dao.booking_dao import BookingDAO
         from bookings.dao.violation_dao import ViolationDAO
         from bookings.dao.penalty_dao import UserPenaltyPointsPerSpaceTypeDAO
@@ -25,19 +29,31 @@ class BookingsConfig(AppConfig):
 
         # 4. 导入所有 Service 类
         from bookings.service.booking_service import BookingService
+        from bookings.service.base_booking_validation_service import BaseBookingValidationService
+        from bookings.service.daily_booking_limit_service import DailyBookingLimitService
+        from bookings.service.user_ban_service import UserBanService
+        from bookings.service.user_exemption_service import UserExemptionService
+        from bookings.service.ban_policy_service import BanPolicyService
+        from bookings.service.penalty_service import PenaltyService
         from bookings.service.violation_service import ViolationService
-        from bookings.service.user_management_service import UserManagementService
 
-        # 5. 使用 DAOFactory 注册所有的 DAO。键名应与 Service 中的 _dao_map 保持一致。
+        # 5. 注册所有 DAO
         DAOFactory.register_dao('booking', BookingDAO)
         DAOFactory.register_dao('violation', ViolationDAO)
-        DAOFactory.register_dao('penalty_points', UserPenaltyPointsPerSpaceTypeDAO) # 确保键名一致
-        DAOFactory.register_dao('ban_policy', SpaceTypeBanPolicyDAO)
-        DAOFactory.register_dao('user_ban', UserSpaceTypeBanDAO)
-        DAOFactory.register_dao('exemption', UserSpaceTypeExemptionDAO)
-        DAOFactory.register_dao('daily_booking_limit', DailyBookingLimitDAO) # 新增注册
+        DAOFactory.register_dao('user_penalty_points_per_space_type', UserPenaltyPointsPerSpaceTypeDAO)
+        DAOFactory.register_dao('space_type_ban_policy', SpaceTypeBanPolicyDAO)
+        DAOFactory.register_dao('user_space_type_ban', UserSpaceTypeBanDAO)
+        DAOFactory.register_dao('user_space_type_exemption', UserSpaceTypeExemptionDAO)
+        DAOFactory.register_dao('daily_booking_limit', DailyBookingLimitDAO)
+        logger.info("Bookings DAOs registered with DAOFactory.")
 
-        # 6. 使用 ServiceFactory 注册所有的 Service
+        # 6. 注册所有 Service (使用 ServiceClass.__name__ 作为 key)
         ServiceFactory.register_service(BookingService)
+        ServiceFactory.register_service(BaseBookingValidationService)
+        ServiceFactory.register_service(DailyBookingLimitService)
+        ServiceFactory.register_service(UserBanService)
+        ServiceFactory.register_service(UserExemptionService)
+        ServiceFactory.register_service(BanPolicyService)
+        ServiceFactory.register_service(PenaltyService)
         ServiceFactory.register_service(ViolationService)
-        ServiceFactory.register_service(UserManagementService)
+        logger.info("Bookings Services registered with ServiceFactory.")

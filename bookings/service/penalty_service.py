@@ -1,5 +1,3 @@
 from core.service import BaseService
-
-
-class UserManagementService(BaseService):
+class PenaltyService(BaseService):
     pass

@@ -6,7 +6,6 @@ import datetime
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 
-from bookings.api.serializers import UserSerializerMinimal  # Assuming this is correct
 
 from spaces.models import Amenity, Space, SpaceType, BookableAmenity
 from spaces.service.space_service import SpaceService  # Import SpaceService
@@ -15,6 +14,13 @@ from spaces.service.space_type_service import SpaceTypeService  # Import SpaceTy
 
 CustomUser = get_user_model()
 
+class UserSerializerMinimal(serializers.ModelSerializer):
+    user_id = serializers.IntegerField(source='id', read_only=True)
+    full_name = serializers.CharField(source='get_full_name', read_only=True)
+
+    class Meta:
+        model = CustomUser
+        fields = ('user_id', 'username', 'full_name')
 
 class SpaceTypeSerializerMinimal(serializers.ModelSerializer):
     space_type_id = serializers.IntegerField(source='id', read_only=True)

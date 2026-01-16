@@ -1,0 +1,2 @@
+class BookingRetrieveUpdateDestroyAPIView:
+    pass
