@@ -127,28 +127,28 @@ class CacheService:
         'app_data_generic': DEFAULT_TIMEOUT_FROM_SETTINGS,
 
         'spaces:spacetype:detail': 3600 * 24,
-        'spaces:spacetype:list_all': 3600,
+        'spaces:spacetype:list_all': 3600*2,
 
-        'spaces:amenity:detail': 3600,
-        'spaces:amenity:list_all': 3600,
+        'spaces:amenity:detail': 3600*24,
+        'spaces:amenity:list_all': 3600*2,
 
         'spaces:bookable_amenity:detail': 300,
         'spaces:bookable_amenity:list_by_space': 120,
 
-        'spaces:space:detail': 300,
-        'spaces:space:list_all': 120,  # List key will be like spaces:space:list_all:hash_xxxx
-        'spaces:space:list_by_parent': 120,
-        'spaces:space:list_filtered': 60,
+        'spaces:space:detail': 3600*24,
+        'spaces:space:list_all': 3600*12,  # List key will be like spaces:space:list_all:hash_xxxx
+        'spaces:space:list_by_parent': 3600*6,
+        'spaces:space:list_filtered': 3600*12,
 
         'bookings:booking:detail': 60,
-        'bookings:booking:list_by_user': 60,
-        'bookings:booking:list_active': 30,
+        'bookings:booking:list_by_user':3600*2,
+        'bookings:booking:list_active': 3600,
         'bookings:violation:detail': 300,
         'bookings:violation:list_by_user': 120,
         'bookings:user_penalty_points:detail': 120,
         'bookings:ban_policy:list_all': 3600,
-        'bookings:user_ban:detail': 60,
-        'bookings:user_ban:list_by_user': 60,
+        'bookings:user_ban:detail': 3600*2,
+        'bookings:user_ban:list_by_user': 3600*2,
         'bookings:daily_limit:detail': 3600,
     }
 
