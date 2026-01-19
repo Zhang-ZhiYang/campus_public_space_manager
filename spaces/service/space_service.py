@@ -1,17 +1,18 @@
-# spaces/service/space_service.py
+# spaces/service/space_service.py - START OF FILE
 import logging
 import hashlib
 import json
 from typing import List, Dict, Any, Optional
 from django.db.models import QuerySet, Q
 from django.db import transaction
+from guardian.shortcuts import assign_perm, remove_perm  # 确保导入这些
 
 from core.service import BaseService, ServiceResult
 from core.dao import DAOFactory
 from core.service.cache import CacheService
 from core.utils.exceptions import NotFoundException, BadRequestException, \
-    ForbiddenException, CustomAPIException
-from spaces.models import Space
+    ForbiddenException, CustomAPIException, InternalServerError  # 确保 InternalServerError 被导入
+from spaces.models import Space, BookableAmenity, Amenity  # Amenity 也要导入以便 _update_space_amenities
 from users.models import CustomUser
 from django.contrib.auth.models import Group
 
@@ -38,29 +39,67 @@ class SpaceService(BaseService):
 
     def get_all_spaces(self, user: CustomUser) -> ServiceResult[QuerySet[Space]]:
         logger.debug(f"Service: 获取所有空间 QuerySet (User: {user.username}).")
+        try:
+            db_queryset = self._space_dao.get_all_spaces(
+                user=user,
+                prefetch_related=self._allowed_prefetch_related,
+                select_related=self._allowed_select_related
+            )
+            return ServiceResult.success_result(data=db_queryset)
+        except Exception as e:
+            logger.exception(f"获取所有空间失败 (User: {user.username}).")
+            return self._handle_exception(e, default_message="获取所有空间失败。", default_status_code=500)
 
-        db_queryset = self._space_dao.get_all_spaces(
-            user=user,
-            prefetch_related=self._allowed_prefetch_related,
-            select_related=self._allowed_select_related
-        )
+    # --- 新增的方法：获取用户管理的或系统管理员可见的空间 ---
+    def get_managed_spaces(self, user: CustomUser) -> ServiceResult[QuerySet[Space]]:
+        """
+        获取用户有权限管理（managed_by=user）的空间列表，或如果是系统管理员，则返回所有有 manager 的空间。
+        """
+        if not (user.is_space_manager or user.is_system_admin):
+            raise ForbiddenException(detail="您没有权限查看管理空间列表。")
 
-        return ServiceResult.success_result(data=db_queryset)
+        logger.debug(f"Service: 获取用户管理的 Space QuerySet (ManagerUser: {user.username}).")
+        try:
+            db_queryset = self._space_dao.get_managed_spaces(
+                user=user,  # DAO层将根据用户的 is_system_admin 或 managed_by 属性进行过滤
+                prefetch_related=self._allowed_prefetch_related,
+                select_related=self._allowed_select_related
+            )
+            return ServiceResult.success_result(data=db_queryset)
+        except Exception as e:
+            logger.exception(f"获取用户管理空间失败 (User: {user.username}).")
+            return self._handle_exception(e, default_message="获取用户管理空间失败。", default_status_code=500)
+
+    # --- 新增的方法 END ---
 
     @CacheService.cache_method(key_prefix='spaces:space')
     def get_space_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]:
-        space = self._space_dao.get_space_by_id(
-            user=user,
-            pk=pk,
-            prefetch_related=self._allowed_prefetch_related,
-            select_related=self._allowed_select_related
-        )
+        try:
+            space = self._space_dao.get_space_by_id(  # _space_dao 的 get_space_by_id 已经包含了权限过滤
+                user=user,
+                pk=pk,
+                prefetch_related=self._allowed_prefetch_related,
+                select_related=self._allowed_select_related
+            )
 
-        if not space:
-            raise NotFoundException(detail=f"Space with ID {pk} not found or you do not have permission to view it.")
+            if not space:
+                # 区分未找到和无权限，以便返回更准确的错误提示
+                if user.is_system_admin or user.is_space_manager:  # 管理员角色
+                    # 尝试以非权限方式获取一次，如果存在但仍无法获取，则说明是权限问题
+                    # 但在这里假设 DAO 已经做了最细粒度的权限过滤
+                    # 如果 DAO.get_space_by_id 返回 None，那就是真的找不到或没权限
+                    raise NotFoundException(
+                        detail=f"Space with ID {pk} not found or you do not have permission to view it.")
+                else:  # 普通用户
+                    raise NotFoundException(detail=f"Space with ID {pk} not found.")
 
-        space_dict = space.to_dict(include_related=True)
-        return ServiceResult.success_result(data=space_dict)
+            space_dict = space.to_dict(include_related=True)
+            return ServiceResult.success_result(data=space_dict)
+        except CustomAPIException as e:
+            raise e
+        except Exception as e:
+            logger.exception(f"获取空间详情失败 (ID: {pk}, User: {user.username}).")
+            return self._handle_exception(e, default_message="获取空间详情失败。", default_status_code=500)
 
     @transaction.atomic
     def create_space(self, user: CustomUser,
@@ -68,14 +107,53 @@ class SpaceService(BaseService):
                      permitted_groups_data: Optional[List[Group]] = None,
                      amenity_ids_data: Optional[List[int]] = None
                      ) -> ServiceResult[Dict[str, Any]]:
+        # --- 权限校验 ---
+        if not (user.is_system_admin or user.is_space_manager):
+            raise ForbiddenException(detail="您没有权限创建空间。")
+
+        new_managed_by = space_data.get('managed_by')  # `managed_by` 是 CustomUser 实例
+        new_parent_space = space_data.get('parent_space')  # `parent_space` 是 Space 实例
+
+        if user.is_space_manager and not user.is_system_admin:
+            # 空间管理员创建空间时，如果指定 managed_by，必须是自己
+            if new_managed_by and new_managed_by != user:
+                raise ForbiddenException(detail="您没有权限指定其他用户为您创建的空间的主要管理人员。")
+            # 如果未指定 managed_by，则自动设置为当前空间管理员
+            if not new_managed_by:
+                space_data['managed_by'] = user
+
+            # 空间管理员创建子空间时，父空间必须是自己管理的
+            if new_parent_space:
+                parent_space_actual = self._space_dao.get_by_id(new_parent_space.pk)
+                # 检查父空间是否存在且其 managed_by 是当前用户
+                if not parent_space_actual or parent_space_actual.managed_by != user:
+                    raise ForbiddenException(
+                        f"您没有权限在未由您管理的空间 '{parent_space_actual.name if parent_space_actual else new_parent_space.pk}' 下创建子空间。")
+        # --- 权限校验 END ---
+
         try:
             new_space = self._space_dao.create(**space_data)
+
+            # 权限分配逻辑 (如果 new_space 有 managed_by)
+            if new_space.managed_by:
+                # 给 new_space.managed_by 分配管理此空间的所有权限
+                for perm_codename in Space.SPACE_MANAGEMENT_PERMISSIONS:
+                    assign_perm(f'spaces.{perm_codename}', new_space.managed_by, new_space)
+
+                # 确保管理人员在“空间管理员”组
+                space_manager_group, _ = Group.objects.get_or_create(name='空间管理员')
+                if not new_space.managed_by.groups.filter(name='空间管理员').exists():
+                    new_space.managed_by.groups.add(space_manager_group)
 
             if permitted_groups_data is not None:
                 new_space.permitted_groups.set(permitted_groups_data)
 
             if amenity_ids_data is not None:
-                self._update_space_amenities(new_space, amenity_ids_data, user)
+                self._update_space_amenities(new_space, amenity_ids_data, user)  # _update_space_amenities 内部有权限检查
+
+            # 缓存失效将在信号处理中完成，避免在此处重复调用
+            # CacheService.invalidate_all_related_cache('spaces:space')
+            # CacheService.invalidate_object_cache('spaces:space', new_space.pk)
 
             return ServiceResult.success_result(
                 data=new_space.to_dict(),
@@ -86,7 +164,7 @@ class SpaceService(BaseService):
             raise e
         except Exception as e:
             logger.exception(f"创建空间失败 (用户: {user.username}, 数据: {space_data})。")
-            return self._handle_exception(e, default_message="创建空间失败。")
+            return self._handle_exception(e, default_message="创建空间失败。", default_status_code=500)
 
     @transaction.atomic
     def update_space(self, user: CustomUser, pk: int,
@@ -95,47 +173,53 @@ class SpaceService(BaseService):
                      amenity_ids_data: Optional[List[int]] = None
                      ) -> ServiceResult[Dict[str, Any]]:
         try:
-            space = self._space_dao.get_by_id(pk)
+            space = self._space_dao.get_by_id(pk)  # 获取原始 Space 实例
             if not space:
                 raise NotFoundException(detail="空间未找到。")
 
-            is_system_admin = getattr(user, 'is_system_admin', False) or user.is_superuser
-            is_space_manager_group_member = user.is_staff and user.groups.filter(name='空间管理员').exists()
+            # --- 权限校验 ---
+            is_system_admin = user.is_system_admin
 
-            if 'space_type' in space_data and space_data['space_type'] != space.space_type:
-                if not is_system_admin:
-                    raise ForbiddenException(f"您没有权限更改空间类型。")
+            # 对于非系统管理员的空间管理员，只能操作自己管理的空间
+            if user.is_space_manager and not is_system_admin and space.managed_by != user:
+                raise ForbiddenException(detail=f"您没有权限修改非您管理的空间 '{space.name}'。")
 
-            new_manager_target = space_data.get('managed_by')
-            new_manager_pk = new_manager_target.pk if new_manager_target else None
-            old_manager_pk = space.managed_by.pk if space.managed_by else None
+            # 检查是否有 'can_assign_space_manager' 权限
+            new_managed_by = space_data.get('managed_by')
+            old_managed_by = space.managed_by
 
-            if 'managed_by' in space_data and new_manager_pk != old_manager_pk:
+            if 'managed_by' in space_data and new_managed_by != old_managed_by:
                 if not (is_system_admin or user.has_perm('spaces.can_assign_space_manager', space)):
-                    raise ForbiddenException(f"您没有权限分配空间管理人员。")
+                    raise ForbiddenException("您没有权限分配空间管理人员。")
+                # 如果是空间管理员更改 managed_by，必须是改成自己或从自己改成 None
+                if user.is_space_manager and not is_system_admin:
+                    if new_managed_by and new_managed_by != user:
+                        raise ForbiddenException(detail="空间管理员只能将自己的空间分配给自己。")
+                    if old_managed_by == user and new_managed_by != user and new_managed_by is not None:
+                        raise ForbiddenException(detail="空间管理员只能将自己管理的空间的管理人改为自己或清空。")
 
-            editable_info_fields = ['name', 'location', 'description', 'capacity', 'image', 'parent_space']
-            if any(f in space_data for f in editable_info_fields) and not (
-                    is_system_admin or is_space_manager_group_member or user.has_perm('spaces.can_edit_space_info',
-                                                                                      space)):
-                raise ForbiddenException(f"您没有权限编辑空间基本信息。")
+            # 检查字段级权限 (使用 obj 形式的权限检查，因为 guardian 设计为检查对象)
+            # 这里我将 `is_space_manager_group_member` 替换为 `user.is_space_manager` property
+            if 'name' in space_data or 'location' in space_data or 'description' in space_data or \
+                    'capacity' in space_data or 'image' in space_data or 'parent_space' in space_data:
+                if not (is_system_admin or user.has_perm('spaces.can_edit_space_info', space)):
+                    raise ForbiddenException("您没有权限编辑空间基本信息。")
 
-            status_fields = ['is_active', 'is_bookable', 'is_container']
-            if any(f in space_data for f in status_fields) and not (
-                    is_system_admin or is_space_manager_group_member or user.has_perm('spaces.can_change_space_status',
-                                                                                      space)):
-                raise ForbiddenException(f"您没有权限更改空间状态。")
+            if 'is_active' in space_data or 'is_bookable' in space_data or 'is_container' in space_data:
+                if not (is_system_admin or user.has_perm('spaces.can_change_space_status', space)):
+                    raise ForbiddenException("您没有权限更改空间状态。")
 
-            booking_rule_fields = ['requires_approval', 'available_start_time', 'available_end_time',
-                                   'min_booking_duration', 'max_booking_duration', 'buffer_time_minutes']
-            if any(f in space_data for f in booking_rule_fields) and not (
-                    is_system_admin or is_space_manager_group_member or user.has_perm(
-                'spaces.can_configure_booking_rules', space)):
-                raise ForbiddenException(f"您没有权限配置预订规则。")
+            if 'requires_approval' in space_data or 'available_start_time' in space_data or \
+                    'available_end_time' in space_data or 'min_booking_duration' in space_data or \
+                    'max_booking_duration' in space_data or 'buffer_time_minutes' in space_data:
+                if not (is_system_admin or user.has_perm('spaces.can_configure_booking_rules', space)):
+                    raise ForbiddenException("您没有权限配置预订规则。")
 
-            if permitted_groups_data is not None:
-                if not (is_system_admin or user.has_perm('spaces.can_change_permitted_groups', space)):
+            if permitted_groups_data is not None and set(p.pk for p in permitted_groups_data) != set(
+                    group.pk for group in space.permitted_groups.all()):
+                if not (is_system_admin or user.has_perm('spaces.can_manage_permitted_groups', space)):
                     raise ForbiddenException("您没有权限修改空间的许可访问组。")
+            # --- 权限校验 END ---
 
             updated_space = self._space_dao.update(space, **space_data)
 
@@ -143,8 +227,9 @@ class SpaceService(BaseService):
                 updated_space.permitted_groups.set(permitted_groups_data)
 
             if amenity_ids_data is not None:
-                self._update_space_amenities(updated_space, amenity_ids_data, user)
+                self._update_space_amenities(updated_space, amenity_ids_data, user)  # _update_space_amenities 内部有权限检查
 
+            # 缓存失效将在信号处理中完成，避免在此处重复调用
             return ServiceResult.success_result(
                 data=updated_space.to_dict(),
                 message="空间更新成功。",
@@ -154,18 +239,27 @@ class SpaceService(BaseService):
             raise e
         except Exception as e:
             logger.exception(f"更新空间失败 (ID: {pk}, 用户: {user.username}, 数据: {space_data})。")
-            return self._handle_exception(e, default_message="更新空间失败。")
+            return self._handle_exception(e, default_message="更新空间失败。", default_status_code=500)
 
     @transaction.atomic
     def delete_space(self, user: CustomUser, pk: int) -> ServiceResult[None]:
         try:
             space = self._space_dao.get_by_id(pk)
             if not space:
+                # 尝试以权限方式再获取一次，如果仍获取不到，则确实是未找到或无权限
+                # _space_dao.get_space_by_id 已经包含了权限过滤，这里直接抛出 NotFoundException
                 raise NotFoundException(detail="空间未找到。")
 
-            is_system_admin = getattr(user, 'is_system_admin', False) or user.is_superuser
+            # --- 权限校验 ---
+            is_system_admin = user.is_system_admin
+
+            # 对于非系统管理员的空间管理员，只能删除自己管理的空间
+            if user.is_space_manager and not is_system_admin and space.managed_by != user:
+                raise ForbiddenException(detail="您没有权限删除此空间。")
+
             if not (is_system_admin or user.has_perm('spaces.can_delete_space', space)):
                 raise ForbiddenException(detail="您没有权限删除此空间。")
+            # --- 权限校验 END ---
 
             if space.child_spaces.exists():
                 raise BadRequestException(detail="存在子空间，无法删除此空间。请先删除或解除所有子空间与此空间的关联。")
@@ -176,6 +270,7 @@ class SpaceService(BaseService):
 
             self._space_dao.delete(space)
 
+            # 缓存失效将在信号处理中完成，避免在此处重复调用
             return ServiceResult.success_result(
                 message="空间删除成功。",
                 status_code=204
@@ -184,7 +279,7 @@ class SpaceService(BaseService):
             raise e
         except Exception as e:
             logger.exception(f"删除空间失败 (ID: {pk}, 用户: {user.username})。")
-            return self._handle_exception(e, default_message="删除空间失败。")
+            return self._handle_exception(e, default_message="删除空间失败。", default_status_code=500)
 
     @transaction.atomic
     def _update_space_amenities(self, space: Space, amenity_ids: Optional[List[int]], user: CustomUser):
@@ -192,13 +287,20 @@ class SpaceService(BaseService):
             return
 
         existing_ba_map = {
-            ba.amenity_id: ba for ba in self._bookableamenity_dao.get_bookable_amenities_for_space(space.pk, user)
+            ba.amenity_id: ba for ba in
+            self._bookableamenity_dao.get_bookable_amenities_for_space_by_owner(space.pk, user)
         }
 
         new_amenity_ids_set = set(amenity_ids)
         current_amenity_ids_set = set(existing_ba_map.keys())
 
-        is_system_admin = getattr(user, 'is_system_admin', False) or user.is_superuser
+        # --- 权限校验 ---
+        is_system_admin = user.is_system_admin
+        is_space_manager_of_this_space = user.is_space_manager and space.managed_by == user
+
+        if not (is_system_admin or is_space_manager_of_this_space):
+            raise ForbiddenException(detail=f"您没有权限管理空间 '{space.name}' 的设施。")
+        # --- 权限校验 END ---
 
         amenities_to_add = new_amenity_ids_set - current_amenity_ids_set
         for amenity_id in amenities_to_add:
@@ -206,8 +308,9 @@ class SpaceService(BaseService):
             if not amenity_obj:
                 raise BadRequestException(f"设施类型ID {amenity_id} 未找到。")
 
-            if not (is_system_admin or user.has_perm('spaces.can_add_space_amenity', space)):
-                raise ForbiddenException(f"您没有权限向空间 '{space.name}' 添加设施类型 '{amenity_obj.name}'。")
+            # 可以在这里添加更细粒度的“添加设施”权限，但目前由上面的总管理权限覆盖
+            # if not (is_system_admin or user.has_perm('spaces.can_add_space_amenity', space)):
+            #     raise ForbiddenException(f"您没有权限向空间 '{space.name}' 添加设施类型 '{amenity_obj.name}'。")
 
             self._bookableamenity_dao.create(
                 space=space,
@@ -222,11 +325,10 @@ class SpaceService(BaseService):
         for amenity_id in amenities_to_remove:
             ba_to_remove = existing_ba_map[amenity_id]
 
-            if not (is_system_admin or user.has_perm('spaces.can_delete_bookable_amenity',
-                                                     ba_to_remove) or user.has_perm('spaces.can_remove_space_amenity',
-                                                                                    space)):
-                raise ForbiddenException(
-                    f"您没有权限从空间 '{space.name}' 移除设施实例 '{ba_to_remove.amenity.name}' (PK: {ba_to_remove.id})。")
+            # 可以在这里添加更细粒度的“删除设施”权限，但目前由上面的总管理权限覆盖
+            # if not (is_system_admin or user.has_perm('spaces.can_delete_bookable_amenity', ba_to_remove)):
+            #     raise ForbiddenException(
+            #         f"您没有权限从空间 '{space.name}' 移除设施实例 '{ba_to_remove.amenity.name}' (PK: {ba_to_remove.id})。")
 
             from bookings.models import Booking as BookingModelForCheck
             if BookingModelForCheck.objects.filter(bookable_amenity=ba_to_remove).exists():
@@ -235,9 +337,6 @@ class SpaceService(BaseService):
             self._bookableamenity_dao.delete(ba_to_remove)
             logger.debug(
                 f"Removed bookable amenity {ba_to_remove.amenity.name} (PK:{ba_to_remove.pk}) from space {space.id}.")
-
-    # Removed _get_user_role_postfix as it's no longer directly part of Space list cache key.
-    # User roles are handled by filtering in get_all_spaces and view permissions.
 
     def _get_request_query_params_hash(self, request_query_params: Dict[str, Any]) -> str:
         if not request_query_params:
