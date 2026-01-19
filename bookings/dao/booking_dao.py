@@ -1,10 +1,13 @@
 # bookings/dao/booking_dao.py
-from typing import Optional, List
+from datetime import datetime
+from typing import Optional, List, Union
+import uuid
 
 from django.db.models import QuerySet, Q
 from core.dao import BaseDAO
 from bookings.models import Booking
-from spaces.models import Space, BookableAmenity, CustomUser
+from spaces.models import Space, BookableAmenity # 需要 Space 和 BookableAmenity 用于类型提示和查询
+from users.models import CustomUser
 from django.utils import timezone
 
 class BookingDAO(BaseDAO):
@@ -19,6 +22,7 @@ class BookingDAO(BaseDAO):
             'space__space_type',
             'bookable_amenity__amenity',
             'bookable_amenity__space__space_type',
+            'related_space__space_type', # NEW: 确保预加载 related_space 的 space_type
             'reviewed_by'
         ).prefetch_related(
             'space__permitted_groups',
@@ -29,6 +33,14 @@ class BookingDAO(BaseDAO):
         """根据ID获取单个预订记录。"""
         try:
             return self.get_queryset().get(pk=booking_id)
+        except Booking.DoesNotExist:
+            return None
+
+    # NEW: 根据 request_uuid 获取预订，用于幂等性检查
+    def get_booking_by_request_uuid(self, request_uuid: Union[str, uuid.UUID]) -> Optional[Booking]:
+        """根据请求唯一标识 (request_uuid) 获取单个预订记录。"""
+        try:
+            return self.get_queryset().get(request_uuid=request_uuid)
         except Booking.DoesNotExist:
             return None
 
@@ -79,11 +91,8 @@ class BookingDAO(BaseDAO):
         根据 Booking 实例，返回它所针对的 Space 对象。
         无论是直接预订空间还是预订空间内的设施，都返回其父空间。
         """
-        if booking.space:
-            return booking.space
-        if booking.bookable_amenity and booking.bookable_amenity.space:
-            return booking.bookable_amenity.space
-        return None
+        # 由于 Booking 模型现在有 related_space 字段，可以直接返回
+        return booking.related_space
 
     def get_user_bookings_count_for_date(self, user: CustomUser, date: timezone.localdate, status_in: List[str]) -> int:
         """
@@ -93,4 +102,46 @@ class BookingDAO(BaseDAO):
             user=user,
             start_time__date=date,
             status__in=status_in
+            # TODO: 未来DailyBookingLimitService可能需要按space_type进行计数，此处可能需修改
         ).count()
+
+    # NEW: 获取给定时间段内与目标实体冲突的预订
+    def get_overlapping_bookings(self, target_entity: Union[Space, BookableAmenity],
+                                 start_time: datetime, end_time: datetime,
+                                 exclude_booking_id: Optional[int] = None) -> QuerySet[Booking]:
+        """
+        查找在指定时间段内与给定空间或可预订设施实例冲突的活跃预订。
+        冲突定义：预订时间段重叠，且不包括自身。
+        """
+        query = Q(end_time__gt=start_time, start_time__lt=end_time) # 时间段重叠条件
+
+        if isinstance(target_entity, Space):
+            query &= Q(space=target_entity, bookable_amenity__isnull=True) # 仅预订整个空间
+            # Also need to check if there are any bookings of bookable amenities within this space that conflict
+            # This makes the logic complex. For simplicity, assume booking space and booking amenity are mutually exclusive direct targets
+            # A space booking for the whole space should prevent any amenity booking within it.
+            # An amenity booking should not prevent a whole space booking unless explicitly modeled.
+            # Based on the architecture plan: "预订只能指定一个目标：空间或设施实例。"
+            # So, we only need to check what 'target_entity' refers to directly.
+            # If a space is a container, it usually can't be booked directly, but its amenities can.
+            # If it's a bookable space, then it conflicts with other bookings of itself.
+        elif isinstance(target_entity, BookableAmenity):
+            query &= Q(bookable_amenity=target_entity)
+            # For bookable amenities, we need to check if the booked_quantity is exhausted
+            # This is more complex than a simple overlap check.
+            # A simple overlap check would return ALL overlapping bookings. The service layer
+            # would then sum quantities and determine true conflicts.
+
+            # For now, this DAO simply gets ALL overlapping bookings for THIS specific amenity instance.
+            # The higher layer (BookingValidationCreationService) will handle quantity logic.
+        else:
+            raise ValueError("target_entity must be a Space or BookableAmenity instance.")
+
+        # Exclude currently processed booking if it's an update scenario
+        if exclude_booking_id:
+            query &= ~Q(pk=exclude_booking_id)
+
+        # Only consider active status bookings for conflict (PENDING, APPROVED, CHECKED_IN)
+        query &= Q(status__in=['PENDING', 'APPROVED', 'CHECKED_IN'])
+
+        return self.get_queryset().filter(query)

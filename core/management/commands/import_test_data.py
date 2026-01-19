@@ -26,14 +26,14 @@ try:
         UserPenaltyPointsPerSpaceType,
         UserSpaceTypeBan,
         UserSpaceTypeExemption,
-        DailyBookingLimit  # NEW IMPORT: 每日预订限制模型
+        DailyBookingLimit
     )
 except ImportError:
     SpaceTypeBanPolicy = None
     UserPenaltyPointsPerSpaceType = None
     UserSpaceTypeBan = None
     UserSpaceTypeExemption = None
-    DailyBookingLimit = None  # NEW ASSIGNMENT
+    DailyBookingLimit = None
     print("Warning: 'bookings' app models not available. Data import for booking policies will be skipped.")
 
 CustomUser = get_user_model()
@@ -51,7 +51,7 @@ class Command(BaseCommand):
         """
         defaults = {
             'email': email,
-            'is_staff': is_staff,  # 初始设置，CustomUser.save()会根据组再次调整
+            'is_staff': is_staff,
             'is_superuser': is_superuser,
             'is_active': True,
             'name': full_name,
@@ -62,11 +62,10 @@ class Command(BaseCommand):
             'gender': gender,
         }
 
-        # 清理空字符串和None，避免唯一性字段报错
         if not defaults.get('phone_number'): defaults['phone_number'] = None
         if not defaults.get('work_id'): defaults['work_id'] = None
         if not defaults.get('email'): defaults['email'] = None
-        if not defaults.get('name'): defaults['name'] = username  # 如果姓名为空，默认使用用户名
+        if not defaults.get('name'): defaults['name'] = username
 
         user, created = CustomUser.objects.get_or_create(
             username=username,
@@ -80,30 +79,25 @@ class Command(BaseCommand):
             message = f"  Created user: {username} (Name: {full_name or username})"
         else:
             updated = False
-            # 检查并更新关键字段
             for field in ['email', 'name', 'phone_number', 'work_id', 'major', 'student_class', 'gender']:
                 if hasattr(user, field) and getattr(user, field) != defaults[field]:
                     setattr(user, field, defaults[field])
                     updated = True
 
-            # 特殊处理is_superuser (不被CustomUser.save自动更新)
             if user.is_superuser != is_superuser:
                 user.is_superuser = is_superuser
                 updated = True
 
-            # 不直接设置is_staff，而是让CustomUser的save方法或后续的组添加处理
-            # 但如果期望是staff却不是，可以先设置为true，待CustomUser的save处理
             if is_staff and not user.is_staff:
                 user.is_staff = True
                 updated = True
 
             if updated:
-                user.save()  # 调用save触发CustomUser.save()中的is_staff和组相关逻辑
+                user.save()
                 message += f"  User '{username}' already exists. Updated details."
             else:
                 message += f"  User '{username}' already exists. No significant details updated."
 
-            # 确保密码与期望一致（对于测试数据，重置密码通常是可以接受的）
             if not user.has_usable_password() or not user.check_password(password):
                 user.set_password(password)
                 user.save(update_fields=['password'])
@@ -123,42 +117,37 @@ class Command(BaseCommand):
         # --- 1. 创建 Users and Groups ---
         self.stdout.write(self.style.HTTP_INFO('\n1. Creating Users and Groups...'))
 
-        # 创建 '系统管理员' 组
         system_admin_group, created = Group.objects.get_or_create(name='系统管理员')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '系统管理员'"))
         else:
             self.stdout.write(self.style.WARNING("  Group '系统管理员' already exists."))
 
-        # 创建 '空间管理员' 组
         space_manager_group, created = Group.objects.get_or_create(name='空间管理员')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '空间管理员'"))
         else:
             self.stdout.write(self.style.WARNING("  Group '空间管理员' already exists."))
 
-        # NEW: 创建 '教师' 组
         teacher_group, created = Group.objects.get_or_create(name='教师')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '教师'"))
         else:
             self.stdout.write(self.style.WARNING("  Group '教师' already exists."))
 
-        # NEW: 创建 '学生' 组
         student_group, created = Group.objects.get_or_create(name='学生')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '学生'"))
         else:
             self.stdout.write(self.style.WARNING("  Group '学生' already exists."))
 
-        # NEW: 创建 '普通用户' 组 (用于每日预订限制等)
         general_user_group, created = Group.objects.get_or_create(name='普通用户')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '普通用户'"))
         else:
             self.stdout.write(self.style.WARNING("  Group '普通用户' already exists."))
 
-        # 创建特定用户 (使用新的 full_name, phone_number, work_id 等字段)
+        # 创建特定用户
         superuser = self._create_user_with_roles(
             'admin', 'admin123', 'admin@example.com',
             is_staff=True, is_superuser=True, full_name='超级用户'
@@ -191,27 +180,24 @@ class Command(BaseCommand):
             'banneduser', 'banned123', 'banned@example.com',
             full_name='禁用用户', phone_number='13911112222'
         )
-        # NEW: 学生用户
         student_user = self._create_user_with_roles(
             'student1', 'student123', 'student1@example.com',
             full_name='张三', phone_number='13700001111', work_id='20200101',
             major='计算机科学与技术', student_class='计科2001班', gender='M'
         )
-        # NEW: 教师用户 (通常也是is_staff)
         teacher_user = self._create_user_with_roles(
             'teacher1', 'teacher123', 'teacher1@example.com',
             is_staff=True, full_name='李老师', phone_number='13622223333', work_id='T2023001',
             gender='F'
         )
 
-        # 将用户添加到相应的组 & 触发CustomUser.save()以更新is_staff
         def add_user_to_group_and_save(user_obj, group_obj):
             if not user_obj.groups.filter(name=group_obj.name).exists():
                 user_obj.groups.add(group_obj)
                 self.stdout.write(self.style.SUCCESS(f"  Added {user_obj.username} to '{group_obj.name}' group."))
             else:
                 self.stdout.write(self.style.WARNING(f"  {user_obj.username} is already in '{group_obj.name}' group."))
-            user_obj.save()  # 触发CustomUser.save()更新is_staff
+            user_obj.save()
 
         add_user_to_group_and_save(sysadmin, system_admin_group)
         for sm in [space_manager1, space_manager2, space_manager3]:
@@ -221,39 +207,34 @@ class Command(BaseCommand):
         for u in [regular_user1, regular_user2, banned_user]:
             add_user_to_group_and_save(u, general_user_group)
 
-        # 确保超级用户的 is_staff 也是正确的
-        if not superuser.is_staff:  # Superuser is always staff
+        if not superuser.is_staff:
             superuser.is_staff = True
             superuser.save()
 
         # --- 2. 创建 SpaceTypes, Amenities, Spaces & BookableAmenities ---
-        # 以下部分保持不变
         if Space and SpaceType and Amenity and BookableAmenity:
             self.stdout.write(self.style.HTTP_INFO('\n2. Creating SpaceTypes, Amenities, Spaces, BookableAmenities...'))
 
             space_types_data = [
-                # 移除 'is_container_type' 字段
                 {'name': 'Lecture Hall', 'default_is_bookable': True},
                 {'name': 'Meeting Room', 'default_is_bookable': True},
                 {'name': 'Lab', 'default_is_bookable': True,
                  'default_requires_approval': True},
                 {'name': 'Study Zone', 'default_is_bookable': True},
                 {'name': 'Sports Field', 'default_is_bookable': True},
-                # 'Office' 这个类型也无 'is_container_type'，只保留 SpaceType 本身有的字段
                 {'name': 'Office', 'is_basic_infrastructure': True,
                  'default_is_bookable': False},
             ]
             space_types = {}
             for data in space_types_data:
-                # 显式提供default values for time fields
                 defaults_with_time = {
-                    'description': '',  # 确保description默认值
+                    'description': '',
                     'default_available_start_time': time(8, 0),
                     'default_available_end_time': time(22, 0),
                     'default_min_booking_duration': timedelta(minutes=30),
                     'default_max_booking_duration': timedelta(hours=4),
                     'default_buffer_time_minutes': 0,
-                    **{k: v for k, v in data.items() if k != 'name'}  # 覆盖默认值
+                    **{k: v for k, v in data.items() if k != 'name'}
                 }
 
                 st, created = SpaceType.objects.get_or_create(
@@ -267,7 +248,7 @@ class Command(BaseCommand):
                 {'name': 'Projector', 'description': '高清投影仪'},
                 {'name': 'Whiteboard', 'description': '交互式白板'},
                 {'name': 'Video Conferencing', 'description': '视频会议设备'},
-                {'name': 'Water Dispenser', 'description': '饮水机', 'is_bookable_individually': True},  # 部分设施可单独预订
+                {'name': 'Water Dispenser', 'description': '饮水机', 'is_bookable_individually': True},
                 {'name': 'Internet Access', 'description': '高速网络接入'},
                 {'name': 'Sports Equipment', 'description': '各类运动器材'},
             ]
@@ -280,17 +261,11 @@ class Command(BaseCommand):
                 amenities[am.name] = am
                 self.stdout.write(self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Amenity: {am.name}"))
 
-            # Parent Spaces (Container Spaces)
-            # 注意：容器空间通常设置为is_bookable=False，space_type选择默认不可预订的类型
             parent_space1, created = Space.objects.get_or_create(
                 name='Main Building - Floor 1',
                 defaults={'location': 'Central Campus', 'is_container': True, 'space_type': space_types['Office'],
                           'managed_by': space_manager1, 'is_bookable': False}
             )
-            # 确保即使空间已存在，权限也能分配，以保证幂等性 (此为信号处理，这里可省略，但保留以显式展示意图)
-            # assign_perm('spaces.can_manage_space_details', space_manager1, parent_space1)
-            # assign_perm('spaces.can_manage_space_bookings', space_manager1, parent_space1)
-            # assign_perm('spaces.can_manage_space_amenities', space_manager1, parent_space1)
             self.stdout.write(
                 self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Parent Space: {parent_space1.name}"))
 
@@ -310,7 +285,6 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Parent Space: {parent_space3.name}"))
 
-            # Child Bookable Spaces
             spaces_data = [
                 {'name': 'Room 101', 'location': 'Floor 1', 'space_type': space_types['Meeting Room'],
                  'parent_space': parent_space1, 'capacity': 10, 'is_bookable': True, 'requires_approval': False,
@@ -321,7 +295,6 @@ class Command(BaseCommand):
                 {'name': 'Lab 3B', 'location': 'Research Wing', 'space_type': space_types['Lab'],
                  'parent_space': parent_space2, 'capacity': 20, 'is_bookable': True, 'requires_approval': True,
                  'managed_by': space_manager2, 'amenities': [('Water Dispenser', 1, True), ('Internet Access', 1)]},
-                # Water Dispenser 为可单独预订
                 {'name': 'Meeting Pod 5', 'location': 'Collaborative Zone', 'space_type': space_types['Study Zone'],
                  'parent_space': parent_space2, 'capacity': 4, 'is_bookable': True, 'requires_approval': False,
                  'managed_by': space_manager2, 'amenities': []},
@@ -337,9 +310,8 @@ class Command(BaseCommand):
             ]
 
             for s_data in spaces_data:
-                s_amenities_list = s_data.pop('amenities')  # 提取设施数据
+                s_amenities_list = s_data.pop('amenities')
 
-                # 检查并设置 Space 的 available_start/end_time 为 time 对象
                 if 'available_start_time' in s_data and isinstance(s_data['available_start_time'], str):
                     h, m = map(int, s_data['available_start_time'].split(':'))
                     s_data['available_start_time'] = time(h, m)
@@ -354,19 +326,17 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Bookable Space: {space.name}"))
 
-                # Add/Update Bookable Amenities
                 for amenity_item in s_amenities_list:
                     amenity_name = amenity_item[0]
                     quantity = amenity_item[1]
                     is_bookable_instance = amenity_item[2] if len(amenity_item) > 2 else amenities[
-                        amenity_name].is_bookable_individually  # 如果未指定，则继承设施类型的默认值
+                        amenity_name].is_bookable_individually
 
                     book_am, am_created = BookableAmenity.objects.get_or_create(
                         space=space,
                         amenity=amenities[amenity_name],
                         defaults={'quantity': quantity, 'is_bookable': is_bookable_instance}
                     )
-                    # 如果已存在，更新数量和是否可预订状态
                     if not am_created:
                         if book_am.quantity != quantity or book_am.is_bookable != is_bookable_instance:
                             book_am.quantity = quantity
@@ -388,7 +358,6 @@ class Command(BaseCommand):
         if SpaceTypeBanPolicy and UserPenaltyPointsPerSpaceType and UserSpaceTypeBan and UserSpaceTypeExemption:
             self.stdout.write(self.style.HTTP_INFO('\n3. Creating Booking Policies & User Ban/Penalty Data...'))
 
-            # Ban Policies
             policy1, created = SpaceTypeBanPolicy.objects.get_or_create(
                 space_type=space_types['Meeting Room'],
                 threshold_points=3,
@@ -408,7 +377,7 @@ class Command(BaseCommand):
                 self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Ban Policy: {policy2.description}"))
 
             global_policy, created = SpaceTypeBanPolicy.objects.get_or_create(
-                space_type=None,  # Global policy
+                space_type=None,
                 threshold_points=10,
                 ban_duration=timedelta(days=90),
                 defaults={'priority': 30, 'is_active': True, 'description': '违约10点全局禁用90天'}
@@ -416,7 +385,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  {'Created' if created else 'Existing'} Global Ban Policy: {global_policy.description}"))
 
-            # User Penalty Points
             penalty1, created = UserPenaltyPointsPerSpaceType.objects.get_or_create(
                 user=regular_user1,
                 space_type=space_types['Meeting Room'],
@@ -425,7 +393,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  {'Created' if created else 'Existing'} Penalty for {regular_user1.username}: {penalty1.current_penalty_points} points in {space_types['Meeting Room'].name}"))
 
-            # User that triggers a ban (banned_user will have 4 points, triggering 3-point policy for Meeting Room)
             penalty_banned, created = UserPenaltyPointsPerSpaceType.objects.get_or_create(
                 user=banned_user,
                 space_type=space_types['Meeting Room'],
@@ -434,7 +401,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  {'Created' if created else 'Existing'} Penalty for {banned_user.username}: {penalty_banned.current_penalty_points} points in {space_types['Meeting Room'].name} (should trigger ban)"))
 
-            # User Bans (日期不再使用.date()转换)
             user_ban1, created = UserSpaceTypeBan.objects.get_or_create(
                 user=banned_user,
                 space_type=space_types['Meeting Room'],
@@ -448,7 +414,7 @@ class Command(BaseCommand):
 
             user_ban2, created = UserSpaceTypeBan.objects.get_or_create(
                 user=regular_user2,
-                space_type=None,  # 全局禁用
+                space_type=None,
                 defaults={'start_date': timezone.now(),
                           'end_date': timezone.now() + timedelta(days=90),
                           'reason': 'Manual Global Ban',
@@ -457,7 +423,6 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  {'Created' if created else 'Existing'} Global User Ban for {user_ban2.user.username}: {user_ban2.reason}"))
 
-            # User Exemptions (日期不再使用.date()转换)
             exemption1, created = UserSpaceTypeExemption.objects.get_or_create(
                 user=regular_user1,
                 space_type=space_types['Lab'],
@@ -469,10 +434,9 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  {'Created' if created else 'Existing'} User Exemption for {exemption1.user.username}: {exemption1.exemption_reason}"))
 
-            # 为学生用户添加一项豁免 (例如，免于所有违约点数的影响或缩短禁用期)
             exemption_student, created = UserSpaceTypeExemption.objects.get_or_create(
                 user=student_user,
-                space_type=space_types['Study Zone'],  # 豁免在自习区的一些规则
+                space_type=space_types['Study Zone'],
                 defaults={'start_date': timezone.now(),
                           'end_date': timezone.now() + timedelta(days=180),
                           'exemption_reason': '优秀学生特批',
@@ -484,48 +448,85 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 "\nSkipping creation of Booking Policies and User Ban/Penalty Data due to missing models."))
 
-        # --- 4. 创建 Daily Booking Limits ---
+        # --- 4. 创建 Daily Booking Limits (重点修改部分) ---
         if DailyBookingLimit:
             self.stdout.write(self.style.HTTP_INFO('\n4. Creating Daily Booking Limits...'))
 
-            # 为 '普通用户' 组设置每日预订限制
-            daily_limit_general, created = DailyBookingLimit.objects.get_or_create(
+            # --- 全局每日预订限制 ---
+            # 普通用户组：全局每日预订3次，优先级较低
+            DailyBookingLimit.objects.get_or_create(
                 group=general_user_group,
-                defaults={'max_bookings': 3, 'is_active': True}
+                space_type=None,  # 全局限制
+                defaults={'max_bookings': 3, 'priority': 10, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
-                f"  {'Created' if created else 'Existing'} Daily Booking Limit for '{general_user_group.name}': {daily_limit_general.max_bookings}"))
+                f"  Daily Booking Limit for '{general_user_group.name}' (Global): 3 bookings/day (Priority:10)"))
 
-            # 为 '学生' 组设置每日预订限制
-            daily_limit_student, created = DailyBookingLimit.objects.get_or_create(
+            # 学生组：全局每日预订5次，优先级适中
+            DailyBookingLimit.objects.get_or_create(
                 group=student_group,
-                defaults={'max_bookings': 5, 'is_active': True}
+                space_type=None,  # 全局限制
+                defaults={'max_bookings': 5, 'priority': 20, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
-                f"  {'Created' if created else 'Existing'} Daily Booking Limit for '{student_group.name}': {daily_limit_student.max_bookings}"))
+                f"  Daily Booking Limit for '{student_group.name}' (Global): 5 bookings/day (Priority:20)"))
 
-            # 为 '教师' 组设置每日预订限制 (可以适当放宽)
-            daily_limit_teacher, created = DailyBookingLimit.objects.get_or_create(
+            # 教师组：全局每日预订10次，优先级较高
+            DailyBookingLimit.objects.get_or_create(
                 group=teacher_group,
-                defaults={'max_bookings': 10, 'is_active': True}
+                space_type=None,  # 全局限制
+                defaults={'max_bookings': 10, 'priority': 30, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
-                f"  {'Created' if created else 'Existing'} Daily Booking Limit for '{teacher_group.name}': {daily_limit_teacher.max_bookings}"))
+                f"  Daily Booking Limit for '{teacher_group.name}' (Global): 10 bookings/day (Priority:30)"))
 
-            # 系统管理员和空间管理员通常没有每日预订次数限制 (设置为0表示无限制)
-            daily_limit_sysadmin, created = DailyBookingLimit.objects.get_or_create(
+            # 系统管理员和空间管理员：全局没有每日预订次数限制 (max_bookings=0 表示无限制)
+            DailyBookingLimit.objects.get_or_create(
                 group=system_admin_group,
-                defaults={'max_bookings': 0, 'is_active': True}
+                space_type=None,  # 全局限制
+                defaults={'max_bookings': 0, 'priority': 100, 'is_active': True}  # 最高优先级
             )
             self.stdout.write(self.style.SUCCESS(
-                f"  {'Created' if created else 'Existing'} Daily Booking Limit for '{system_admin_group.name}': {'无限制' if daily_limit_sysadmin.max_bookings == 0 else daily_limit_sysadmin.max_bookings}"))
+                f"  Daily Booking Limit for '{system_admin_group.name}' (Global): 无限制 (Priority:100)"))
 
-            daily_limit_spaceman, created = DailyBookingLimit.objects.get_or_create(
+            DailyBookingLimit.objects.get_or_create(
                 group=space_manager_group,
-                defaults={'max_bookings': 0, 'is_active': True}
+                space_type=None,  # 全局限制
+                defaults={'max_bookings': 0, 'priority': 90, 'is_active': True}  # 较高优先级
             )
             self.stdout.write(self.style.SUCCESS(
-                f"  {'Created' if created else 'Existing'} Daily Booking Limit for '{space_manager_group.name}': {'无限制' if daily_limit_spaceman.max_bookings == 0 else daily_limit_spaceman.max_bookings}"))
+                f"  Daily Booking Limit for '{space_manager_group.name}' (Global): 无限制 (Priority:90)"))
+
+            # --- 特定空间类型的每日预订限制 (需要 space_types 字典填充完毕) ---
+            if space_types:
+                # 为 '普通用户' 组在 'Meeting Room' 空间类型下设置更严格的限制
+                # 优先级高于其全局限制 (10 > 5)
+                DailyBookingLimit.objects.get_or_create(
+                    group=general_user_group,
+                    space_type=space_types['Meeting Room'],
+                    defaults={'max_bookings': 1, 'priority': 15, 'is_active': True}  # 特定类型规则优先于全局规则
+                )
+                self.stdout.write(self.style.SUCCESS(
+                    f"  Daily Booking Limit for '{general_user_group.name}' ({space_types['Meeting Room'].name}): 1 booking/day (Priority:15)"))
+
+                # 为 '学生' 组在 'Lab' 空间类型下设置更宽松的限制，例如实验室可能需要更多访问
+                DailyBookingLimit.objects.get_or_create(
+                    group=student_group,
+                    space_type=space_types['Lab'],
+                    defaults={'max_bookings': 7, 'priority': 25, 'is_active': True}  # 优先级高于其全局的学生限制
+                )
+                self.stdout.write(self.style.SUCCESS(
+                    f"  Daily Booking Limit for '{student_group.name}' ({space_types['Lab'].name}): 7 bookings/day (Priority:25)"))
+
+                # 针对 '教师' 组在 'Lecture Hall' 类型的空间做另一个限制，例如可以预订更多次
+                DailyBookingLimit.objects.get_or_create(
+                    group=teacher_group,
+                    space_type=space_types['Lecture Hall'],
+                    defaults={'max_bookings': 20, 'priority': 35, 'is_active': True}  # 优先级高于其全局的教师限制
+                )
+                self.stdout.write(self.style.SUCCESS(
+                    f"  Daily Booking Limit for '{teacher_group.name}' ({space_types['Lecture Hall'].name}): 20 bookings/day (Priority:35)"))
+
         else:
             self.stdout.write(self.style.WARNING(
                 "\nSkipping creation of Daily Booking Limits due to missing 'DailyBookingLimit' model."))

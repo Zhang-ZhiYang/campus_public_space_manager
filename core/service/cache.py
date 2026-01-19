@@ -150,6 +150,9 @@ class CacheService:
         'bookings:user_ban:detail': 3600*2,
         'bookings:user_ban:list_by_user': 3600*2,
         'bookings:daily_limit:detail': 3600,
+
+        'bookings:daily_limit:effective_by_group_spacetype': 3600,  # 新增 DailyBookingLimitService 的缓存
+        'bookings:user_exemption:detail': 3600 * 2,  # 新增：用于检查用户在特定空间类型下的活跃豁免状态
     }
 
     @classmethod
