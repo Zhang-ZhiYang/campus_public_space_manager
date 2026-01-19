@@ -1,4 +1,4 @@
-# bookings/service/common_helpers.py
+# bookings/service/common_helpers.py (仅显示修正部分)
 from datetime import datetime, timedelta, time  # 导入 time, timedelta
 from typing import List, Dict, Any, Union, Tuple, Optional
 from django.utils import timezone
@@ -47,7 +47,6 @@ class CommonBookingHelpers:
             effective_slot_end = slot_end + timedelta(minutes=buffer_time_minutes)
 
             # 仅考虑与新预订有效时间段有实际重叠的现有预订
-            # 这里的判断至关重要：event_processing_window_end > event_start and event_processing_window_start < event_end
             if effective_new_end > effective_slot_start and effective_new_start < effective_slot_end:
                 events.append((effective_slot_start, slot_quantity))
                 events.append((effective_slot_end, -slot_quantity))
@@ -66,35 +65,23 @@ class CommonBookingHelpers:
         max_occupancy_observed = 0
 
         for event_time, quantity_change in events:
-            # 只有当事件点在请求的有效时间段内或与该时间段有重叠时才更新占用
-            # 实际上，由于我们已经筛选了 booked_slots，并且新预订的事件点也在这段
-            # 加上 sorted events，直接累加并检查 max_occupancy_observed 即可。
-
-            # 仅在实际重叠区间内考虑容量。
-            # 如果事件时间点在有效的新预订时间段之外，它可能仍会影响累计的current_occupancy，
-            # 但我们主要关心的是在 `[effective_new_start, effective_new_end)` 期间的峰值。
-            # 这里的 sweep line 算法自然会覆盖这个范围。
-
             current_occupancy += quantity_change
-            # 在每一步更新后，检查是否超过容量
             if current_occupancy > total_capacity:
                 return False  # 即刻判定不可用
 
             max_occupancy_observed = max(max_occupancy_observed, current_occupancy)
 
-        # 如果遍历完所有事件后，最大占用始终未超过总容量，则认为可用。
         return max_occupancy_observed <= total_capacity
 
     @staticmethod
-    def _get_datetime_from_time(date_obj: timezone.date, time_obj: time) -> datetime:
+    def _get_datetime_from_time(date_obj: datetime.date, time_obj: time) -> datetime:  # <--- 修正这里
         """
         结合一个 `date` 对象和 `time` 对象，创建一个 `datetime` 对象，并使其 timezone-aware。
         """
-        # 注意：这里需要确保返回的是 timezone-aware 的 datetime 对象
         return timezone.make_aware(datetime.combine(date_obj, time_obj))
 
     @staticmethod
-    def get_time_boundaries_for_day(date_obj: timezone.date,
+    def get_time_boundaries_for_day(date_obj: datetime.date,  # <--- 修正这里
                                     available_start_time: Optional[time],
                                     available_end_time: Optional[time]) -> Dict[str, datetime]:
         """
@@ -116,7 +103,7 @@ class CommonBookingHelpers:
         """
         total_seconds = int(duration.total_seconds())
         if total_seconds < 0:
-            return "无效时长"  # 或者抛出异常
+            return "无效时长"
 
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
@@ -127,10 +114,10 @@ class CommonBookingHelpers:
             parts.append(f"{hours}小时")
         if minutes > 0:
             parts.append(f"{minutes}分钟")
-        if seconds > 0 and not parts:  # 如果没有小时和分钟，可以显示秒，否则通常忽略秒
+        if seconds > 0 and not parts:
             parts.append(f"{seconds}秒")
 
         if not parts:
-            return "0分钟"  # 没有时长
+            return "0分钟"
 
         return "".join(parts)

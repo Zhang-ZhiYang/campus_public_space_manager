@@ -105,7 +105,7 @@ class BookingDAO(BaseDAO):
             # TODO: 未来DailyBookingLimitService可能需要按space_type进行计数，此处可能需修改
         ).count()
 
-    # NEW: 获取给定时间段内与目标实体冲突的预订
+
     def get_overlapping_bookings(self, target_entity: Union[Space, BookableAmenity],
                                  start_time: datetime, end_time: datetime,
                                  exclude_booking_id: Optional[int] = None) -> QuerySet[Booking]:
@@ -145,3 +145,22 @@ class BookingDAO(BaseDAO):
         query &= Q(status__in=['PENDING', 'APPROVED', 'CHECKED_IN'])
 
         return self.get_queryset().filter(query)
+    def update_booking_processing_status(self, booking_instance: Booking, new_processing_status: str,
+                                         admin_notes: Optional[str] = None,
+                                         new_booking_status: Optional[str] = None) -> Booking:
+        """
+        专门用于更新预订的处理状态和可选的业务状态。
+        :param booking_instance: 要更新的 Booking 实例。
+        :param new_processing_status: 新的异步处理状态（例如 'IN_PROGRESS', 'FAILED_VALIDATION'）。
+        :param admin_notes: 可选的管理员备注信息。
+        :param new_booking_status: 可选的新的业务状态（例如 'PENDING', 'APPROVED', 'REJECTED'）。
+        :return: 更新后的 Booking 实例。
+        """
+        booking_instance.processing_status = new_processing_status
+        if new_booking_status:
+            booking_instance.status = new_booking_status
+        if admin_notes is not None:
+            booking_instance.admin_notes = admin_notes
+        booking_instance.full_clean() # 再次运行 clean 方法确保数据一致性
+        booking_instance.save()
+        return booking_instance

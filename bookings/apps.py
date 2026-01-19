@@ -24,8 +24,10 @@ class BookingsConfig(AppConfig):
         # 导入所有 Service 类 (从 bookings.service.__init__.py 统一导入)
         from bookings.service import (
             DailyBookingLimitService,
-            UserBanService,  # 新增
-            UserExemptionService,  # 新增
+            UserBanService,
+            UserExemptionService,
+            BookingPreliminaryService,  # 新增
+            BookingValidationCreationService,  # 新增
         )
 
         DAOFactory.register_dao('booking', BookingDAO)
@@ -39,6 +41,8 @@ class BookingsConfig(AppConfig):
 
         # 使用 ServiceFactory 注册所有的 Service
         ServiceFactory.register_service(DailyBookingLimitService)
-        ServiceFactory.register_service(UserBanService)  # 新增
-        ServiceFactory.register_service(UserExemptionService)  # 新增
+        ServiceFactory.register_service(UserBanService)
+        ServiceFactory.register_service(UserExemptionService)
+        ServiceFactory.register_service(BookingPreliminaryService)  # 新增
+        ServiceFactory.register_service(BookingValidationCreationService)  # 新增
         logger.info("Bookings Services registered with ServiceFactory.")
