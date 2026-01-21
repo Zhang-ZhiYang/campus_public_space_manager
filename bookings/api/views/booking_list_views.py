@@ -46,27 +46,35 @@ class AllBookingsListAPIView(generics.ListAPIView):
     列出所有预订记录（管理员视角）。
     只有系统管理员或空间管理员可以访问。支持筛选和分页。
     """
-    permission_classes = [IsAuthenticated]  # <--- 修正：只保留 IsAuthenticated 权限类
+    permission_classes = [IsAuthenticated]  # <<--- 必须保留 IsAuthenticated 以触发认证
     serializer_class = BookingMinimalSerializer
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend]
     filterset_class = BookingFilter
 
-    # --- 修正：将装饰器应用于 dispatch 方法 ---
-    @is_admin_or_space_manager_required
-    def dispatch(self, request, *args, **kwargs):
-        return super().dispatch(request, *args, **kwargs)
+    # 此处无需 is_admin_or_space_manager_for_qs_obj 装饰器，因为是 ListAPIView，
+    # 权限应在视图类级别和 Service 层 QuerySet 过滤中处理。
 
+    @is_admin_or_space_manager_required # <<--- 将装饰器应用于目标方法(list)
+    def list(self, request, *args, **kwargs):
+        user = self.request.user # 此时 request.user 已经是认证用户
+        booking_service = BookingService()
+        # Service 层的 get_all_bookings 会根据用户的 isAdmin/isSpaceManager 角色返回合适的 QuerySet
+        service_result = booking_service.get_all_bookings(user, filters=self.request.query_params)
+        if service_result.success:
+            self.request.successful_response_status = status.HTTP_200_OK # 放到这里，因为 list 可能被 get_queryset 的异常中断
+            return super().list(request, *args, **kwargs) # 调用父类的 list 方法，它会使用 get_queryset
+        else:
+            raise service_result.to_exception()
+
+    # 注意：get_queryset 方法的逻辑保持不变，因为 service_result.data 已经是经过权限过滤的 QuerySet。
+    # decorated list method will handle the overall flow.
+    # We moved the `self.request.successful_response_status = status.HTTP_200_OK` into the decorated list method.
     def get_queryset(self):
         user = self.request.user
         booking_service = BookingService()
-        # Service 层的 get_all_bookings 会根据用户的 isAdmin/isSpaceManager 角色返回合适的 QuerySet
-        service_result = booking_service.get_all_bookings(user, filters=self.request.query_params)  # 传入filters
+        service_result = booking_service.get_all_bookings(user, filters=self.request.query_params)
         if service_result.success:
             return service_result.data.order_by('-created_at')
         else:
             raise service_result.to_exception()
-
-    def list(self, request, *args, **kwargs):
-        self.request.successful_response_status = status.HTTP_200_OK
-        return super().list(request, *args, **kwargs)

@@ -26,7 +26,7 @@ class BookingCancelAPIView(APIView):
     自定义动作：取消预订。
     POST /bookings/<int:pk>/cancel/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]  # 预订用户本人、管理员、空间管理员均可取消，权限在 Service 层做了细致判断，故这里只需保证认证
 
     def post(self, request, pk, *args, **kwargs):
         user = request.user
@@ -59,9 +59,9 @@ class BookingStatusUpdateAPIView(APIView):
     自定义动作：管理员更新预订状态。
     PATCH /bookings/<int:pk>/status/
     """
-    permission_classes = [IsAuthenticated]  # <-- 仅保留 IsAuthenticated
+    permission_classes = [IsAuthenticated]  # <<--- 必须保留 IsAuthenticated
 
-    @is_admin_or_space_manager_required  # <-- 将装饰器直接应用于 patch 方法
+    @is_admin_or_space_manager_required  # <<--- 将装饰器直接应用于 patch 方法
     def patch(self, request, pk, *args, **kwargs):
         user = request.user
         serializer = BookingUpdateStatusSerializer(data=request.data)
@@ -108,10 +108,10 @@ class BookingMarkNoShowAPIView(APIView):
     自定义动作：批量标记预订为未到场并创建违规记录。
     POST /bookings/mark-no-show/
     """
-    permission_classes = [IsAuthenticated]  # <-- 仅保留 IsAuthenticated
+    permission_classes = [IsAuthenticated]  # <<--- 必须保留 IsAuthenticated
 
-    @is_admin_or_space_manager_required  # <-- 将装饰器直接应用于 post 方法
-    def post(self, request, *args, **kwargs):  # 这里也需要改为使用正确的装饰器
+    @is_admin_or_space_manager_required  # <<--- 将装饰器直接应用于 post 方法
+    def post(self, request, *args, **kwargs):
         user = request.user
         serializer = BookingMarkNoShowSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
