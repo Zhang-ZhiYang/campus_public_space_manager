@@ -127,3 +127,58 @@ class DailyBookingLimitService(BaseService):
                 f"Error calculating effective daily booking limit for user {user.pk}, space_type {space_type.pk if space_type else 'None'}: {e}")
             # 发生异常时，默认不限制，避免阻碍用户操作
             return self.NO_LIMIT
+
+    CACHE_KEY_TOTAL_DAILY_LIMIT = 'bookings:total_daily_limit'
+    CACHE_TOTAL_DAILY_POSTFIX = 'effective_total'
+
+    def get_effective_total_daily_limit(self, user: CustomUser) -> int:
+        """
+        获取用户在所有空间类型下适用的每日最大预订总次数限制。
+        这会找到用户所属组的优先级最高的“全局限制”规则（space_type=None）。
+
+        :param user: CustomUser 实例。
+        :return: 每日最大预订总次数限制（int），0 表示没有限制。
+        """
+        try:
+            user_group_ids = sorted(user.groups.values_list('pk', flat=True))
+            cache_identifier_str = f"user:{user.pk}:groups:{hash(tuple(user_group_ids))}"
+
+            cached_limit = CacheService.get(
+                key_prefix=self.CACHE_KEY_TOTAL_DAILY_LIMIT,
+                identifier=cache_identifier_str,
+                custom_postfix=self.CACHE_TOTAL_DAILY_POSTFIX
+            )
+            if cached_limit is not None:
+                logger.debug(f"Cache HIT for effective total daily limit for user {user.pk}. Result: {cached_limit}")
+                return cached_limit
+
+            # 只查询空间类型为 None 的全局限制规则
+            # 排序逻辑保持不变，取最高优先级且max_bookings最低的那个
+            applicable_total_limits = self.daily_booking_limit_dao.get_applicable_limits_for_groups_and_spacetype(
+                group_ids=user_group_ids,
+                space_type=None  # 明确指定查询全局限制
+            )
+
+            # 遍历寻找最严格的全局（所有空间类型合计）限制
+            total_limit = self.NO_LIMIT  # 默认无限制
+            for limit_rule in applicable_total_limits:
+                if limit_rule.max_bookings > 0:  # 找到第一个大于0的限制
+                    total_limit = limit_rule.max_bookings
+                    break  # 因为已按优先级和max_bookings排序，第一个就是最严格的
+
+            # 如果没有找到任何有具体限制的规则（包括max_bookings=0的规则，这在前面的DAO查询中就被排除了），或者找到的规则 max_bookings 为 0, effective_limit 依然是 self.NO_LIMIT
+            # 这里其实可以简化了，因为DAO会排除max_bookings=0
+
+            CacheService.set(
+                key_prefix=self.CACHE_KEY_TOTAL_DAILY_LIMIT,
+                identifier=cache_identifier_str,
+                custom_postfix=self.CACHE_TOTAL_DAILY_POSTFIX,
+                value=total_limit
+            )
+            logger.info(f"Calculated effective total daily limit for user {user.pk}: {total_limit}. Cached result.")
+            return total_limit
+
+        except Exception as e:
+            logger.exception(
+                f"Error calculating effective total daily booking limit for user {user.pk}: {e}")
+            return self.NO_LIMIT

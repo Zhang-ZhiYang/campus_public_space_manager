@@ -121,7 +121,7 @@ class SpaceListCreateAPIView(ListCreateAPIView):
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
-            logger.warning(f"CustomAPIException caught in SpaceListCreateAPIView (list): {e.code} - {e.detail}")
+            logger.warning(f"CustomAPIException caught in SpaceListCreateAPIView (list):   {e.detail}")
             raise e
         except Exception as e:
             logger.exception("列出空间失败，发生未知错误。")
@@ -347,7 +347,7 @@ class ManagedSpaceListCreateAPIView(ListCreateAPIView):
                 status_code=HTTP_200_OK
             )
         except CustomAPIException as e:
-            logger.warning(f"CustomAPIException caught in ManagedSpaceListCreateAPIView (list): {e.code} - {e.detail}")
+            logger.warning(f"CustomAPIException caught in ManagedSpaceListCreateAPIView (list):  - {e.detail}")
             raise e
         except Exception as e:
             logger.exception("列出管理空间失败，发生未知错误。")

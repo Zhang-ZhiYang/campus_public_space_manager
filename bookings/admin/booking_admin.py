@@ -1,6 +1,6 @@
-# bookings/admin/booking_admin.py (终极修正版 - 2026-01-09 - 更严格的空间管理员权限控制)
+# bookings/admin/booking_admin.py (终极修正版 - 解决Admin Action IntegrityError，并优化权限控制)
 from django.contrib import admin
-from django.db import transaction, models
+from django.db import transaction, models, IntegrityError  # 导入 IntegrityError
 from django.contrib import messages
 from django.utils import timezone
 from django.db.models import Q, Manager, QuerySet
@@ -13,196 +13,42 @@ from django.conf import settings
 
 CustomUser = settings.AUTH_USER_MODEL
 
-from bookings.models import Booking
-from bookings.models import Violation
+from bookings.models import Booking  # 确保这里是真实的 Booking 模型
+from bookings.models import Violation  # 真实的 Violation 模型
 
-import logging
-
-logger = logging.getLogger(__name__)
-
-# --- 健壮的 Mock 对象定义 (解决 TypeError 和 Unresolved reference) ---
-SPACES_MODELS_LOADED = False
+# 确保 spaces 模块已正确安装和配置，否则需要处理 ImportError
+# 生产环境通常不使用 Mock 对象，直接导入即可
 try:
     from spaces.models import Space, SpaceType, BookableAmenity
 
     SPACES_MODELS_LOADED = True
 except ImportError:
-    class MockValuesListQuerySet(list):
-        def __init__(self, *args, **kwargs):
-            self._mock_ids = kwargs.pop('_mock_ids', [])
-            super().__init__(self._mock_ids)
-
-        def distinct(self):
-            return MockValuesListQuerySet(_mock_ids=list(set(self._mock_ids)))
-
-        def values_list(self, *args, **kwargs):
-            return self
-
-        def exists(self):
-            return bool(self._mock_ids)
-
-        def filter(self, *args, **kwargs):
-            return MockValuesListQuerySet(_mock_ids=[])
-
-        def count(self):
-            return len(self._mock_ids)
+    # 如果真的无法导入，这里可以留一个警告，但 Admin 的大部分功能会受影响
+    # 在生产环境中，这意味着配置问题
+    SPACES_MODELS_LOADED = False
 
 
-    class MockQuerySet(models.QuerySet):
-        def __init__(self, *args, **kwargs):
-            self._mock_instances = kwargs.pop('_mock_instances', [])
-            super().__init__(*args, **kwargs)
-
-        def none(self):
-            return MockQuerySet(self.model, using=self._db, _mock_instances=[])
-
-        def filter(self, *args, **kwargs):
-            filtered_instances = []
-            for inst in self._mock_instances:
-                match = True
-                for key, value in kwargs.items():
-                    current_obj = inst
-                    parts = key.split('__')
-
-                    for i, part in enumerate(parts):
-                        if i == len(parts) - 1 and part.endswith('_in'):
-                            field_name = part[:-3]
-                            attr = getattr(current_obj, field_name, None)
-                            if attr is None or (value is not None and attr not in value if isinstance(value,
-                                                                                                      (list, tuple,
-                                                                                                       set)) else attr != value):
-                                match = False
-                                break
-                        elif i == len(parts) - 1 and part.endswith('_id'):
-                            field_name = part[:-3]
-                            if not hasattr(current_obj, field_name) or getattr(getattr(current_obj, field_name, None),
-                                                                               'id', None) != value:
-                                match = False
-                                break
-                        else:
-                            if isinstance(current_obj, (models.Model, object)) and hasattr(current_obj, part):
-                                current_obj = getattr(current_obj, part, None)
-                                if current_obj is None:
-                                    match = False
-                                    break
-                            else:
-                                if getattr(inst, key, None) != value:
-                                    match = False
-                                break
-                    if not match:
-                        break
-                if match:
-                    filtered_instances.append(inst)
-            return MockQuerySet(self.model, using=self._db, _mock_instances=filtered_instances)
-
-        def values_list(self, *args, **kwargs):
-            extracted_values = []
-            flat = kwargs.get('flat', False)
-            for inst in self._mock_instances:
-                row_values = []
-                for field_path in args:
-                    current_val = inst
-                    for part in field_path.split('__'):
-                        current_val = getattr(current_val, part, None)
-                        if current_val is None:
-                            break
-                    row_values.append(current_val)
-                if all(v is not None for v in row_values):
-                    extracted_values.append(row_values[0] if flat and len(row_values) == 1 else tuple(row_values))
-
-            return MockValuesListQuerySet(_mock_ids=[v for v in extracted_values if v is not None])
-
-        def distinct(self):
-            seen_ids = set()
-            distinct_instances = []
-            for inst in self._mock_instances:
-                instance_id = getattr(inst, 'id', hash(inst))
-                if instance_id not in seen_ids:
-                    distinct_instances.append(inst)
-                    seen_ids.add(instance_id)
-            return MockQuerySet(self.model, using=self._db, _mock_instances=distinct_instances)
-
-        def exists(self):
-            return bool(self._mock_instances)
-
-        def all(self):
-            return self._mock_instances
-
-        def first(self):
-            return self._mock_instances[0] if self._mock_instances else None
-
-        def count(self):
-            return len(self._mock_instances)
-
-        def update(self, **kwargs):
-            return len(self._mock_instances)
-
-        def select_related(self, *args, **kwargs):
-            return self
+    class Space:  # 提供一个极简的 Mock，防止名称错误，但不提供功能
+        def __init__(self): self.name = "Mock Space"
 
 
-    class MockManager(models.Manager):
-        def get_queryset(self):
-            return MockQuerySet(self.model, using=self._db, _mock_instances=[])
+    class SpaceType:
+        def __init__(self): self.name = "Mock SpaceType"
 
 
-    class MockSpace(models.Model):
-        name = "Mock Space"
-        requires_approval = False
-        space_type = None
-        objects = MockManager()
-        id = None
-        _state = None
-
-        def __str__(self): return self.name
-
-        def __init__(self, id=1, name="Mock Space", requires_approval=False, space_type=None, _state=None):
-            self.id = id
-            self.name = name
-            self.requires_approval = requires_approval
-            self.space_type = space_type if space_type is not None else MockSpaceType(id=99)
-            self._state = _state if _state is not None else models.base.ModelState()
-
-        def has_perm(self, perm, obj=None): return True
+    class BookableAmenity:
+        def __init__(self): self.name = "Mock BookableAmenity"
 
 
-    class MockSpaceType(models.Model):
-        name = "Mock SpaceType"
-        objects = MockManager()
-        id = None
-        _state = None
+    print("Warning: Could not import Space models. Using dummy mocks. Admin functionality will be limited.")
 
-        def __str__(self): return self.name
+import logging
 
-        def __init__(self, id=99, name="Mock SpaceType", _state=None):
-            self.id = id
-            self.name = name
-            self._state = _state if _state is not None else models.base.ModelState()
+logger = logging.getLogger(__name__)
 
 
-    class MockBookableAmenity(models.Model):
-        amenity = None
-        space = None
-        objects = MockManager()
-        id = None
-        _state = None
-
-        def __str__(self): return "Mock BookableAmenity"
-
-        def __init__(self, id=1, amenity=None, space=None, _state=None):
-            self.id = id
-            self.amenity = amenity if amenity is not None else MockSpaceType(id=98)
-            self.space = space if space is not None else MockSpace(id=97)
-            self._state = _state if _state is not None else models.base.ModelState()
-
-
-    Space = MockSpace
-    SpaceType = MockSpaceType
-    BookableAmenity = MockBookableAmenity
-    logger.warning(
-        "Warning: Missing modules from 'spaces' app. Using robust mock objects to maintain functionality in bookings/admin/booking_admin.py. Functionality may be limited.")
-
-
+# --- 明确移除所有 Mock 对象定义代码 ---
+# (原文件中此部分已被删除或注释，此处不再包含以保持代码整洁)
 # --- Mock 定义结束 ---
 
 @admin.register(Booking)
@@ -228,6 +74,7 @@ class BookingAdmin(GuardedModelAdmin):
         ('审核信息', {'fields': ('admin_notes', ('reviewed_by', 'reviewed_at'))}),
         ('系统信息', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)})
     )
+    # 确保 reviewed_at 在 readonly_fields 中，因为它由系统填充
     readonly_fields = ('created_at', 'updated_at', 'reviewed_at')
 
     actions = ['approve_bookings', 'reject_bookings', 'cancel_bookings', 'mark_completed_bookings', 'mark_checked_in',
@@ -268,7 +115,7 @@ class BookingAdmin(GuardedModelAdmin):
                                      'bookable_amenity__space')
         if not SPACES_MODELS_LOADED:
             messages.warning(request, "Space models not available. Bookings cannot be filtered by space permissions.")
-            return qs.none()
+            return qs.none()  # 如果无法导入 Space 模型，那么基于其权限的过滤是无法进行的
 
         # SpaceManager 的 get_queryset 依赖于对象级权限
         managed_spaces_ids = get_objects_for_user(
@@ -314,7 +161,7 @@ class BookingAdmin(GuardedModelAdmin):
 
         target_space = obj.space or (obj.bookable_amenity.space if obj.bookable_amenity else None)
         if not (target_space and SPACES_MODELS_LOADED): return False
-        # 针对特定预订对象，检查用户是否对该预订所在的 Scepace 拥有 can_view_space_bookings 对象级权限
+        # 针对特定预订对象，检查用户是否对该预订所在的 Space 拥有 can_view_space_bookings 对象级权限
         return request.user.has_perm('spaces.can_view_space_bookings', target_space)
 
     def has_add_permission(self, request):
@@ -346,7 +193,7 @@ class BookingAdmin(GuardedModelAdmin):
                 'approve_bookings', 'reject_bookings', 'cancel_bookings', 'mark_completed_bookings',
                 'mark_checked_in', 'mark_no_show_and_violate'
             ]
-            actions.pop('delete_selected', None)
+            actions.pop('delete_selected', None)  # 空间管理员不能批量删除
 
             filtered_actions = {}
             for action_name in space_manager_specific_actions:
@@ -354,173 +201,212 @@ class BookingAdmin(GuardedModelAdmin):
                     filtered_actions[action_name] = actions[action_name]
             return filtered_actions
         else:
-            if 'delete_selected' in actions: del actions['delete_selected']
+            if 'delete_selected' in actions: del actions[
+                'delete_selected']  # 超级用户可以批量删除，但通常建议禁用管理员批量删除操作，使用更细粒度的控制，这里暂时移除
             return actions
+
+    # --- Admin Actions 统一修改为 QuerySet.update() ---
+
+    def _process_booking_action(self, request, queryset, new_status, action_type, status_conditions,
+                                permission_codename=None, update_reviewer_info=False, check_end_time=False,
+                                create_violation=False, violation_type=None):
+        """
+        一个通用的 helper 方法来处理所有 Booking 状态相关的 Admin Actions。
+        """
+        if not request.user.is_authenticated:
+            self.message_user(request, "您没有权限执行此操作，请先登录。", messages.ERROR)
+            return 0, [], []
+
+        processed_count = 0
+        error_messages = []
+        warning_messages = []
+        violation_count = 0  # 仅用于 mark_no_show_and_violate
+
+        for booking in queryset:
+            logger.debug(f"Admin Action '{action_type}': Processing booking ID {booking.id}, "
+                         f"current status: {booking.status}, processing_status: {booking.processing_status}")
+
+            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
+            if not target_space and SPACES_MODELS_LOADED:  # 如果 Space 模型未加载，则无法基于 target_space 进行检查
+                error_messages.append(f"预订 {booking.id} 的目标空间无效，无法执行 '{action_type}'。")
+                logger.error(f"Admin Action '{action_type}': Booking {booking.id} has no valid target space.")
+                continue
+
+            # 权限检查
+            if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
+                    (getattr(request.user, 'is_space_manager', False) and permission_codename and \
+                     SPACES_MODELS_LOADED and request.user.has_perm(permission_codename, target_space))):
+                perm_needed = permission_codename if permission_codename else "ALL_ADMIN_PERMS"
+                error_messages.append(f"您没有权限对预订 {booking.id} 执行 '{action_type}' (需要 {perm_needed})。")
+                logger.warning(
+                    f"Admin Action '{action_type}': User {request.user.username} lacks permission '{perm_needed}' for booking {booking.id}.")
+                continue
+
+            # 状态检查
+            if booking.status not in status_conditions:
+                warning_messages.append(
+                    f"预订 {booking.id} 状态为 {booking.status}，无法执行 '{action_type}'。当前状态不允许此操作。")
+                logger.warning(
+                    f"Admin Action '{action_type}': Booking {booking.id} status is {booking.status}, not in allowed conditions: {status_conditions}.")
+                continue
+
+            # 结束时间检查 (例如 '未到场' 动作)
+            if check_end_time and booking.end_time >= timezone.now():
+                warning_messages.append(f"预订 {booking.id} 尚未结束，无法标记为未到场。")
+                logger.warning(
+                    f"Admin Action '{action_type}': Booking {booking.id} end time is not in the past for 'NO_SHOW'.")
+                continue
+
+            # 执行更新
+            try:
+                if booking.pk is None:
+                    error_messages.append(f"内部错误：选中的预订实例 {booking.id} 没有主键ID。")
+                    logger.critical(
+                        f"Admin Action '{action_type}': A selected booking instance ({booking.id}) has no PK. Highly unexpected.")
+                    continue
+
+                update_fields = {'status': new_status, 'updated_at': timezone.now()}
+                if update_reviewer_info:
+                    update_fields['reviewed_by'] = request.user
+                    update_fields['reviewed_at'] = timezone.now()
+
+                # 使用 QuerySet.update() 执行更新
+                # 再次过滤确保状态满足条件，处理并发
+                update_filter = Q(pk=booking.pk, status__in=status_conditions)
+                if check_end_time:  # 只有当需要检查 end_time 时才加入这个过滤条件
+                    update_filter &= Q(end_time__lt=timezone.now())
+
+                updated_rows = queryset.filter(update_filter).update(**update_fields)
+
+                if updated_rows > 0:
+                    processed_count += 1
+                    logger.info(
+                        f"Admin Action '{action_type}': Successfully updated booking ID: {booking.id} to {new_status}.")
+
+                    # 特殊处理：创建违规记录 (仅用于 mark_no_show_and_violate)
+                    if create_violation and target_space:
+                        space_type_for_violation = target_space.space_type if target_space else None
+                        if space_type_for_violation:
+                            Violation.objects.create(
+                                user=booking.user, booking=booking, space_type=space_type_for_violation,
+                                violation_type=violation_type,
+                                description=f"用户 {booking.user.get_full_name} 在 {getattr(target_space, 'name', '未知空间')} 预订中未到场。",
+                                issued_by=request.user, penalty_points=1
+                            )
+                            violation_count += 1
+                            logger.info(
+                                f"Admin Action '{action_type}': Created violation for booking ID: {booking.id}.")
+                        else:
+                            warning_messages.append(f"预订 {booking.id} 无法确定空间类型，未能创建违规记录。")
+                            logger.warning(
+                                f"Admin Action '{action_type}': Booking {booking.id} space type not found for violation.")
+
+                else:
+                    warning_messages.append(f"预订 {booking.id} 未被更新，可能其状态已不满足操作条件，或 ID 不匹配。")
+                    logger.warning(
+                        f"Admin Action '{action_type}': Booking {booking.id} (updated_rows=0) was not updated. Conditions not met.")
+
+            except IntegrityError as e:
+                error_messages.append(f"执行 '{action_type}' 失败 (预订 {booking.id})：数据库完整性错误（{e}）。")
+                logger.critical(f"Admin Action '{action_type}': IntegrityError for booking ID {booking.id}: {e}",
+                                exc_info=True)
+            except Exception as e:
+                error_messages.append(f"执行 '{action_type}' 失败 (预订 {booking.id})：未知错误（{e}）。")
+                logger.exception(f"Admin Action '{action_type}': Unexpected error for booking ID {booking.id}.")
+
+        return processed_count, error_messages, warning_messages, violation_count
 
     @admin.action(description="批准选择的预订")
     def approve_bookings(self, request, queryset):
-        if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
-                                                                messages.ERROR); return
-        approved_count = 0
-        for booking in queryset:
-            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-            if not target_space:
-                self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法批准。", messages.ERROR)
-                continue
-
-            if request.user.is_superuser or request.user.is_system_admin or \
-                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
-                        'spaces.can_approve_space_bookings', target_space)):
-                if booking.status == 'PENDING':
-                    booking.status = 'APPROVED'
-                    booking.reviewed_by = request.user
-                    booking.reviewed_at = timezone.now()
-                    booking.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
-                    approved_count += 1
-                else:
-                    self.message_user(request, f"预订 {booking.id} 状态为 {booking.status}，无法批准。", messages.WARNING)
-            else:
-                self.message_user(request, f"您没有权限批准预订 {booking.id}。", messages.ERROR)
-        self.message_user(request, f"成功批准了 {approved_count} 条预订。", messages.SUCCESS)
+        processed_count, error_messages, warning_messages, _ = self._process_booking_action(
+            request, queryset,
+            new_status=Booking.BOOKING_STATUS_APPROVED,
+            action_type="批准",
+            status_conditions=[Booking.BOOKING_STATUS_PENDING],
+            permission_codename='spaces.can_approve_space_bookings',
+            update_reviewer_info=True
+        )
+        for msg in error_messages: self.message_user(request, msg, messages.ERROR)
+        for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
+        if not error_messages and not warning_messages:
+            self.message_user(request, f"成功批准了 {processed_count} 条预订。", messages.SUCCESS)
 
     @admin.action(description="拒绝选择的预订")
     def reject_bookings(self, request, queryset):
-        if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
-                                                                messages.ERROR); return
-        rejected_count = 0
-        for booking in queryset:
-            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-            if not target_space:
-                self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法拒绝。", messages.ERROR)
-                continue
-
-            if request.user.is_superuser or request.user.is_system_admin or \
-                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
-                        'spaces.can_approve_space_bookings', target_space)):
-                if booking.status == 'PENDING':
-                    booking.status = 'REJECTED'
-                    booking.reviewed_by = request.user
-                    booking.reviewed_at = timezone.now()
-                    booking.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
-                    rejected_count += 1
-                else:
-                    self.message_user(request, f"预订 {booking.id} 状态为 {booking.status}，无法拒绝。", messages.WARNING)
-            else:
-                self.message_user(request, f"您没有权限拒绝预订 {booking.id}。", messages.ERROR)
-        self.message_user(request, f"成功拒绝了 {rejected_count} 条预订。", messages.SUCCESS)
+        processed_count, error_messages, warning_messages, _ = self._process_booking_action(
+            request, queryset,
+            new_status=Booking.BOOKING_STATUS_REJECTED,
+            action_type="拒绝",
+            status_conditions=[Booking.BOOKING_STATUS_PENDING],
+            permission_codename='spaces.can_approve_space_bookings',
+            update_reviewer_info=True
+        )
+        for msg in error_messages: self.message_user(request, msg, messages.ERROR)
+        for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
+        if not error_messages and not warning_messages:
+            self.message_user(request, f"成功拒绝了 {processed_count} 条预订。", messages.SUCCESS)
 
     @admin.action(description="取消选择的预订")
     def cancel_bookings(self, request, queryset):
-        if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
-                                                                messages.ERROR); return
-        cancelled_count = 0
-        for booking in queryset:
-            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-            if not target_space:
-                self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法取消。", messages.ERROR)
-                continue
-
-            if request.user.is_superuser or request.user.is_system_admin or \
-                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
-                        'spaces.can_cancel_space_bookings', target_space)):
-                if booking.status in ['PENDING', 'APPROVED', 'CHECKED_IN']:
-                    booking.status = 'CANCELLED'
-                    booking.reviewed_by = request.user
-                    booking.reviewed_at = timezone.now()
-                    booking.save(update_fields=['status', 'reviewed_by', 'reviewed_at'])
-                    cancelled_count += 1
-                else:
-                    self.message_user(request, f"预订 {booking.id} 状态为 {booking.status}，无法取消。", messages.WARNING)
-            else:
-                self.message_user(request, f"您没有权限取消预订 {booking.id}。", messages.ERROR)
-        self.message_user(request, f"成功取消了 {cancelled_count} 条预订。", messages.SUCCESS)
+        processed_count, error_messages, warning_messages, _ = self._process_booking_action(
+            request, queryset,
+            new_status=Booking.BOOKING_STATUS_CANCELLED,
+            action_type="取消",
+            status_conditions=[Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED,
+                               Booking.BOOKING_STATUS_CHECKED_IN],
+            permission_codename='spaces.can_cancel_space_bookings',
+            update_reviewer_info=True  # 取消操作也记录审核者
+        )
+        for msg in error_messages: self.message_user(request, msg, messages.ERROR)
+        for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
+        if not error_messages and not warning_messages:
+            self.message_user(request, f"成功取消了 {processed_count} 条预订。", messages.SUCCESS)
 
     @admin.action(description="标记为已完成")
     def mark_completed_bookings(self, request, queryset):
-        if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
-                                                                messages.ERROR); return
-        completed_count = 0
-        for booking in queryset:
-            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-            if not target_space:
-                self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法标记为已完成。", messages.ERROR)
-                continue
-
-            if request.user.is_superuser or request.user.is_system_admin or \
-                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
-                        'spaces.can_checkin_space_bookings', target_space)):
-                if booking.status == 'CHECKED_IN':
-                    booking.status = 'COMPLETED'
-                    booking.save(update_fields=['status'])
-                    completed_count += 1
-                else:
-                    self.message_user(request, f"预订 {booking.id} 状态为 {booking.status}，无法标记为已完成。",
-                                      messages.WARNING)
-            else:
-                self.message_user(request, f"您没有权限标记预订 {booking.id} 为已完成。", messages.ERROR)
-        self.message_user(request, f"成功标记 {completed_count} 条预订为已完成。", messages.SUCCESS)
+        processed_count, error_messages, warning_messages, _ = self._process_booking_action(
+            request, queryset,
+            new_status=Booking.BOOKING_STATUS_COMPLETED,
+            action_type="标记完成",
+            status_conditions=[Booking.BOOKING_STATUS_CHECKED_IN],
+            permission_codename='spaces.can_checkin_space_bookings',  # 通常签到和完成是同一个权限
+            update_reviewer_info=False  # 完成不记录审核者
+        )
+        for msg in error_messages: self.message_user(request, msg, messages.ERROR)
+        for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
+        if not error_messages and not warning_messages:
+            self.message_user(request, f"成功标记 {processed_count} 条预订为已完成。", messages.SUCCESS)
 
     @admin.action(description="标记为已签到")
     def mark_checked_in(self, request, queryset):
-        if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
-                                                                messages.ERROR); return
-        checked_in_count = 0
-        for booking in queryset:
-            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-            if not target_space:
-                self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法签到。", messages.ERROR)
-                continue
-
-            if request.user.is_superuser or request.user.is_system_admin or \
-                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
-                        'spaces.can_checkin_space_bookings', target_space)):
-                if booking.status in ['APPROVED', 'PENDING']:
-                    booking.status = 'CHECKED_IN'
-                    booking.save(update_fields=['status'])
-                    checked_in_count += 1
-                else:
-                    self.message_user(request, f"预订 {booking.id} 状态为 {booking.status}，无法签到。", messages.WARNING)
-            else:
-                self.message_user(request, f"您没有权限标记预订 {booking.id} 为已签到。", messages.ERROR)
-        self.message_user(request, f"成功标记 {checked_in_count} 条预订为已签到。", messages.SUCCESS)
+        processed_count, error_messages, warning_messages, _ = self._process_booking_action(
+            request, queryset,
+            new_status=Booking.BOOKING_STATUS_CHECKED_IN,
+            action_type="标记签到",
+            status_conditions=[Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED],
+            permission_codename='spaces.can_checkin_space_bookings',
+            update_reviewer_info=False  # 签到不记录审核者
+        )
+        for msg in error_messages: self.message_user(request, msg, messages.ERROR)
+        for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
+        if not error_messages and not warning_messages:
+            self.message_user(request, f"成功标记 {processed_count} 条预订为已签到。", messages.SUCCESS)
 
     @admin.action(description="标记为未到场并创建违规记录")
     def mark_no_show_and_violate(self, request, queryset):
-        if not request.user.is_authenticated: self.message_user(request, "您没有权限执行此操作，请先登录。",
-                                                                messages.ERROR); return
-        no_show_count = 0
-        violation_count = 0
-        for booking in queryset:
-            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
-            if not target_space:
-                self.message_user(request, f"预订 {booking.id} 的目标空间无效，无法标记为未到场或创建违规记录。",
-                                  messages.ERROR)
-                continue
-
-            if request.user.is_superuser or request.user.is_system_admin or \
-                    (getattr(request.user, 'is_space_manager', False) and request.user.has_perm(
-                        'spaces.can_checkin_space_bookings', target_space)):
-                if booking.status in ['PENDING', 'APPROVED'] and booking.end_time < timezone.now():
-                    booking.status = 'NO_SHOW'
-                    booking.save(update_fields=['status'])
-                    no_show_count += 1
-                    space_type_for_violation = target_space.space_type if target_space else None
-                    if space_type_for_violation:
-                        Violation.objects.create(
-                            user=booking.user, booking=booking, space_type=space_type_for_violation,
-                            violation_type='NO_SHOW',
-                            description=f"用户 {booking.user.get_full_name} 未在 {getattr(target_space, 'name', '未知空间')} 预订中签到。",
-                            issued_by=request.user, penalty_points=1
-                        )
-                        violation_count += 1
-                    else:
-                        self.message_user(request, f"预订 {booking.id} 无法确定空间类型，未能创建违规记录。",
-                                          messages.WARNING)
-                else:
-                    self.message_user(request, f"预订 {booking.id} 状态为 {booking.status} 或未过期，无法标记为未到场。",
-                                      messages.WARNING)
-            else:
-                self.message_user(request, f"您没有权限对预订 {booking.id} 进行未到场标记或创建违规记录。",
-                                  messages.ERROR)
-        self.message_user(request, f"成功标记 {no_show_count} 条预订为未到场，创建 {violation_count} 条违规记录。",
-                          messages.SUCCESS)
+        processed_count, error_messages, warning_messages, violation_count = self._process_booking_action(
+            request, queryset,
+            new_status=Booking.BOOKING_STATUS_NO_SHOW,
+            action_type="标记未到场",
+            status_conditions=[Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED],
+            permission_codename='spaces.can_mark_no_show_and_create_violation',
+            update_reviewer_info=False,
+            check_end_time=True,  # 需要检查结束时间已过
+            create_violation=True,
+            violation_type=Violation.VIOLATION_TYPE_NO_SHOW  # 从 Violation 模型获取常量
+        )
+        for msg in error_messages: self.message_user(request, msg, messages.ERROR)
+        for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
+        if not error_messages and not warning_messages:
+            self.message_user(request, f"成功标记 {processed_count} 条预订为未到场，创建 {violation_count} 条违规记录。",
+                              messages.SUCCESS)

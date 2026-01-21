@@ -1,4 +1,4 @@
-# bookings/service/violation_service.py (终极修订版)
+# bookings/service/violation_service.py
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction, models
 from django.utils import timezone
@@ -9,7 +9,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from bookings.models import Violation, UserPenaltyPointsPerSpaceType, SpaceTypeBanPolicy, UserSpaceTypeBan, Booking
+from bookings.models import Violation, UserPenaltyPointsPerSpaceType, SpaceTypeBanPolicy, UserSpaceTypeBan, Booking # import Booking
+
 from spaces.models import Space, SpaceType
 from users.models import CustomUser
 
@@ -222,8 +223,6 @@ def handle_violation_delete(violation_instance: Violation):
             logger.info(
                 f"User {violation_instance.user.id} penalty points changed from {penalty_points_record.current_penalty_points} to {current_total_active_points} after deleting violation {violation_instance.pk} in space type {target_space_type.id if target_space_type else 'Global'}.")
             penalty_points_record.current_penalty_points = current_total_active_points
-            # 注意：这里可以根据业务需求决定是否更新 last_violation_at
-            # penalty_points_record.last_violation_at = timezone.now()
             penalty_points_record.save()
 
         else:
@@ -243,50 +242,33 @@ class ViolationService(BaseService):
         'booking_dao': 'booking',
     }
 
-    # get_admin_violations_queryset: 保持现状，但更新权限检查以匹配新的权限定义
     def get_admin_violations_queryset(self, user: CustomUser) -> ServiceResult[QuerySet[Violation]]:
-        """
-        根据用户权限获取适用于 Admin 视图的违规记录 QuerySet。
-        视图层确保用户已认证并通过角色检查 `@is_admin_or_space_manager_required`。
-        Service 层负责根据细粒度权限和对象属性过滤数据。
-        """
-        # 系统管理员拥有最高权限，可查看所有违规记录
         if user.is_superuser or user.is_system_admin:
             return ServiceResult.success_result(
                 data=self.violation_dao.get_queryset(),
                 message="成功获取所有违规记录。"
             )
 
-        # 如果用户拥有查看所有违规记录的全局权限
         if user.is_authenticated and user.has_perm('bookings.can_view_all_violations'):
             return ServiceResult.success_result(
                 data=self.violation_dao.get_queryset(),
                 message="成功获取所有违规记录。"
             )
 
-        # 空间管理员可以查看其管理的空间类型相关的违规记录
-        # 这里的逻辑是：如果空间管理员可以管理某个空间（spaces.can_edit_space_info），
-        # 那么他们应该可以查看该空间类型下的违规记录
         if user.is_authenticated and user.is_space_manager:
             space_ct = ContentType.objects.get_for_model(Space)
             managed_spaces = get_objects_for_user(
-                user, 'spaces.can_view_space', klass=Space  # 可以查看的空间
+                user, 'spaces.can_view_space', klass=Space
             )
-            # 扩展：也可以通过 managed_by 字段直接关联的空间类型
             managed_spacetype_ids = []
             for space in managed_spaces:
                 if space.space_type:
                     managed_spacetype_ids.append(space.space_type.id)
 
-            # 同时考虑用户直接被授予 can_view_violation_record 的违规对象
             explicitly_viewable_violations = get_objects_for_user(
                 user, 'bookings.can_view_violation_record', klass=Violation
             )
 
-            # 过滤违规记录：
-            # 1. 违规记录直接关联的空间类型在用户管理的类型中
-            # 2. 违规记录的预订目标（空间或设施所在空间）的空间类型在用户管理的类型中
-            # 3. 用户直接被授予了查看权限的违规记录
             queryset = self.violation_dao.get_queryset().filter(
                 Q(space_type__id__in=managed_spacetype_ids) |
                 Q(booking__space__space_type__id__in=managed_spacetype_ids) |
@@ -298,34 +280,26 @@ class ViolationService(BaseService):
                 message="成功获取管理的违规记录。"
             )
 
-        # 默认情况下，无权限查看违规记录
         return ServiceResult.error_result(
             message="您没有权限查看违规记录。",
             error_code=ForbiddenException.default_code,
             status_code=ForbiddenException.status_code
         )
 
-    # save_violation: 细粒度权限检查
     @transaction.atomic
     def save_violation(self, user: CustomUser, violation_data: Dict[str, Any]) -> ServiceResult[Violation]:
-        """
-        创建新的违规记录或更新现有记录。
-        视图层确保用户已认证并通过角色检查。Service层在此进行细粒度权限检查。
-        """
         violation_id = violation_data.get('id')
         violation_obj = None
 
-        # --- 统一推断 space_type 逻辑 ---
-        # NOTE: 此处的 `booking` 应该是一个 Booking 实例，而不是 ID。
-        # 如果 `violation_data['booking']` 是一个 ID，需要在 Service 层转换为实例。
-        # 这里假设 `violation_data['booking']` 已经是实例。
         booking_instance_from_data = violation_data.get('booking')
         if not violation_data.get('space_type') and booking_instance_from_data:
-            if booking_instance_from_data.space and booking_instance_from_data.space.space_type:
-                violation_data['space_type'] = booking_instance_from_data.space.space_type
-            elif booking_instance_from_data.bookable_amenity and booking_instance_from_data.bookable_amenity.space \
-                    and booking_instance_from_data.bookable_amenity.space.space_type:
-                violation_data['space_type'] = booking_instance_from_data.bookable_amenity.space.space_type
+            # If booking_instance_from_data is a Booking instance, access its attributes
+            if isinstance(booking_instance_from_data, Booking): # Ensure it's a Booking instance
+                if booking_instance_from_data.space and booking_instance_from_data.space.space_type:
+                    violation_data['space_type'] = booking_instance_from_data.space.space_type
+                elif booking_instance_from_data.bookable_amenity and booking_instance_from_data.bookable_amenity.space \
+                        and booking_instance_from_data.bookable_amenity.space.space_type:
+                    violation_data['space_type'] = booking_instance_from_data.bookable_amenity.space.space_type
 
         if violation_id:
             violation_obj = self.violation_dao.get_violation_by_id(violation_id)
@@ -335,38 +309,28 @@ class ViolationService(BaseService):
                     status_code=NotFoundException.status_code
                 )
 
-            # --- 权限检查：编辑现有违规记录 ---
-            # 系统管理员拥有全局编辑权限
             if not user.is_system_admin:
-                # 检查用户是否拥有全局编辑违规记录权限
-                if user.has_perm('bookings.can_edit_violation_record'):  # 全局编辑
-                    pass  # 有全局权限，允许编辑
-                # 或者，如果是非全局管理员，检查是否是该记录所属空间类型的管理员
+                if user.has_perm('bookings.can_edit_violation_record'):
+                    pass
                 elif violation_obj.space_type and user.is_space_manager:
-                    # 检查 SpaceManager 是否有权限编辑其管理 SpaceType 下的违规
-                    # 简化为：如果 SpaceManager 可以管理此违规所属 SpaceType 下的任何 Space，则可以编辑
                     managed_spacetypes = self.violation_dao.get_managed_spacetypes_by_user(user)
                     if not managed_spacetypes.filter(id=violation_obj.space_type.id).exists():
                         return ServiceResult.error_result(
                             message=ForbiddenException.default_detail + " (无编辑此空间类型违规记录权限)",
                             error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                         )
-                else:  # 没有权限编辑
+                else:
                     return ServiceResult.error_result(
                         message=ForbiddenException.default_detail + " (无编辑违规记录权限)",
                         error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                     )
         else:
-            # --- 权限检查：创建新违规记录 ---
-            # 系统管理员拥有全局创建权限
             if not user.is_system_admin:
-                # 检查用户是否拥有全局创建违规记录权限
                 if not user.has_perm('bookings.can_create_violation_record'):
                     return ServiceResult.error_result(
                         message=ForbiddenException.default_detail + " (无创建违规记录权限)",
                         error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                     )
-                # 如果是空间管理员，但没有全局创建权限，可以检查是否能为自己管理的空间类型创建违规
                 if user.is_space_manager and 'space_type' in violation_data and violation_data['space_type']:
                     managed_spacetypes = self.violation_dao.get_managed_spacetypes_by_user(user)
                     if not managed_spacetypes.filter(id=violation_data['space_type'].id).exists():
@@ -374,12 +338,12 @@ class ViolationService(BaseService):
                             message=ForbiddenException.default_detail + " (无创建此空间类型违规记录权限)",
                             error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                         )
-                elif user.is_space_manager and 'space_type' not in violation_data:  # 无法推断空间类型，无法判断权限
+                elif user.is_space_manager and 'space_type' not in violation_data:
                     return ServiceResult.error_result(
                         message=ForbiddenException.default_detail + " (无法确定空间类型，无权创建违规记录)",
                         error_code=BadRequestException.default_code, status_code=BadRequestException.status_code
                     )
-                elif not user.is_space_manager:  # 非系统管理员也非空间管理员，没有创建权限
+                elif not user.is_space_manager:
                     return ServiceResult.error_result(
                         message=ForbiddenException.default_detail + " (无创建违规记录权限)",
                         error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
@@ -387,10 +351,8 @@ class ViolationService(BaseService):
 
         try:
             if violation_id:
-                # Store old attributes for signal processing
                 violation_obj._old_is_resolved = violation_obj.is_resolved
                 violation_obj._old_penalty_points = violation_obj.penalty_points
-                # Correctly call the module-level helper function
                 violation_obj._old_cached_space_type = _get_violation_target_space_type(violation_obj)
 
                 resolved_changed = 'is_resolved' in violation_data and violation_obj.is_resolved != violation_data[
@@ -411,7 +373,6 @@ class ViolationService(BaseService):
                 return ServiceResult.success_result(data=updated_violation, message="违规记录更新成功。")
             else:
                 new_violation = self.violation_dao.create_violation(user=violation_data['user'], **violation_data)
-                # Assign initial object-level permission for the creator if they are a SpaceManager
                 if user.is_space_manager and new_violation.space_type:
                     assign_perm('bookings.can_edit_violation_record', user, new_violation)
                     assign_perm('bookings.can_resolve_violation_record', user, new_violation)
@@ -420,30 +381,22 @@ class ViolationService(BaseService):
             logger.error(f"Error saving violation {violation_id if violation_id else 'new'}: {e}", exc_info=True)
             return self._handle_exception(e, default_message=f"保存违规记录失败: {e}")
 
-    # mark_violations_resolved: 细粒度权限检查
     @transaction.atomic
     def mark_violations_resolved(self, user: CustomUser, pk_list: List[int]) -> ServiceResult[Tuple[int, int]]:
-        """
-        标记一批违规记录为已解决。
-        视图层确保用户已认证并通过角色检查 `@is_admin_or_space_manager_required`。
-        Service层在此进行细粒度权限检查。
-        """
         resolved_count = 0
         warnings = []
         errors = []
 
-        # 首先检查用户是否拥有全局解决权限
         has_global_resolve_perm = user.is_system_admin or user.has_perm('bookings.can_resolve_violation_record')
 
         queryset = self.violation_dao.filter(pk__in=pk_list)
 
         for violation in queryset:
-            # 如果没有全局解决权限，则检查对象级权限
             if not has_global_resolve_perm and not user.has_perm('bookings.can_resolve_violation_record', violation):
                 errors.append(f"您没有权限解决违规 {violation.id}。")
                 logger.warning(
                     f"User {user.id} attempted to resolve violation {violation.id} without sufficient permission.")
-                continue  # 跳过当前违规
+                continue
 
             try:
                 if not violation.is_resolved:
@@ -469,24 +422,15 @@ class ViolationService(BaseService):
             message=f"成功解决了 {resolved_count} 条违约记录。", warnings=warnings
         )
 
-    # mark_no_show_and_violate: 细粒度权限检查
     @transaction.atomic
     def mark_no_show_and_violate(self, user: CustomUser, pk_list: List[int]) -> ServiceResult[Tuple[int, int]]:
-        """
-        标记一批预订为未到场并创建违规记录。
-        视图层 `@is_admin_or_space_manager_required` 确保了用户角色。
-        Service层在此进行细粒度权限检查。
-        这个方法将同时检查“标记未到场”的权限和“创建违规记录”的权限。
-        """
         no_show_count = 0
         violation_count = 0
         warnings = []
         errors = []
 
-        # 预先检查用户是否拥有全局的“标记未到场并创建违规”权限
         has_global_mark_no_show_and_violate_perm = user.is_system_admin or \
                                                     user.has_perm('bookings.can_mark_no_show_and_create_violation')
-        # 预先检查用户是否拥有全局的“创建违规记录”权限 (用于违规创建部分)
         has_global_create_violation_perm = user.is_system_admin or \
                                            user.has_perm('bookings.can_create_violation_record')
 
@@ -495,15 +439,11 @@ class ViolationService(BaseService):
         for booking in queryset:
             target_space = self.booking_dao.get_target_space_for_booking(booking)
 
-            # --- 权限检查 for Marking No-Show ---
             can_mark_single_no_show = has_global_mark_no_show_and_violate_perm or \
                                       (target_space and user.has_perm('spaces.can_checkin_space_bookings',
                                                                       target_space))
 
-            # --- 权限检查 for Creating Violation Record ---
             can_create_single_violation_record = has_global_create_violation_perm
-            # 或者，如果空间管理员可以为其管理的空间类型创建违规记录
-            # `self.violation_dao.get_managed_spacetypes_by_user(user)` 要求 Service 实例
             if not can_create_single_violation_record and user.is_space_manager and target_space and target_space.space_type:
                 managed_spacetypes = self.violation_dao.get_managed_spacetypes_by_user(user)
                 if managed_spacetypes.filter(id=target_space.space_type.id).exists():
@@ -512,12 +452,12 @@ class ViolationService(BaseService):
             if not can_mark_single_no_show:
                 errors.append(f"您没有权限对预订 {booking.id} 进行未到场标记。")
                 logger.warning(f"User {user.id} has no permission to mark no-show for booking {booking.id}.")
-                continue  # 跳过当前预订
+                continue
 
-            # 业务逻辑：状态和时间检查 (保持不变)
-            if booking.status in ['PENDING', 'APPROVED'] and booking.end_time < timezone.now():
+            # 使用常量
+            if booking.status in [Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED] and booking.end_time < timezone.now():
                 try:
-                    self.booking_dao.update(booking, status='NO_SHOW')
+                    self.booking_dao.update(booking, status=Booking.BOOKING_STATUS_NO_SHOW) # 使用常量
                     no_show_count += 1
 
                     space_type_for_violation = None
@@ -525,12 +465,11 @@ class ViolationService(BaseService):
                         space_type_for_violation = target_space.space_type
 
                     if space_type_for_violation and can_create_single_violation_record:
-                        # DAO 调用 create_violation 方法，该方法接收 user, booking, space_type 等参数
                         self.violation_dao.create_violation(
                             user=booking.user, booking=booking, space_type=space_type_for_violation,
-                            violation_type='NO_SHOW',
+                            violation_type='NO_SHOW', # Violation type is a string constant defined in models.py (or global constant)
                             description=f"用户 {booking.user.get_full_name} 未在 {getattr(target_space, 'name', '未知空间')} 预订中签到。",
-                            issued_by=user, penalty_points=1 # issued_by 是当前操作的用户
+                            issued_by=user, penalty_points=1
                         )
                         violation_count += 1
                         logger.info(

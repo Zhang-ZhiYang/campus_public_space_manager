@@ -42,7 +42,7 @@ class BaseService:
                 message=exc.detail if isinstance(exc.detail, str) else exc.default_detail,
                 errors=[str(exc.detail)] if isinstance(exc.detail, str) else (
                     [value for key, value in exc.detail.items()] if isinstance(exc.detail, dict) else [exc.default_detail]), # 确保 errors 是列表
-                error_code=exc.code,
+                error_code=getattr(exc, 'code', exc.default_code),
                 status_code=exc.status_code
             )
         # 2. 处理我们自定义的 ServiceException (如果 Service 层直接抛出基类的 ServiceException)

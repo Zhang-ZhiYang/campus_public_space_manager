@@ -13,9 +13,11 @@ from users.models import CustomUser
 from spaces.models import Space, BookableAmenity, SpaceType
 
 # ====================================================================
-# Booking 状态选择项
+# Global Choices Definitions (这些元组可在文件内被模型直接引用或从其他文件导入)
 # ====================================================================
-BOOKING_STATUS_CHOICES = (
+
+# Booking 状态选择项
+BOOKING_STATUS_CHOICES_TUPLE = (
     ('PENDING', '待审核'),
     ('APPROVED', '已批准'),
     ('REJECTED', '已拒绝'),
@@ -27,7 +29,7 @@ BOOKING_STATUS_CHOICES = (
 )
 
 # 新增预订处理状态，用于异步流程
-PROCESSING_STATUS_CHOICES = (
+PROCESSING_STATUS_CHOICES_TUPLE = (
     ('SUBMITTED', '已提交'),  # 初始状态，等待异步处理
     ('IN_PROGRESS', '处理中'),  # 异步任务正在执行深度校验
     ('CREATED', '已创建'),  # 深度校验通过，Booking 记录已创建/更新为最终状态（PENDING/APPROVED）
@@ -35,9 +37,7 @@ PROCESSING_STATUS_CHOICES = (
     ('FAILED_RUNTIME', '运行时错误'),  # 异步任务中发生未知错误
 )
 
-# ====================================================================
-# Violation 类型选择项
-# ====================================================================
+# Violation 类型选择项 (从 Violation 类内部移到全局作用域)
 VIOLATION_TYPE_CHOICES = (
     ('NO_SHOW', '未到场'),
     ('LATE_CANCELLATION', '迟取消'),
@@ -57,6 +57,29 @@ class Booking(models.Model):
     """
     objects = models.Manager()
 
+    # ====== 预订状态常量 (使用字符串字面值，便于直接赋值和比较) ======
+    BOOKING_STATUS_PENDING = 'PENDING'
+    BOOKING_STATUS_APPROVED = 'APPROVED'
+    BOOKING_STATUS_REJECTED = 'REJECTED'
+    BOOKING_STATUS_CANCELLED = 'CANCELLED'
+    BOOKING_STATUS_COMPLETED = 'COMPLETED'
+    BOOKING_STATUS_NO_SHOW = 'NO_SHOW'
+    BOOKING_STATUS_CHECKED_IN = 'CHECKED_IN'
+    BOOKING_STATUS_CHECKED_OUT = 'CHECKED_OUT'
+
+    # Booking 状态的 choices 元组，现在引用全局定义的元组
+    BOOKING_STATUS_CHOICES = BOOKING_STATUS_CHOICES_TUPLE
+
+    # ====== 预订处理状态常量 ======
+    PROCESSING_STATUS_SUBMITTED = 'SUBMITTED'
+    PROCESSING_STATUS_IN_PROGRESS = 'IN_PROGRESS'
+    PROCESSING_STATUS_CREATED = 'CREATED'
+    PROCESSING_STATUS_FAILED_VALIDATION = 'FAILED_VALIDATION'
+    PROCESSING_STATUS_FAILED_RUNTIME = 'FAILED_RUNTIME'
+
+    # Processing Status 的 choices 元组，现在引用全局定义的元组
+    PROCESSING_STATUS_CHOICES = PROCESSING_STATUS_CHOICES_TUPLE
+
     user = models.ForeignKey(
         CustomUser,
         on_delete=models.CASCADE,
@@ -69,7 +92,7 @@ class Booking(models.Model):
     request_uuid = models.UUIDField(
         default=uuid.uuid4,
         unique=True,
-        null=False,  # 必须有，防止重复请求
+        null=False,
         blank=False,
         verbose_name="请求唯一标识",
         help_text="用于标识一次预订请求的唯一UUID"
@@ -104,7 +127,7 @@ class Booking(models.Model):
         verbose_name="关联父空间",
         help_text="此预订所属的实际空间（无论是直接预订空间本身还是其内部设施）",
     )
-    expected_attendees = models.PositiveIntegerField(  # <-- 添加这个字段
+    expected_attendees = models.PositiveIntegerField(
         null=True, blank=True,
         verbose_name="预期参与人数",
         help_text="预订活动预期参与的人数，仅用于预订整个空间时检查容量。"
@@ -126,7 +149,7 @@ class Booking(models.Model):
     status = models.CharField(
         max_length=20,
         choices=BOOKING_STATUS_CHOICES,
-        default='PENDING',
+        default=BOOKING_STATUS_PENDING,  # 使用具名常量
         verbose_name="预订状态",
         help_text="预订的当前业务状态（例如：PENDING, APPROVED, CANCELLED）"
     )
@@ -135,7 +158,7 @@ class Booking(models.Model):
     processing_status = models.CharField(
         max_length=20,
         choices=PROCESSING_STATUS_CHOICES,
-        default='SUBMITTED',
+        default=PROCESSING_STATUS_SUBMITTED,  # 使用具名常量
         verbose_name="处理状态",
         help_text="异步处理流程中预订的当前状态（例如：SUBMITTED, IN_PROGRESS, CREATED, FAILED_VALIDATION）"
     )
@@ -166,7 +189,7 @@ class Booking(models.Model):
     class Meta:
         verbose_name = '预订'
         verbose_name_plural = verbose_name
-        ordering = ['-created_at']  # 优先按创建时间排序会更合理
+        ordering = ['-created_at']
         permissions = (
             ("can_view_all_bookings", "Can view all bookings across all spaces"),
             ("can_create_booking", "Can create new bookings"),
@@ -181,10 +204,10 @@ class Booking(models.Model):
             Index(fields=['user', 'start_time']),
             Index(fields=['space', 'start_time', 'end_time']),
             Index(fields=['bookable_amenity', 'start_time', 'end_time']),
-            Index(fields=['related_space', 'start_time', 'end_time']),  # 新增索引
+            Index(fields=['related_space', 'start_time', 'end_time']),
             Index(fields=['status']),
-            Index(fields=['processing_status']),  # 新增索引
-            Index(fields=['request_uuid']),  # 新增索引
+            Index(fields=['processing_status']),
+            Index(fields=['request_uuid']),
             Index(fields=['start_time']),
             Index(fields=['end_time']),
         ]
@@ -201,70 +224,52 @@ class Booking(models.Model):
                 f"[{self.get_status_display()}] ({self.get_processing_status_display()})")
 
     def clean(self):
-        """
-        精简后的 clean 方法，只进行模型自身的数据完整性校验。
-        所有复杂的业务逻辑（时间冲突、禁用、权限、每日限制等）已移至 Service 层。
-        """
         super().clean()
 
-        # 校验必须且只能指定一个目标：空间或设施实例。
         if not ((self.space is not None) ^ (self.bookable_amenity is not None)):
             raise ValidationError('预订必须且只能指定一个目标：空间或设施实例。')
 
-        # 自动填充 related_space 字段
         if self.space:
             self.related_space = self.space
         elif self.bookable_amenity and self.bookable_amenity.space:
             self.related_space = self.bookable_amenity.space
         else:
-            # 如果走到这里，说明 bookable_amenity 没有关联的 space，这是一个数据不一致。
             raise ValidationError('无法确定预订目标所属的空间。')
 
-        # 预订数量校验
         if self.booked_quantity <= 0:
             raise ValidationError({'booked_quantity': '预订数量必须大于0。'})
 
         if self.bookable_amenity:
-            # 预订设施时，数量不能超过设施总数量（这里进行初步校验，深度校验会再次确认）
             if self.bookable_amenity.quantity is not None and self.booked_quantity > self.bookable_amenity.quantity:
                 raise ValidationError(
                     {'booked_quantity': f"预订数量不能超过设施总数量 {self.bookable_amenity.quantity}。"}
                 )
         elif self.space:
-            # 预订整个空间时，数量必须为1
             if self.booked_quantity != 1:
                 raise ValidationError({'booked_quantity': '预订整个空间时，数量必须为1。'})
 
         if not self.user:
             raise ValidationError("预订用户不能为空。")
 
-        # 基础时间顺序校验
         if self.start_time is None or self.end_time is None:
             raise ValidationError('预订的开始时间和结束时间不能为空。')
         if self.start_time >= self.end_time:
             raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
 
-        # 仅对新创建的或未处理的预订进行“不能预订过去时间”的检查
-        # 允许历史预订的存在及状态修改（例如取消历史记录、标记NO_SHOW）
-        # `processing_status` 用于判断该 Booking 是否仍在“创建”流程中
-        if self.processing_status in ['SUBMITTED', 'IN_PROGRESS'] and self.start_time < timezone.now():
+        # 使用具名常量
+        if self.processing_status in [self.PROCESSING_STATUS_SUBMITTED,
+                                      self.PROCESSING_STATUS_IN_PROGRESS] and self.start_time < timezone.now():
             raise ValidationError({'start_time': '不能预订过去的时间。'})
 
     def save(self, *args, **kwargs):
-        """在保存前调用 full_clean()
-           注意：对于部分更新，kwargs.get('update_fields') 可以避免全量验证，
-           但这里为了简化和模型自身的强一致性，暂时保留 full_clean()。
-           Service 层将确保传入的数据是干净的。
-        """
         self.full_clean()
-        super().save(*args, **kwargs)
+        super().save(*args, *kwargs)
 
     def _get_related_object_dict(self, obj):
         if hasattr(obj, 'to_dict') and callable(obj.to_dict):
-            return obj.to_dict(include_related=False)  # 避免无限递归
+            return obj.to_dict(include_related=False)
         return {'id': obj.id, 'name': str(obj)} if obj else None
 
-    # to_dict 方法，用于缓存
     def to_dict(self, include_related: bool = True) -> dict:
         data = {
             'id': self.id,
@@ -293,9 +298,16 @@ class Booking(models.Model):
 # Violation Model (违约记录)
 # ====================================================================
 class Violation(models.Model):
-    # CRITICAL FIX: 使用默认的 models.Manager
     objects = models.Manager()
 
+    # VIOLATION_TYPE_CHOICES 现在是全局的，无需重复定义在类内部。
+    # 新增：定义违约类型常量，以便在代码中通过 Violation.VIOLATION_TYPE_XXX 访问
+    VIOLATION_TYPE_NO_SHOW = 'NO_SHOW'
+    VIOLATION_TYPE_LATE_CANCELLATION = 'LATE_CANCELLATION'
+    VIOLATION_TYPE_MISUSE_SPACE = 'MISUSE_SPACE'
+    VIOLATION_TYPE_DAMAGE_PROPERTY = 'DAMAGE_PROPERTY'
+    VIOLATION_TYPE_OCCUPY_OVERTIME = 'OCCUPY_OVERTIME'
+    VIOLATION_TYPE_OTHER = 'OTHER'
     user = models.ForeignKey(
         CustomUser,
         on_delete=models.CASCADE,
@@ -323,7 +335,7 @@ class Violation(models.Model):
     )
     violation_type = models.CharField(
         max_length=50,
-        choices=VIOLATION_TYPE_CHOICES,
+        choices=VIOLATION_TYPE_CHOICES,  # 现在引用全局定义的元组
         verbose_name="违约类型"
     )
     description = models.TextField(
@@ -759,28 +771,28 @@ class DailyBookingLimit(models.Model):
     """
     objects = models.Manager()
 
-    group = models.ForeignKey(  # 从 OneToOneField 改为 ForeignKey
+    group = models.ForeignKey(
         Group,
         on_delete=models.CASCADE,
-        related_name='daily_booking_limits',  # 改为 plural
+        related_name='daily_booking_limits',
         verbose_name="用户组",
         help_text="此每日预订限制规则应用的用户组。"
     )
-    space_type = models.ForeignKey(  # 新增 space_type 字段
+    space_type = models.ForeignKey(
         SpaceType,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        related_name='daily_booking_limits',  # 改为 plural
+        related_name='daily_booking_limits',
         verbose_name="限制应用空间类型",
         help_text="此每日预订限制规则应用的空间类型；为空则表示该组的全局限制"
     )
     max_bookings = models.PositiveIntegerField(
-        default=0,  # 0表示没有限制
+        default=0,
         verbose_name="每日最大预订次数",
         help_text="该组用户每天最多可以进行的预订次数。设置为0表示没有限制。"
     )
-    priority = models.PositiveIntegerField(  # 新增 priority 字段
+    priority = models.PositiveIntegerField(
         default=0,
         verbose_name="策略优先级",
         help_text="当多个策略（如全局和特定空间类型）满足条件时，数字越大优先级越高（0为最低）"
@@ -795,18 +807,17 @@ class DailyBookingLimit(models.Model):
     class Meta:
         verbose_name = '每日预订限制'
         verbose_name_plural = verbose_name
-        # 确保每个用户组对于每个空间类型（或全局）只有一个活跃限制
         unique_together = ('group', 'space_type')
-        ordering = ['group__name', '-priority']  # 默认按优先级排序
+        ordering = ['group__name', '-priority']
         permissions = [
             ("can_view_daily_booking_limits", "Can view daily booking limits"),
             ("can_manage_daily_booking_limits", "Can manage daily booking limits (add, change, delete)"),
         ]
         indexes = [
             Index(fields=['group']),
-            Index(fields=['space_type']),  # 新增索引
+            Index(fields=['space_type']),
             Index(fields=['is_active']),
-            Index(fields=['priority']),  # 新增索引
+            Index(fields=['priority']),
         ]
 
     def __str__(self):
@@ -817,7 +828,6 @@ class DailyBookingLimit(models.Model):
     def _get_related_object_dict(self, obj):
         if hasattr(obj, 'to_dict') and callable(obj.to_dict):
             return obj.to_dict(include_related=False)
-        # Assuming Group has an id and name. If not, adjust.
         return {'id': obj.id, 'name': str(obj.name)} if obj else None
 
     def to_dict(self, include_related: bool = True) -> dict:

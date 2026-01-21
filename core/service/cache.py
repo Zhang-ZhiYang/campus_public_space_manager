@@ -153,6 +153,7 @@ class CacheService:
 
         'bookings:daily_limit:effective_by_group_spacetype': 3600,  # 新增 DailyBookingLimitService 的缓存
         'bookings:user_exemption:detail': 3600 * 2,  # 新增：用于检查用户在特定空间类型下的活跃豁免状态
+        'bookings:booking_status:detail': 60,  # 新增：用于查询预订状态的缓存，可以更短
     }
 
     @classmethod
