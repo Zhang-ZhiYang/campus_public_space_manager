@@ -284,11 +284,16 @@ class BookingPreliminaryService(BaseService):
             # --- 每日预订限制检查 结束 ---
 
             # --- 资源冲突与容量检查 (核心逻辑) ---
-            effective_booking_capacity: int
+            # 根据业务需求更新逻辑
+            capacity_for_conflict_check: int # 新变量名，更清晰地表示用于冲突检查的容量
             if isinstance(target_obj, Space):
-                effective_booking_capacity = target_obj.capacity if target_obj.capacity is not None else 1
+                # 如果是空间，按照业务规则，只能被预订一次，所以冲突检查容量为 1
+                capacity_for_conflict_check = 1
+                logger.debug(f"Target {target_obj.name} (Space) has capacity_for_conflict_check: {capacity_for_conflict_check} (exclusive booking).")
             elif isinstance(target_obj, BookableAmenity):
-                effective_booking_capacity = target_obj.quantity if target_obj.quantity is not None else 1
+                # 如果是可预订设施，使用其自身的 quantity 作为冲突检查容量
+                capacity_for_conflict_check = target_obj.quantity if target_obj.quantity is not None else 1
+                logger.debug(f"Target {target_obj.amenity.name} (BookableAmenity) has capacity_for_conflict_check: {capacity_for_conflict_check}.")
             else:
                 raise InternalServerError(detail="未知预订目标类型，无法进行容量检查。",
                                           code="unknown_target_type_for_capacity")
@@ -312,13 +317,13 @@ class BookingPreliminaryService(BaseService):
                 new_start=start_time,
                 new_end=end_time,
                 booked_quantity=request_data.get('booked_quantity', 1),
-                total_capacity=effective_booking_capacity,
+                total_capacity=capacity_for_conflict_check, # <-- 使用新的容量变量
                 buffer_time_minutes=effective_buffer_time_minutes
             )
 
             if not is_available:
                 logger.warning(f"Booking for {target_obj} failed time/capacity conflict check. "
-                               f"Occupancy exceeds effective capacity {effective_booking_capacity} with new booking.")
+                               f"Occupancy exceeds effective capacity {capacity_for_conflict_check} with new booking.") # 修正日志信息
                 raise ConflictException(detail="预订时间段与现有待审核或已批准的预订冲突，或资源容量不足。",
                                         code="booking_time_capacity_conflict")
             logger.info(f"Booking for {target_obj} passed time/capacity conflict check.")
@@ -334,6 +339,7 @@ class BookingPreliminaryService(BaseService):
             logger.info(f"Booking for {target_obj} passed user group permission check.")
 
             # --- 预期参与人数检查 ---
+            # Space.capacity 字段只作为物理容纳人数的展示，此处进行预期人数与物理容量的检查
             if isinstance(target_obj, Space) and request_data.get('expected_attendees') is not None:
                 expected_attendees = request_data['expected_attendees']
                 if expected_attendees <= 0:
@@ -380,7 +386,7 @@ class BookingPreliminaryService(BaseService):
                     'booking_id': initial_booking_instance.pk,
                     'request_uuid': str(initial_booking_instance.request_uuid),
                 },
-                message="预订请求已初步验证并提交进行深层处理。",
+                message="请求已在处理中或已完成。",
                 status_code=http_status.HTTP_202_ACCEPTED
             )
 
