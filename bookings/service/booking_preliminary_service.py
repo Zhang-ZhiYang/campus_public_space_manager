@@ -1,27 +1,24 @@
-# bookings/service/booking_preliminary_service.py
-
 import logging
 from typing import Dict, Any, Tuple, Optional, Union
-from datetime import datetime, date
+from datetime import datetime, date, timedelta # 导入 timedelta
 
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status as http_status
 
+from bookings.tasks import booking_tasks
 from core.dao import DAOFactory
 from core.service.base import BaseService
 from core.service.service_result import ServiceResult
 from core.service.factory import ServiceFactory
 from core.utils.exceptions import ServiceException, NotFoundException, BadRequestException, InternalServerError, \
-    ConflictException, ForbiddenException
+    ConflictException, ForbiddenException, CustomAPIException
 from core.utils import date_utils
 from bookings.service.common_helpers import CommonBookingHelpers
 
 from users.models import CustomUser
 from spaces.models import Space, BookableAmenity, SpaceType
 from bookings.models import Booking
-
-from bookings.tasks import booking_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +69,7 @@ class BookingPreliminaryService(BaseService):
             if existing_booking:
                 if existing_booking.processing_status != Booking.PROCESSING_STATUS_FAILED_VALIDATION:
                     logger.info(
-                        f"Idempotency check: Request UUID {request_uuid} already processed or in progress (status: {existing_booking.processing_status}).")
+                        f"Idempotency check: Request UUID {request_uuid} already processed or in progress (status: {existing_booking.processing_status}). Returning 200 OK.")
                     return ServiceResult.success_result(
                         data={
                             'booking_id': existing_booking.pk,
@@ -139,9 +136,14 @@ class BookingPreliminaryService(BaseService):
                 booked_quantity = request_data.get('booked_quantity', 1)
                 if booked_quantity <= 0:
                     raise BadRequestException(detail="预订数量必须大于0。", code="invalid_booking_quantity")
+                # Removed the simple 'booked_quantity > target_obj.quantity' check here for BookableAmenity
+                # as it's now covered by the is_time_slot_available with total_capacity.
+                # However, for a direct "new booked quantity exceeds total amenity quantity" we can still keep it
+                # Re-adding this explicit check makes it clearer and handles simple cases earlier.
                 if target_obj.quantity is not None and booked_quantity > target_obj.quantity:
-                    raise BadRequestException(detail=f"预订数量不能超过设施总数量 {target_obj.quantity}。",
+                    raise BadRequestException(detail=f"预订数量 {booked_quantity} 不能超过设施总数量 {target_obj.quantity}。",
                                               code="exceeds_amenity_capacity")
+
             else:
                 raise BadRequestException(detail="预订必须指定空间ID或设施实例ID。", code="missing_booking_target")
 
@@ -200,6 +202,10 @@ class BookingPreliminaryService(BaseService):
                                            (target_space_type.default_available_end_time if target_space_type else None)
             effective_buffer_time_minutes = target_space.buffer_time_minutes if target_space.buffer_time_minutes is not None else \
                 (target_space_type.default_buffer_time_minutes if target_space_type else 0)
+            # 修正日志级别，因为之前误用 error
+            logger.debug(f"Resolved effective_buffer_time_minutes: {effective_buffer_time_minutes} "
+                         f"(from Space: {target_space.buffer_time_minutes}, "
+                         f"SpaceType: {target_space_type.default_buffer_time_minutes if target_space_type else 'N/A'})")
 
             try:
                 date_utils.validate_booking_duration(start_time, end_time, effective_min_duration,
@@ -260,7 +266,7 @@ class BookingPreliminaryService(BaseService):
                     )
                 logger.info(f"User {user.pk} passed daily booking limit check for space type {target_space_type.name if target_space_type else 'None'} (limit: {effective_space_type_limit}, current: {current_bookings_count_for_space_type}).")
 
-            # 2. 检查用户在所有空间类型下的每日总限制 (新逻辑)
+            # 2. 检查用户在所有空间类型下的每日总限制
             effective_total_daily_limit = daily_limit_service.get_effective_total_daily_limit(user)
 
             if effective_total_daily_limit > 0:
@@ -272,7 +278,6 @@ class BookingPreliminaryService(BaseService):
                                Booking.BOOKING_STATUS_CHECKED_IN]
                 )
 
-                # 对于新创建的预订，需要加上本次预订的数量（通常是1）
                 if current_total_bookings_count + 1 > effective_total_daily_limit:
                     raise ServiceException(
                         message=f"您当日所有空间类型的预订总次数已达最大限制 ({effective_total_daily_limit}次)。",
@@ -284,49 +289,89 @@ class BookingPreliminaryService(BaseService):
             # --- 每日预订限制检查 结束 ---
 
             # --- 资源冲突与容量检查 (核心逻辑) ---
-            # 根据业务需求更新逻辑
-            capacity_for_conflict_check: int # 新变量名，更清晰地表示用于冲突检查的容量
+            capacity_for_conflict_check: int
             if isinstance(target_obj, Space):
-                # 如果是空间，按照业务规则，只能被预订一次，所以冲突检查容量为 1
                 capacity_for_conflict_check = 1
                 logger.debug(f"Target {target_obj.name} (Space) has capacity_for_conflict_check: {capacity_for_conflict_check} (exclusive booking).")
             elif isinstance(target_obj, BookableAmenity):
-                # 如果是可预订设施，使用其自身的 quantity 作为冲突检查容量
                 capacity_for_conflict_check = target_obj.quantity if target_obj.quantity is not None else 1
                 logger.debug(f"Target {target_obj.amenity.name} (BookableAmenity) has capacity_for_conflict_check: {capacity_for_conflict_check}.")
             else:
                 raise InternalServerError(detail="未知预订目标类型，无法进行容量检查。",
                                           code="unknown_target_type_for_capacity")
 
+            # --- START OF MODIFICATION ---
+            # 在调用 DAO 之前，根据缓冲时间调整查询的开始和结束时间
+            query_start_time_with_buffer = start_time - timedelta(minutes=effective_buffer_time_minutes)
+            query_end_time_with_buffer = end_time + timedelta(minutes=effective_buffer_time_minutes)
+
+            # 获取所有与【带缓冲的新预订时间段】重叠的活跃预订
             overlapping_active_bookings_qs = self.booking_dao.get_overlapping_bookings(
                 target_entity=target_obj,
-                start_time=start_time,
-                end_time=end_time,
+                # 注意：这里传递的是已经包含了缓冲的查询时间窗口
+                start_time=query_start_time_with_buffer, # <--- 修改点
+                end_time=query_end_time_with_buffer,     # <--- 修改点
             )
 
+            # 记录详细信息，以便诊断为何冲突检查可能失效
             logger.debug(
-                f"Time conflict check: Found {overlapping_active_bookings_qs.count()} overlapping active bookings for {target_obj} between {start_time} and {end_time}.")
-
+                f"Preliminary Time conflict check for {target_obj} (PK:{getattr(target_obj, 'pk', 'N/A')}) between "
+                f"ORIGINAL {start_time.isoformat()} and {end_time.isoformat()}. "
+                f"DAO query range (with buffer): {query_start_time_with_buffer.isoformat()} - {query_end_time_with_buffer.isoformat()}. "
+                f"New booking quantity: {request_data.get('booked_quantity', 1)}. Total capacity: {capacity_for_conflict_check}."
+            )
             booked_slots = [
                 {'start_time': b.start_time, 'end_time': b.end_time, 'booked_quantity': b.booked_quantity}
                 for b in overlapping_active_bookings_qs
             ]
+            logger.debug(f"Found {len(booked_slots)} overlapping active bookings. Details: {booked_slots}")
 
             is_available = CommonBookingHelpers.is_time_slot_available(
                 booked_slots=booked_slots,
-                new_start=start_time,
-                new_end=end_time,
+                # 这里仍然传递原始的新预订时间，因为 common_helpers 内部会再次应用缓冲
+                new_start=start_time, # <--- 保持原始时间
+                new_end=end_time,     # <--- 保持原始时间
                 booked_quantity=request_data.get('booked_quantity', 1),
-                total_capacity=capacity_for_conflict_check, # <-- 使用新的容量变量
+                total_capacity=capacity_for_conflict_check,
                 buffer_time_minutes=effective_buffer_time_minutes
             )
+            # --- END OF MODIFICATION ---
 
+            # 修改点：更具体地返回冲突原因
             if not is_available:
-                logger.warning(f"Booking for {target_obj} failed time/capacity conflict check. "
-                               f"Occupancy exceeds effective capacity {capacity_for_conflict_check} with new booking.") # 修正日志信息
-                raise ConflictException(detail="预订时间段与现有待审核或已批准的预订冲突，或资源容量不足。",
+                detailed_conflict_messages = []
+                for conf_booking in overlapping_active_bookings_qs:
+                    entity_name = ""
+                    entity_type = ""
+                    if conf_booking.space and not conf_booking.bookable_amenity: # Direct space booking
+                        entity_name = conf_booking.space.name
+                        entity_type = "空间"
+                    elif conf_booking.bookable_amenity and conf_booking.bookable_amenity.amenity: # Amenity booking
+                        entity_name = conf_booking.bookable_amenity.amenity.name
+                        entity_type = "设施"
+                    elif conf_booking.related_space: # Fallback
+                         entity_name = conf_booking.related_space.name
+                         entity_type = "关联空间"
+
+                    detailed_conflict_messages.append(
+                        f"{entity_type} '{entity_name}' (ID: {conf_booking.pk}) "
+                        f"在 [{conf_booking.start_time.strftime('%H:%M')}-{conf_booking.end_time.strftime('%H:%M')}]"
+                    )
+
+                if detailed_conflict_messages:
+                    conflict_reason = "预订失败。与以下预订时间冲突或容量不足：\n" + "\n".join(
+                        [f"{i+1}. {msg}" for i, msg in enumerate(detailed_conflict_messages)]
+                    )
+                else:
+                    # 这应该是一个不常发生的 fallback，因为如果 is_available 返回 False，
+                    # 那么 overlapping_active_bookings_qs 应该有内容。
+                    conflict_reason = "预订时间段与现有预订冲突，但未能识别具体冲突细节或资源容量不足。"
+
+                logger.warning(f"Booking for {target_obj} failed time/capacity conflict check at preliminary stage. "
+                               f"Conflict reason: {conflict_reason}")
+                raise ConflictException(detail=conflict_reason,
                                         code="booking_time_capacity_conflict")
-            logger.info(f"Booking for {target_obj} passed time/capacity conflict check.")
+            logger.info(f"Booking for {target_obj} passed time/capacity conflict check at preliminary stage.")
             # --- 资源冲突与容量检查 结束 ---
 
             # --- 权限检查 ---
@@ -339,7 +384,6 @@ class BookingPreliminaryService(BaseService):
             logger.info(f"Booking for {target_obj} passed user group permission check.")
 
             # --- 预期参与人数检查 ---
-            # Space.capacity 字段只作为物理容纳人数的展示，此处进行预期人数与物理容量的检查
             if isinstance(target_obj, Space) and request_data.get('expected_attendees') is not None:
                 expected_attendees = request_data['expected_attendees']
                 if expected_attendees <= 0:
@@ -363,6 +407,8 @@ class BookingPreliminaryService(BaseService):
             if target_obj:
                 if isinstance(target_obj, Space):
                     required_booking_fields['space'] = target_obj
+                    # For spaces, capacity is 1 booking for the entire space, so booked_quantity for space should be 1
+                    required_booking_fields['booked_quantity'] = 1 # 强制预订空间时数量为1
                 elif isinstance(target_obj, BookableAmenity):
                     required_booking_fields['bookable_amenity'] = target_obj
 
@@ -386,28 +432,21 @@ class BookingPreliminaryService(BaseService):
                     'booking_id': initial_booking_instance.pk,
                     'request_uuid': str(initial_booking_instance.request_uuid),
                 },
-                message="请求已在处理中或已完成。",
+                message="预订请求已提交，正在处理中。",
                 status_code=http_status.HTTP_202_ACCEPTED
             )
 
         except ServiceException as e:
-            logger.warning(f"Preliminary validation failed (ServiceException): {e.message}")
-            if e.error_code == "booking_time_capacity_conflict" or e.error_code == "daily_booking_limit_exceeded" or e.error_code == "total_daily_booking_limit_exceeded":
-                e.status_code = http_status.HTTP_409_CONFLICT # 这里将所有预订冲突和限制错误统一返回409
+            logger.warning(f"Preliminary validation failed (ServiceException): {e.message} (Code: {e.error_code})")
+            if e.error_code in ["booking_time_capacity_conflict", "daily_booking_limit_exceeded", "total_daily_booking_limit_exceeded", "request_uuid_failed_previous_validation", "user_banned"]:
+                e.status_code = http_status.HTTP_409_CONFLICT
             raise e
-        except NotFoundException as e:
-            logger.warning(f"Preliminary validation failed (NotFoundException): {e.detail}")
-            raise e
-        except BadRequestException as e:
-            logger.warning(f"Preliminary validation failed (BadRequestException): {e.detail}")
-            raise e
-        except ForbiddenException as e:
-            logger.warning(f"Preliminary validation failed (ForbiddenException): {e.detail}")
-            raise e
-        except ConflictException as e:
-            logger.warning(f"Preliminary validation failed (ConflictException): {e.detail}")
+        except CustomAPIException as e:
+            logger.warning(f"Preliminary validation failed (CustomAPIException): {e.detail}")
+            if isinstance(e, ConflictException):
+                e.status_code = http_status.HTTP_409_CONFLICT
             raise e
         except Exception as e:
             logger.exception(
                 f"Unhandled error during preliminary booking validation for user {user.pk}, request_uuid {request_data.get('request_uuid')}.")
-            raise InternalServerError(detail=f"初步预订验证失败，发生未知错误: {str(e)}")
+            raise InternalServerError(detail=f"初步预订验证失败，发生未知错误: {str(e)}", code="preliminary_validation_runtime_error")

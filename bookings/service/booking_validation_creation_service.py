@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, Tuple, Optional, Union
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date # 导入 timedelta
 
 from django.db import transaction
 from django.db.models import F, Sum, Q
@@ -206,10 +206,16 @@ class BookingValidationCreationService(BaseService):
                             code="exceeds_space_physical_capacity_locked")
                 logger.info(f"Booking {booking_id} passed expected attendees check (locked).")
 
+                # --- START OF MODIFICATION ---
+                # 在调用 DAO 之前，根据缓冲时间调整查询的开始和结束时间
+                query_start_time_with_buffer = booking_instance.start_time - timedelta(minutes=effective_buffer_time_minutes)
+                query_end_time_with_buffer = booking_instance.end_time + timedelta(minutes=effective_buffer_time_minutes)
+
                 overlapping_bookings_qs = self.booking_dao.get_overlapping_bookings(
                     target_entity=target_obj,
-                    start_time=booking_instance.start_time,
-                    end_time=booking_instance.end_time,
+                    # 注意：这里传递的是已经包含了缓冲的查询时间窗口
+                    start_time=query_start_time_with_buffer, # <--- 修改点
+                    end_time=query_end_time_with_buffer,     # <--- 修改点
                     exclude_booking_id=booking_instance.pk if booking_instance.pk else None
                 ).select_for_update()
 
@@ -217,6 +223,7 @@ class BookingValidationCreationService(BaseService):
                              f"Target: {target_obj} (PK:{getattr(target_obj, 'pk', 'N/A')}), "
                              f"Booking Quantity: {booking_instance.booked_quantity}, "
                              f"Effective Capacity: {effective_booking_capacity}. "
+                             f"DAO query range (with buffer): {query_start_time_with_buffer.isoformat()} - {query_end_time_with_buffer.isoformat()}. " # <--- 添加日志
                              f"Found {overlapping_bookings_qs.count()} overlapping (PENDING/APPROVED/CHECKED_IN) bookings.")
 
                 booked_slots = [
@@ -226,17 +233,46 @@ class BookingValidationCreationService(BaseService):
 
                 is_available = CommonBookingHelpers.is_time_slot_available(
                     booked_slots=booked_slots,
-                    new_start=booking_instance.start_time,
-                    new_end=booking_instance.end_time,
+                    # 这里仍然传递原始的新预订时间，因为 common_helpers 内部会再次应用缓冲
+                    new_start=booking_instance.start_time, # <--- 保持原始时间
+                    new_end=booking_instance.end_time,     # <--- 保持原始时间
                     booked_quantity=booking_instance.booked_quantity,
                     total_capacity=effective_booking_capacity,
                     buffer_time_minutes=effective_buffer_time_minutes
                 )
+                # --- END OF MODIFICATION ---
 
+                # 修改点：更具体地返回冲突原因
                 if not is_available:
+                    detailed_conflict_messages = []
+                    for conf_booking in overlapping_bookings_qs:
+                        entity_name = ""
+                        entity_type = ""
+                        if conf_booking.space and not conf_booking.bookable_amenity:  # Direct space booking
+                            entity_name = conf_booking.space.name
+                            entity_type = "空间"
+                        elif conf_booking.bookable_amenity and conf_booking.bookable_amenity.amenity:  # Amenity booking
+                            entity_name = conf_booking.bookable_amenity.amenity.name
+                            entity_type = "设施"
+                        elif conf_booking.related_space:  # Fallback
+                            entity_name = conf_booking.related_space.name
+                            entity_type = "关联空间"
+
+                        detailed_conflict_messages.append(
+                            f"{entity_type} '{entity_name}' (ID: {conf_booking.pk}) "
+                            f"在 [{conf_booking.start_time.strftime('%H:%M')}-{conf_booking.end_time.strftime('%H:%M')}]"
+                        )
+
+                    if detailed_conflict_messages:
+                        conflict_reason = "预订失败。与以下预订时间冲突或容量不足：\n" + "\n".join(
+                            [f"{i + 1}. {msg}" for i, msg in enumerate(detailed_conflict_messages)]
+                        )
+                    else:
+                        conflict_reason = "预订时间段与现有预订冲突，但未能识别具体冲突细节或资源容量不足。"
+
                     logger.warning(f"Booking {booking_id} failed resource conflict check (deep validation). "
-                                   f"Occupancy exceeds effective capacity {effective_booking_capacity}.")
-                    raise ConflictException(detail="预订时间段与现有预订冲突或资源容量不足。",
+                                   f"Conflict reason: {conflict_reason}")
+                    raise ConflictException(detail=conflict_reason,
                                             code="booking_time_conflict_locked")
                 logger.info(f"Booking {booking_id} passed resource conflict check (deep validation).")
 

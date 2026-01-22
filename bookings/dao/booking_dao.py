@@ -228,23 +228,36 @@ class BookingDAO(BaseDAO):
         """
         查找在指定时间段内与给定空间或可预订设施实例冲突的预订。
         冲突定义：预订时间段重叠，且状态为 'PENDING' 或 'APPROVED'。
+        新的逻辑：当预订空间时，检查所有关联设施的预订；当预订设施时，检查其父空间的预订。
         """
 
         q_time_overlap = Q(end_time__gt=start_time) & Q(start_time__lt=end_time)
 
+        # 核心修改：定义更复杂的 q_target 来处理父子资源冲突
         q_target = Q()
         if isinstance(target_entity, Space):
-            q_target = Q(space=target_entity, bookable_amenity__isnull=True)
-            logger.debug(f"Target entity is Space {target_entity.pk}. Querying for direct space bookings only.")
+            # 如果目标是 Space，需要检查：
+            # 1. 直接预订此 Space 的记录 (space=target_entity)
+            # 2. 预订此 Space 下任何 BookableAmenity 的记录 (bookable_amenity__space=target_entity)
+            q_target = (
+                Q(space=target_entity, bookable_amenity__isnull=True) |
+                Q(bookable_amenity__space=target_entity)
+            )
+            logger.debug(f"Target entity is Space {target_entity.pk}. Querying for direct space bookings AND its amenities bookings.")
         elif isinstance(target_entity, BookableAmenity):
-            q_target = Q(bookable_amenity=target_entity)
-            logger.debug(
-                f"Target entity is BookableAmenity {target_entity.pk}. Querying for direct amenity bookings only.")
+            # 如果目标是 BookableAmenity，需要检查：
+            # 1. 直接预订此 BookableAmenity 的记录 (bookable_amenity=target_entity)
+            # 2. 预订此 BookableAmenity 的父 Space 的记录 (space=target_entity.space)
+            q_target = (
+                Q(bookable_amenity=target_entity) |
+                Q(space=target_entity.space, bookable_amenity__isnull=True) # Ensure it's a direct space booking
+            )
+            logger.debug(f"Target entity is BookableAmenity {target_entity.pk}. Querying for direct amenity bookings AND its parent space bookings.")
         else:
             logger.error(f"Invalid target_entity type: {type(target_entity)}. Expected Space or BookableAmenity.")
             raise ValueError("Target entity must be a Space or BookableAmenity instance for conflict checks.")
 
-        if not q_target:  # If target_entity is invalid and q_target is empty
+        if not q_target: # If target_entity is invalid and q_target is empty
             return self.get_queryset().none()
 
         active_booking_for_conflict_check_statuses = [
