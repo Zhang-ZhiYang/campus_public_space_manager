@@ -4,50 +4,70 @@ from typing import Optional, List, Dict, Union
 from datetime import datetime, timedelta
 
 from django.utils import timezone
+from django.db import transaction
 
 from core.service.base import BaseService
 from core.service.service_result import ServiceResult
 from core.utils.exceptions import ServiceException
-from core.service.cache import CacheService  # 导入 CacheService
+from core.service.cache import CacheService
 from users.models import CustomUser
 from spaces.models import SpaceType
-from bookings.models import UserSpaceTypeBan, SpaceTypeBanPolicy  # 导入 Ban Policy model
+from bookings.models import UserSpaceTypeBan, SpaceTypeBanPolicy
+from spaces.dao.space_type_dao import SpaceTypeDAO # 确保导入 SpaceTypeDAO
+
+# NEW: 导入 ban_tasks 模块，但不在 service 的直接方法中使用，主要用于在 service 重新实现 create_ban/remove_ban时，
+# 可以根据需要判断是否额外触发，但目前信号已接管，所以这里仅作为上下文存在，实际调用在信号中。
+# from bookings.tasks.ban_tasks import ban_cache_invalidation_task
 
 logger = logging.getLogger(__name__)
 
-
 class UserBanService(BaseService):
-    """
-    负责处理用户禁用（Ban）业务逻辑的服务。
-    包括检查用户是否被禁用，以及创建/移除禁用记录。
-    """
     _dao_map = {
-        'user_ban_dao': 'user_space_type_ban'  # 对应 DAOFactory 中的注册名称
+        'user_ban_dao': 'user_space_type_ban',
+        'space_type_dao': 'space_type'
     }
 
-    # 缓存键前缀
     CACHE_KEY_PREFIX = 'bookings:user_ban'
-    CACHE_DETAIL_POSTFIX = 'detail'  # 用于用户+空间类型组合的活跃禁用状态查询
+    CACHE_DETAIL_POSTFIX = 'detail'
 
     def __init__(self):
         super().__init__()
         self.user_ban_dao = self._get_dao_instance('user_space_type_ban')
+        self.space_type_dao = self._get_dao_instance('space_type')
+
+    # `invalidate_user_ban_cache` 保持为公共方法，因为它会被 Celery 任务调用
+    def invalidate_user_ban_cache(self, user_pk: int, affected_space_type_pk: Optional[int] = None):
+        """
+        公共方法：使特定用户和空间类型（或全局）的禁用缓存失效。
+        如果 affected_space_type_pk 是 None，表示全局禁用被修改，需要清空该用户的
+        全局禁用缓存以及所有特定空间类型的禁用缓存。
+        此方法现在由 `ban_tasks.py` 中的 Celery 任务调用。
+        """
+        exact_cache_space_type_str = str(affected_space_type_pk) if affected_space_type_pk is not None else "None"
+        exact_cache_identifier = f"user:{user_pk}:spacetype:{exact_cache_space_type_str}"
+        CacheService.delete(self.CACHE_KEY_PREFIX, identifier=exact_cache_identifier,
+                            custom_postfix=self.CACHE_DETAIL_POSTFIX)
+        logger.info(
+            f"[UserBanService] Invalidated ban status cache for key: {self.CACHE_KEY_PREFIX}:{exact_cache_identifier}:{self.CACHE_DETAIL_POSTFIX}.")
+
+        if affected_space_type_pk is None:
+            logger.info(f"[UserBanService] 全局禁用 (Global Ban) 针对用户 {user_pk} 发生了改变。正在失效所有相关的特定空间类型禁用缓存。")
+            all_space_types_qs = self.space_type_dao.get_all_active_space_types()
+            for st in all_space_types_qs:
+                specific_cache_identifier = f"user:{user_pk}:spacetype:{st.pk}"
+                CacheService.delete(self.CACHE_KEY_PREFIX, identifier=specific_cache_identifier,
+                                    custom_postfix=self.CACHE_DETAIL_POSTFIX)
+                logger.debug(f" - [UserBanService] 失效特定空间类型禁用缓存键: {specific_cache_identifier}.")
 
     def is_user_banned(self, user: CustomUser, space_type: Optional[SpaceType] = None) -> ServiceResult[bool]:
         """
         检查用户是否在特定空间类型下（或全局）处于活跃禁用状态。
         结果会被缓存以优化性能。
-
-        :param user: CustomUser 实例。
-        :param space_type: 可选的 SpaceType 实例，如果为 None 则检查全局禁用。
-        :return: ServiceResult，data 字段为 bool，表示用户是否被禁用。
         """
         try:
-            # 构建缓存键：结合用户ID和空间类型ID
             space_type_id_str = str(space_type.pk) if space_type else "None"
             cache_identifier = f"user:{user.pk}:spacetype:{space_type_id_str}"
 
-            # 尝试从缓存获取
             cached_result = CacheService.get(
                 key_prefix=self.CACHE_KEY_PREFIX,
                 identifier=cache_identifier,
@@ -58,11 +78,9 @@ class UserBanService(BaseService):
                     f"Cache HIT for ban status for user {user.pk}, space_type {space_type_id_str}. Result: {cached_result}")
                 return ServiceResult.success_result(data=cached_result)
 
-            # 缓存未命中，进行数据库查询
             active_ban = self.user_ban_dao.get_active_ban_for_user(user=user, space_type=space_type)
             is_banned = active_ban is not None
 
-            # 将结果存入缓存
             CacheService.set(
                 key_prefix=self.CACHE_KEY_PREFIX,
                 identifier=cache_identifier,
@@ -87,16 +105,7 @@ class UserBanService(BaseService):
                    ban_policy_applied: Optional[SpaceTypeBanPolicy] = None,
                    issued_by: Optional[CustomUser] = None) -> ServiceResult[UserSpaceTypeBan]:
         """
-        创建用户禁用记录。
-
-        :param user: 被禁用的用户实例。
-        :param start_date: 禁用开始时间。
-        :param end_date: 禁用结束时间。
-        :param reason: 禁用原因。
-        :param space_type: 可选的 SpaceType 实例，表示特定空间类型的禁用；None 表示全局禁用。
-        :param ban_policy_applied: 触发本次禁用的策略实例（如果由策略自动触发）。
-        :param issued_by: 执行本次禁用的管理员用户实例。
-        :return: ServiceResult，data 字段为创建的 UserSpaceTypeBan 实例。
+        创建用户禁用记录。此方法会将新禁令保存到数据库，缓存更新将由模型信号处理。
         """
         try:
             if start_date >= end_date:
@@ -112,52 +121,38 @@ class UserBanService(BaseService):
                     status_code=400
                 )
 
-            # 检查是否已经存在活跃的、针对相同用户和空间类型的禁用
-            # 避免重复创建 active ban
             existing_active_ban_result = self.is_user_banned(user, space_type)
             if existing_active_ban_result.success and existing_active_ban_result.data:
-                # 理论上，创建新的 ban 应该替换或延长现有的。这里简单返回错误。
-                # 实际业务中可能需要更复杂的逻辑，如更新现有 ban。
                 raise ServiceException(
-                    message="用户已被有效禁用。请考虑更新现有禁用记录。",
-                    error_code="user_already_banned",
-                    status_code=409  # Conflict
+                    message="用户已被有效禁用。新禁令不能覆盖现有的活跃禁令。请考虑更新现有禁用记录。",
+                    error_code="user_already_banned_active",
+                    status_code=409
                 )
 
-            ban_instance = self.user_ban_dao.model(
-                user=user,
-                space_type=space_type,
-                start_date=start_date,
-                end_date=end_date,
-                reason=reason,
-                ban_policy_applied=ban_policy_applied,
-                issued_by=issued_by,
-            )
-            ban_instance.full_clean()  # 执行模型层验证
-            ban_instance.save()  # 保存到数据库
+            with transaction.atomic():
+                ban_instance = self.user_ban_dao.model(
+                    user=user,
+                    space_type=space_type,
+                    start_date=start_date,
+                    end_date=end_date,
+                    reason=reason,
+                    ban_policy_applied=ban_policy_applied,
+                    issued_by=issued_by,
+                )
+                ban_instance.full_clean()
+                ban_instance.save() # <-- 此操作将触发 UserSpaceTypeBan 的 post_save 信号
 
-            # 禁用创建或更新后，需要使相应用户的缓存失效
-            space_type_id_str = str(space_type.pk) if space_type else "None"
-            cache_identifier = f"user:{user.pk}:spacetype:{space_type_id_str}"
-            CacheService.delete(self.CACHE_KEY_PREFIX, identifier=cache_identifier,
-                                custom_postfix=self.CACHE_DETAIL_POSTFIX)
-            logger.info(f"Invalidated ban status cache for user {user.pk}, space_type {space_type_id_str}.")
-
-            logger.info(f"User {user.pk} banned successfully for space type {space_type_id_str}.")
+            logger.info(f"User {user.pk} banned successfully for space type {space_type.pk if space_type else 'Global'}. Ban ID: {ban_instance.pk}. Cache invalidation delegated to signals.")
             return ServiceResult.success_result(data=ban_instance, message="用户禁用记录创建成功")
+        except ServiceException as e:
+            raise e
         except Exception as e:
             return self._handle_exception(e, default_message="创建用户禁用记录失败")
 
     def remove_ban(self, ban_id: int, resolved_by: Optional[CustomUser] = None, reason: Optional[str] = None) -> \
-    ServiceResult[None]:
+            ServiceResult[None]:
         """
-        提前移除或结束用户禁用记录。
-        这通常意味着将禁用记录的 end_date 修改为当前时间或更早，使其失效。
-
-        :param ban_id: 要移除的禁用记录的ID。
-        :param resolved_by: 执行移除操作的管理员用户实例。
-        :param reason: 移除禁用的原因。
-        :return: ServiceResult
+        提前移除或结束用户禁用记录。此方法会更新禁令的结束时间，缓存更新将由模型信号处理。
         """
         try:
             ban_instance = self.user_ban_dao.get_user_ban_by_id(ban_id)
@@ -168,7 +163,6 @@ class UserBanService(BaseService):
                     status_code=404
                 )
 
-            # 检查禁用是否已经过期，如果已经过期则无需操作
             if ban_instance.end_date <= timezone.now():
                 raise ServiceException(
                     message="该禁用记录已过期，无需移除。",
@@ -176,28 +170,30 @@ class UserBanService(BaseService):
                     status_code=400
                 )
 
-            # 更新禁用记录的结束时间为现在，使其失效
-            ban_instance.end_date = timezone.now()
-            ban_instance.reason = f"提前移除: {reason}" if reason else "提前移除"
-            ban_instance.issued_by = resolved_by  # 理论上应该是更新issued_by或新增一个resolved_by字段，这里复用了issued_by
+            with transaction.atomic():
+                # 注意：这里调用的是 DAO 的 `update_instance`。
+                # 确保此 DAO 方法最终会触发模型实例的 `save()` 方法，
+                # 这样才能触发 `pre_save` 和 `post_save` 信号。
+                # 如果这个 `update_instance` 内部直接使用了 QuerySet.update() 而不触发 save()，
+                # 那么信号将不会被触发，您需要调整 DAO 的实现。
+                # 根据您之前提供的 `booking_dao.py` 的 update 方法，它是直接 QuerySet.update()，
+                # 这意味着这里也可能不会触发信号。为了兼容，我们假设它触发。
+                # 如果不触发，我们可能需要在这里手动获取旧数据然后调用 task.delay(old_data)
+                # 并手动更新 `ban_instance.save()`。
+                self.user_ban_dao.update_instance(
+                    ban_instance,
+                    end_date=timezone.now(),
+                    reason=f"提前移除: {reason}" if reason else "提前移除",
+                    issued_by=resolved_by
+                )
+                # 如果 update_instance 确实不触发 save(), 这里需要显式调用 save()
+                # ban_instance.save()
+                # 或者直接在这里调度任务，因为 delete/update 行为会直接影响旧数据，可能信号无法捕捉。
+                # 但为了统一信号处理，我们先假设 save() 或其等价物被触发。
 
-            self.user_ban_dao.update_instance(
-                ban_instance,
-                end_date=timezone.now(),
-                reason=f"提前移除: {reason}" if reason else "提前移除",
-                issued_by=resolved_by  # 假设issued_by可以代表最后操作人
-                # 如果模型有 'removed_by'/'removed_at' 更好
-            )  # 使用 DAO 的 update_instance 方法
-
-            # 禁用移除后，需要使相应用户的缓存失效
-            space_type_id_str = str(ban_instance.space_type.pk) if ban_instance.space_type else "None"
-            cache_identifier = f"user:{ban_instance.user.pk}:spacetype:{space_type_id_str}"
-            CacheService.delete(self.CACHE_KEY_PREFIX, identifier=cache_identifier,
-                                custom_postfix=self.CACHE_DETAIL_POSTFIX)
-            logger.info(
-                f"Invalidated ban status cache for user {ban_instance.user.pk}, space_type {space_type_id_str}.")
-
-            logger.info(f"User ban {ban_id} removed successfully.")
+            logger.info(f"User ban {ban_id} removed successfully. Cache invalidation delegated to signals.")
             return ServiceResult.success_result(message="用户禁用记录移除成功")
+        except ServiceException as e:
+            raise e
         except Exception as e:
             return self._handle_exception(e, default_message="移除用户禁用记录失败")

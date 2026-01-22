@@ -4,10 +4,10 @@ from django.db.models.signals import post_save, pre_save, post_delete
 from django.dispatch import receiver
 from django.utils import timezone  # 导入 timezone
 
-from bookings.models import Booking, Space  # 从 .models 导入 Booking 和 Space 用于类型提示
+from bookings.models import Booking, Space, UserSpaceTypeBan  # 从 .models 导入 Booking 和 Space 用于类型提示
 from core.service.cache import CacheService  # 假设 CacheService 位于 core.service.cache
 from bookings.tasks.booking_tasks import booking_cache_invalidation_task  # 导入 Celery 任务
-
+from bookings.tasks.ban_tasks import ban_cache_invalidation_task
 logger = logging.getLogger(__name__)
 
 
@@ -122,3 +122,82 @@ def booking_post_delete_handler(sender, instance, **kwargs):
                                           # 删除事件中，其related_space就是旧的related_space
                                           needs_broad_invalidation=True)
     logger.info(f"Booking (ID:{instance.pk}) post_delete: Dispatched cache invalidation task.")
+
+
+# --- UserSpaceTypeBan 模型的信号处理 (NEW) ---
+
+@receiver(pre_save, sender=UserSpaceTypeBan)
+def user_ban_pre_save_handler(sender, instance, **kwargs):
+    """
+    在 UserSpaceTypeBan 实例保存前，存储被修改字段的旧值 (user, space_type, end_date)。
+    这对于 post_save 中比较字段变化和正确失效缓存至关重要。
+    """
+    if instance.pk:  # 仅针对已存在的实例进行更新时有效
+        try:
+            old_instance = sender.objects.get(pk=instance.pk)
+            # 存储旧的用户ID和空间类型ID，以及end_date用于判断禁令是否解除
+            instance._old_user_pk = old_instance.user.pk
+            instance._old_space_type_pk = old_instance.space_type.pk if old_instance.space_type else None
+            instance._old_end_date = old_instance.end_date  # 用于判断禁用解除
+            logger.debug(
+                f"UserSpaceTypeBan pre_save for ID {instance.pk}: Stored old user_pk={instance._old_user_pk}, old_space_type_pk={instance._old_space_type_pk}, old_end_date={instance._old_end_date}")
+        except sender.DoesNotExist:
+            logger.warning(
+                f"UserSpaceTypeBan with PK {instance.pk} not found in pre_save; treating as new instance for old values.")
+            instance._old_user_pk = None
+            instance._old_space_type_pk = None
+            instance._old_end_date = None
+    else:  # 新实例
+        instance._old_user_pk = None
+        instance._old_space_type_pk = None
+        instance._old_end_date = None
+
+
+@receiver(post_save, sender=UserSpaceTypeBan)
+def user_ban_post_save_handler(sender, instance, created, **kwargs):
+    """
+    当 UserSpaceTypeBan 实例保存 (创建或更新) 后，异步触发缓存失效任务。
+    根据 user 和 space_type 的变化，失效当前和旧状态相关的缓存。
+    """
+    logger.info(f"UserSpaceTypeBan post_save signal received for ID: {instance.pk}, created: {created}.")
+
+    current_user_pk = instance.user.pk
+    current_space_type_pk = instance.space_type.pk if instance.space_type else None
+
+    # 从 pre_save 中获取旧值
+    old_user_pk = getattr(instance, '_old_user_pk', None)
+    old_space_type_pk = getattr(instance, '_old_space_type_pk', None)
+    # old_end_date = getattr(instance, '_old_end_date', None) # 可以在任务中判断是否失效
+
+    # 调度 Celery 任务进行缓存失效，传递所有必要信息
+    # 任务会判断 user_pk/old_user_pk 和 affected_space_type_pk/old_space_type_pk 的变化来决定如何清除缓存
+    ban_cache_invalidation_task.delay(
+        user_pk=current_user_pk,
+        affected_space_type_pk=current_space_type_pk,
+        old_user_pk=old_user_pk,
+        old_space_type_pk=old_space_type_pk
+    )
+    logger.info(f"UserSpaceTypeBan (ID:{instance.pk}) post_save: Dispatched ban cache invalidation task.")
+
+
+@receiver(post_delete, sender=UserSpaceTypeBan)
+def user_ban_post_delete_handler(sender, instance, **kwargs):
+    """
+    当 UserSpaceTypeBan 实例删除后，异步触发缓存失效任务。
+    主要需要失效被删除禁令所影响的缓存键。
+    """
+    logger.info(f"UserSpaceTypeBan post_delete signal received for ID: {instance.pk}.")
+
+    # 在删除时，instance 仍然包含被删除对象的数据
+    deleted_user_pk = instance.user.pk
+    deleted_space_type_pk = instance.space_type.pk if instance.space_type else None
+
+    # 调度 Celery 任务进行缓存失效。
+    # 这里只传递被删除禁令本身的信息，任务会将其视为“旧状态”来进行失效。
+    ban_cache_invalidation_task.delay(
+        user_pk=deleted_user_pk,  # 这里的user_pk就是受影响的用户
+        affected_space_type_pk=deleted_space_type_pk,  # 这里的affected_space_type_pk就是受影响的空间类型
+        old_user_pk=None,  # 删除操作没有“旧用户”，只有被删除禁令的用户
+        old_space_type_pk=None  # 删除操作没有“旧空间类型”，只有被删除禁令的空间类型
+    )
+    logger.info(f"UserSpaceTypeBan (ID:{instance.pk}) post_delete: Dispatched ban cache invalidation task.")

@@ -34,7 +34,12 @@ class SpaceTypeDAO(BaseDAO):
         """
         queryset = self.get_queryset().order_by('name')
         return self._apply_eager_loading(queryset, prefetch_related, select_related)
-
+    def get_all_active_space_types(self) -> QuerySet[SpaceType]:
+        """
+        获取所有 SpaceType 实例。
+        根据 models.py，SpaceType 没有 is_active 字段，因此这里默认返回所有记录。
+        """
+        return self.get_queryset().all() # <--- NEW/修正: 添加此方法
     def get_by_id(self, pk: int, prefetch_related: list = None, select_related: list = None) -> Optional[SpaceType]:
         """
         根据 ID 获取单个 SpaceType 对象。

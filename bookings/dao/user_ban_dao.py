@@ -2,9 +2,10 @@
 from core.dao import BaseDAO
 from bookings.models import UserSpaceTypeBan, CustomUser
 from spaces.models import SpaceType
-from django.db.models import QuerySet
+from django.db.models import QuerySet, Q  # 导入 Q 用于 OR 条件
 from django.utils import timezone
 from typing import Optional
+
 
 class UserSpaceTypeBanDAO(BaseDAO):
     """
@@ -23,14 +24,24 @@ class UserSpaceTypeBanDAO(BaseDAO):
     ) -> Optional[UserSpaceTypeBan]:
         """
         获取用户在特定空间类型下（或全局）当前活跃的禁用记录。
+        同时会考虑针对特定空间类型和全局的禁用。
         """
+        filter_conditions = Q(user=user, end_date__gt=timezone.now())
+
+        if space_type:
+            # 如果指定了 space_type (例如，用户在预订“实验室”的空间)
+            # 则查找：1. 针对该特定 space_type 的禁用，OR 2. 全局禁用 (space_type__isnull=True)
+            filter_conditions &= (Q(space_type=space_type) | Q(space_type__isnull=True))
+        else:
+            # 如果未指定 space_type (即检查是否存在任何全局禁用)
+            # 则只查找全局禁用 (space_type__isnull=True)
+            filter_conditions &= Q(space_type__isnull=True)
+
         try:
             return self.get_queryset().filter(
-                user=user,
-                space_type=space_type, # 查找特定空间类型，若为None则查找全局
-                end_date__gt=timezone.now() # 禁用结束时间晚于当前时间
-            ).order_by('-issued_at').first() # 如果有多个活跃禁用，取最新的
-        except self.model.DoesNotExist: # filter返回的是QuerySet，不会直接抛出DoesNotExist，但为了防御性保留
+                filter_conditions  # 使用合并后的 Q 对象进行过滤
+            ).order_by('-issued_at').first()  # 如果有多个活跃禁用，取最新的
+        except self.model.DoesNotExist:  # filter返回的是QuerySet，不会直接抛出DoesNotExist，但为了防御性保留
             return None
 
     def get_user_ban_by_id(self, ban_id: int) -> Optional[UserSpaceTypeBan]:
