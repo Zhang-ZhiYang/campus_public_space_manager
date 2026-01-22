@@ -1,9 +1,10 @@
-# bookings/admin/user_ban_admin.py (终极修正版 - SpaceManager 只读，严格控制模块可见性)
+# bookings/admin/user_ban_admin.py (修正版 - 解决 isinstance TypeError)
 from django.contrib import admin
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+from django.contrib.auth import get_user_model  # <-- NEW IMPORT: 导入 get_user_model
 
 from guardian.admin import GuardedModelAdmin
 from guardian.shortcuts import get_objects_for_user
@@ -11,11 +12,23 @@ from guardian.shortcuts import get_objects_for_user
 from bookings.models import UserSpaceTypeBan
 from django.conf import settings
 
-CustomUser = settings.AUTH_USER_MODEL
+# CustomUser = settings.AUTH_USER_MODEL # <-- REMOVED this line as it assigned a string
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 定义一个用于缓存实际 CustomUser 模型的变量
+_actual_custom_user_model = None
+
+
+def get_actual_custom_user_model():
+    """惰性加载实际的 CustomUser 模型类。"""
+    global _actual_custom_user_model
+    if _actual_custom_user_model is None:
+        _actual_custom_user_model = get_user_model()
+    return _actual_custom_user_model
+
 
 # --- 健壮的 Mock 对象定义 (解决 TypeError) ---
 SPACES_MODELS_LOADED = False
@@ -25,35 +38,28 @@ try:
     SPACES_MODELS_LOADED = True
 except ImportError:
     class MockValuesListQuerySet(models.QuerySet):
-        def __init__(self, *args, **kwargs):
-            self._result_list = kwargs.pop('_mock_ids', [])
-            super().__init__(*args, **kwargs)
+        def __init__(self, *args, **kwargs): self._result_list = kwargs.pop('_mock_ids', []); super().__init__(*args,
+                                                                                                               **kwargs)
 
-        def __iter__(self):
-            return iter(self._result_list)
+        def __iter__(self): return iter(self._result_list)
 
-        def distinct(self):
-            return MockValuesListQuerySet(self.model, using=self._db, _mock_ids=list(set(self._result_list)))
+        def distinct(self): return MockValuesListQuerySet(self.model, using=self._db,
+                                                          _mock_ids=list(set(self._result_list)))
 
         def values_list(self, *args, **kwargs):
-            if kwargs.get('flat', False):
-                return self._result_list
+            if kwargs.get('flat', False): return self._result_list
             return MockValuesListQuerySet(self.model, using=self._db, _mock_ids=[(x,) for x in self._result_list])
 
-        def exists(self):
-            return bool(self._result_list)
+        def exists(self): return bool(self._result_list)
 
-        def filter(self, *args, **kwargs):
-            return MockValuesListQuerySet(self.model, using=self._db, _mock_ids=[])
+        def filter(self, *args, **kwargs): return MockValuesListQuerySet(self.model, using=self._db, _mock_ids=[])
 
-        def count(self):
-            return len(self._result_list)
+        def count(self): return len(self._result_list)
 
 
     class MockQuerySet(models.QuerySet):
         def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._mock_instances = kwargs.pop('_mock_instances', [])
+            super().__init__(*args, **kwargs); self._mock_instances = kwargs.pop('_mock_instances', [])
 
         def none(self):
             return MockQuerySet(self.model, using=self._db)
@@ -70,27 +76,18 @@ except ImportError:
                             current_val = inst
                             for part in parts:
                                 current_val = getattr(current_val, part, None)
-                                if current_val is None:
-                                    break
-                            if current_val not in value:
-                                match = False
-                                break
+                                if current_val is None: break
+                            if current_val not in value: match = False; break
                         else:
-                            if getattr(inst, field, None) not in value:
-                                match = False
-                                break
+                            if getattr(inst, field, None) not in value: match = False; break
                     elif key.endswith('__id'):
                         field_name = key.replace('__id', '')
                         related_obj = getattr(inst, field_name, None)
-                        if related_obj and getattr(related_obj, 'id', None) != value:
-                            match = False
-                            break
+                        if related_obj and getattr(related_obj, 'id', None) != value: match = False; break
                     else:
-                        if isinstance(inst, models.Model) and hasattr(inst, key) and getattr(inst, key, None) != value:
-                            match = False
-                            break
-                if match:
-                    filtered_instances.append(inst)
+                        if isinstance(inst, models.Model) and hasattr(inst, key) and getattr(inst, key,
+                                                                                             None) != value: match = False; break
+                if match: filtered_instances.append(inst)
             return MockQuerySet(self.model, using=self._db, _mock_instances=filtered_instances)
 
         def values_list(self, *args, **kwargs):
@@ -106,7 +103,6 @@ except ImportError:
                 if row_values:
                     extracted_values.append(
                         row_values[0] if kwargs.get('flat', False) and len(row_values) == 1 else tuple(row_values))
-
             return MockValuesListQuerySet(self.model, using=self._db,
                                           _mock_ids=[v for v in extracted_values if v is not None])
 
@@ -115,9 +111,7 @@ except ImportError:
             distinct_instances = []
             for inst in self._mock_instances:
                 inst_id = getattr(inst, 'id', hash(inst))
-                if inst_id not in seen_ids:
-                    distinct_instances.append(inst)
-                    seen_ids.add(inst_id)
+                if inst_id not in seen_ids: distinct_instances.append(inst); seen_ids.add(inst_id)
             return MockQuerySet(self.model, using=self._db, _mock_instances=distinct_instances)
 
         def exists(self):
@@ -140,60 +134,58 @@ except ImportError:
 
 
     class MockManager(models.Manager):
-        def get_queryset(self):
-            return MockQuerySet(self.model, using=self._db, _mock_instances=[])
+        def get_queryset(self): return MockQuerySet(self.model, using=self._db, _mock_instances=[])
 
 
     class MockSpace(models.Model):
-        name = "Mock Space"
-        requires_approval = False
-        space_type = None
-        objects = MockManager()
+        name = "Mock Space";
+        requires_approval = False;
+        space_type = None;
+        objects = MockManager();
         id = None
 
         def __str__(self): return self.name
 
         def __init__(self, id=1, name="Mock Space", requires_approval=False, space_type=None, _state=None):
-            self.id = id
-            self.name = name
+            self.id = id;
+            self.name = name;
             self.requires_approval = requires_approval
             self.space_type = space_type if space_type is not None else MockSpaceType(id=99)
             self._state = _state if _state is not None else object()
 
-        def has_perm(self, perm, obj=None):
-            return True
+        def has_perm(self, perm, obj=None): return True
 
 
     class MockSpaceType(models.Model):
-        name = "Mock SpaceType"
-        objects = MockManager()
+        name = "Mock SpaceType";
+        objects = MockManager();
         id = None
 
         def __str__(self): return self.name
 
         def __init__(self, id=99, name="Mock SpaceType", _state=None):
-            self.id = id
-            self.name = name
+            self.id = id;
+            self.name = name;
             self._state = _state if _state is not None else object()
 
 
     class MockBookableAmenity(models.Model):
-        amenity = None
-        space = None
-        objects = MockManager()
+        amenity = None;
+        space = None;
+        objects = MockManager();
         id = None
 
         def __str__(self): return "Mock BookableAmenity"
 
         def __init__(self, id=1, amenity=None, space=None, _state=None):
-            self.id = id
+            self.id = id;
             self.amenity = amenity if amenity is not None else MockSpaceType(id=98)
             self.space = space if space is not None else MockSpace(id=97)
             self._state = _state if _state is not None else object()
 
 
-    Space = MockSpace
-    SpaceType = MockSpaceType
+    Space = MockSpace;
+    SpaceType = MockSpaceType;
     BookableAmenity = MockBookableAmenity
     logger.warning(
         "Warning: Missing modules from 'spaces' app. Using robust mock objects to maintain functionality in bookings/admin/user_ban_admin.py. Functionality may be limited.")
@@ -223,15 +215,22 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
             raise ValidationError('没有权限')
 
         # 空间管理员不应能创建、修改或删除这些记录，该功能保留给系统管理员。
-        if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
+        # NEW: 获取实际 CustomUser 模型类进行类型检查
+        ActualCustomUser = get_actual_custom_user_model()
+        if not (request.user.is_superuser or (
+                isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False))):
             messages.error(request, f"您没有权限修改此禁用记录(ID: {obj.pk})。", messages.ERROR)
             raise ValidationError('没有权限')
 
-        if not obj.issued_by and isinstance(request.user, CustomUser): obj.issued_by = request.user
+        # NEW: 同样使用 ActualCustomUser 进行类型检查
+        if not obj.issued_by and isinstance(request.user, ActualCustomUser):
+            obj.issued_by = request.user
+
         super().save_model(request, obj, form, change)
 
     @admin.display(description='用户')
     def user_display(self, obj: 'UserSpaceTypeBan'):
+        # obj.user 已经是模型实例，不需要进行 isinstance 检查
         return obj.user.get_full_name if obj.user else 'N/A'
 
     @admin.display(description='空间类型')
@@ -244,6 +243,7 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
 
     @admin.display(description='执行人员')
     def issued_by_display(self, obj: 'UserSpaceTypeBan'):
+        # obj.issued_by 已经是模型实例，不需要进行 isinstance 检查
         return obj.issued_by.get_full_name if obj.issued_by else '系统自动'
 
     @admin.display(boolean=True, description='是否活跃')
@@ -253,42 +253,41 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         if not request.user.is_authenticated: return qs.none()
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
+
+        ActualCustomUser = get_actual_custom_user_model()
+        # NEW: 使用 ActualCustomUser 进行类型检查
+        if request.user.is_superuser or (
+                isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False)):
             return qs.select_related('user', 'space_type', 'ban_policy_applied', 'issued_by')
 
         if not SPACES_MODELS_LOADED:
             messages.warning(request, "Space models not available. User bans cannot be filtered by space permissions.")
             return qs.none()
 
-        # 空间管理员只能查看其管理空间类型下的禁用记录
-        # 这里需要检查用户是否对 "任何" 属于这个 SpaceType 的 space 有 can_view_space_bookings 权限
         managed_spacetype_ids = []
-        if getattr(request.user, 'is_space_manager', False):
+        # NEW: 使用 ActualCustomUser 进行类型检查
+        if isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_space_manager', False):
             managed_spaces = get_objects_for_user(
                 request.user, 'spaces.can_view_space_bookings', klass=Space
             )
             managed_spacetype_ids = list(managed_spaces.values_list('space_type__id', flat=True).distinct())
-            managed_spacetype_ids = [id for id in managed_spacetype_ids if id is not None]  # 移除 None
+            managed_spacetype_ids = [id for id in managed_spacetype_ids if id is not None]
 
         return qs.filter(space_type__id__in=managed_spacetype_ids).select_related('user', 'space_type',
                                                                                   'ban_policy_applied', 'issued_by')
 
     def has_module_permission(self, request):
-        """
-        统一的模块可见性权限检查。
-        - 未登录用户：不可见。
-        - 超级用户/系统管理员：总是可见。
-        - 空间管理员：取决于是否被明确分配了该 Model 的 Django 默认 'view_xxx' 权限。
-        - 其他用户：不可见。
-        """
         if not request.user.is_authenticated:
             return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
+
+        ActualCustomUser = get_actual_custom_user_model()
+        # NEW: 使用 ActualCustomUser 进行类型检查
+        if request.user.is_superuser or (
+                isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False)):
             return True
 
-        # 如果是空间管理员，动态获取当前模型的 app_label 和 model_name
-        # 然后检查是否显式分配了该模型的默认 view_xxx 权限。
-        if getattr(request.user, 'is_space_manager', False):
+        # NEW: 使用 ActualCustomUser 进行类型检查
+        if isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_space_manager', False):
             app_label = self.opts.app_label
             model_name = self.opts.model_name
             permission_codename = f'{app_label}.view_{model_name}'
@@ -298,29 +297,41 @@ class UserSpaceTypeBanAdmin(GuardedModelAdmin):
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
+
+        ActualCustomUser = get_actual_custom_user_model()
+        # NEW: 使用 ActualCustomUser 进行类型检查
+        if request.user.is_superuser or (
+                isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin',
+                                                                       False)): return True
         if obj is None: return self.has_module_permission(request)
 
         if not SPACES_MODELS_LOADED: return False
 
         if obj.space_type:
-            # 针对特定对象，检查用户是否管理该空间类型下的某个空间
             managed_spaces = get_objects_for_user(request.user, 'spaces.can_view_space_bookings', klass=Space)
             return managed_spaces.filter(space_type=obj.space_type).exists()
         else:  # 全局禁用记录，只有系统管理员可见
-            return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+            # NEW: 使用 ActualCustomUser 进行类型检查
+            return request.user.is_superuser or (
+                        isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False))
 
     def has_add_permission(self, request):
         if not request.user.is_authenticated: return False
-        # 空间管理员不能添加
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        # 修正：避免直接使用 getattr，虽然通常无害，但保持一致性
+        ActualCustomUser = get_actual_custom_user_model()
+        return request.user.is_superuser or (
+                    isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False))
 
     def has_change_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        # 空间管理员不能修改
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        # 修正
+        ActualCustomUser = get_actual_custom_user_model()
+        return request.user.is_superuser or (
+                    isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False))
 
     def has_delete_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False
-        # 空间管理员不能删除
-        return request.user.is_superuser or getattr(request.user, 'is_system_admin', False)
+        # 修正
+        ActualCustomUser = get_actual_custom_user_model()
+        return request.user.is_superuser or (
+                    isinstance(request.user, ActualCustomUser) and getattr(request.user, 'is_system_admin', False))
