@@ -1,5 +1,3 @@
-# bookings/service/booking_validation_creation_service.py
-
 import logging
 from typing import Dict, Any, Tuple, Optional, Union
 from datetime import datetime, timedelta, date
@@ -272,13 +270,15 @@ class BookingValidationCreationService(BaseService):
 
                 if effective_limit > 0:
                     today = booking_instance.start_time.date()
+                    # 修正：在深层验证中，排除当前正在处理的 booking_instance.pk，避免双重计数
                     current_bookings_count = self.booking_dao.get_user_bookings_count_for_date(
                         user=booking_instance.user,
                         target_date=today,
                         status_in=[Booking.BOOKING_STATUS_PENDING,
                                    Booking.BOOKING_STATUS_APPROVED,
                                    Booking.BOOKING_STATUS_CHECKED_IN],
-                        space_type=target_space_type
+                        space_type=target_space_type,
+                        exclude_booking_id=booking_instance.pk # <--- 关键修改点
                     )
 
                     if current_bookings_count + 1 > effective_limit:
@@ -287,10 +287,32 @@ class BookingValidationCreationService(BaseService):
                             f"Current count {current_bookings_count}, Limit {effective_limit}.")
                         raise ForbiddenException(
                             message=f"您在 {target_space_type.name if target_space_type else '全局'} 空间类型下，当日已达最大预订次数限制 ({effective_limit}次)。",
-                            error_code="daily_booking_limit_exceeded_locked",
                             status_code=http_status.HTTP_403_FORBIDDEN
                         )
                 logger.info(f"Booking {booking_id} passed daily booking limit check (locked).")
+
+                # 新增检查所有空间类型的每日总限制，同样需要排除当前预订
+                effective_total_daily_limit = daily_limit_service.get_effective_total_daily_limit(booking_instance.user)
+                if effective_total_daily_limit > 0:
+                    current_total_bookings_count = self.booking_dao.get_user_total_bookings_count_for_date(
+                        user=booking_instance.user,
+                        target_date=today,
+                        status_in=[Booking.BOOKING_STATUS_PENDING,
+                                   Booking.BOOKING_STATUS_APPROVED,
+                                   Booking.BOOKING_STATUS_CHECKED_IN],
+                        exclude_booking_id=booking_instance.pk # <--- 关键修改点
+                    )
+
+                    if current_total_bookings_count + 1 > effective_total_daily_limit:
+                        logger.warning(
+                            f"Booking {booking_id} failed total daily limit check for user {booking_instance.user.pk} (locked). "
+                            f"Current total effective count {current_total_bookings_count}, Limit {effective_total_daily_limit}.")
+                        raise ForbiddenException(
+                            message=f"您当日所有空间类型的预订总次数已达最大限制 ({effective_total_daily_limit}次)。",
+                            error_code="total_daily_booking_limit_exceeded_locked",
+                            status_code=http_status.HTTP_403_FORBIDDEN
+                        )
+                logger.info(f"Booking {booking_id} passed total daily booking limit check (locked).")
 
                 booking_instance.processing_status = Booking.PROCESSING_STATUS_CREATED
 

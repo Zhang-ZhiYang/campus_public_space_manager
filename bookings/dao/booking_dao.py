@@ -1,4 +1,3 @@
-# bookings/dao/booking_dao.py
 import logging
 from datetime import datetime, date
 from typing import Optional, List, Union, Any, Dict
@@ -13,7 +12,6 @@ from spaces.models import Space, BookableAmenity, SpaceType
 from users.models import CustomUser
 
 logger = logging.getLogger(__name__)
-
 
 class BookingDAO(BaseDAO):
     """
@@ -174,26 +172,33 @@ class BookingDAO(BaseDAO):
         return booking.related_space
 
     def get_user_bookings_count_for_date(self, user: CustomUser, target_date: date, status_in: List[str],
-                                         space_type: Optional[SpaceType] = None) -> int:
+                                         space_type: Optional[SpaceType] = None,
+                                         exclude_booking_id: Optional[int] = None) -> int:
         """
         获取用户在指定日期内、特定空间类型下（或全局），处于指定状态的预订数量。
+        可选择排除某个特定的预订ID。
         """
         start_of_day = timezone.make_aware(datetime.combine(target_date, datetime.min.time()))
-        end_of_day = timezone.make_aware(datetime.combine(target_date, datetime.max.time()))
+        # 确保 end_of_day 精确到秒，避免微秒差异导致的问题
+        end_of_day = timezone.make_aware(datetime.combine(target_date, datetime.max.time().replace(microsecond=0)))
 
         filters = Q(
             user=user,
             start_time__gte=start_of_day,
-            start_time__lte=end_of_day,
+            start_time__lte=end_of_day, # 查找预订开始时间在这一天内的记录
             status__in=status_in
         )
 
         if space_type:
             filters &= Q(related_space__space_type=space_type)
 
+        if exclude_booking_id:
+            filters &= ~Q(pk=exclude_booking_id) # 增加排除当前预订的条件
+
         count = self.get_queryset().filter(filters).count()
         logger.debug(f"User {user.pk} has {count} bookings on {target_date.isoformat()} with status in {status_in} "
-                     f"for space_type {space_type.pk if space_type else 'None'}.")
+                     f"for space_type {space_type.pk if space_type else 'None'}, "
+                     f"excluding {exclude_booking_id if exclude_booking_id else 'None'}.")
         return count
 
     def get_all_bookings(self, filter_conditions: Optional[Q] = None, filters: Optional[Dict[str, Any]] = None,
@@ -267,19 +272,27 @@ class BookingDAO(BaseDAO):
 
         return queryset
 
-    def get_user_total_bookings_count_for_date(self, user: CustomUser, target_date: date, status_in: List[str]) -> int:
+    def get_user_total_bookings_count_for_date(self, user: CustomUser, target_date: date, status_in: List[str],
+                                              exclude_booking_id: Optional[int] = None) -> int:
         """
         获取用户在指定日期内，处于指定状态的预订总数量（不分空间类型）。
+        可选择排除某个特定的预订ID。
         """
         start_of_day = timezone.make_aware(datetime.combine(target_date, datetime.min.time()))
-        end_of_day = timezone.make_aware(datetime.combine(target_date, datetime.max.time()))
+        end_of_day = timezone.make_aware(datetime.combine(target_date, datetime.max.time().replace(microsecond=0)))
 
-        count = self.get_queryset().filter(
+        filters = Q(
             user=user,
             start_time__gte=start_of_day,
             start_time__lte=end_of_day,
             status__in=status_in
-        ).count()
+        )
+
+        if exclude_booking_id:
+            filters &= ~Q(pk=exclude_booking_id) # 增加排除当前预订的条件
+
+        count = self.get_queryset().filter(filters).count()
         logger.debug(
-            f"User {user.pk} has {count} total bookings on {target_date.isoformat()} with status in {status_in} across all space types.")
+            f"User {user.pk} has {count} total bookings on {target_date.isoformat()} with status in {status_in} "
+            f"across all space types, excluding {exclude_booking_id if exclude_booking_id else 'None'}.")
         return count
