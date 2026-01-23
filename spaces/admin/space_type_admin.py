@@ -1,10 +1,9 @@
-# spaces/admin/space_type_admin.py (终极修订版 - 更严格的空间管理员权限控制)
+# spaces/admin/space_type_admin.py
 from django.contrib import admin
 from django.contrib import messages  # 导入 messages
 # 导入本应用的模型
 from spaces.models import SpaceType, Space  # 导入 Space 用于权限检查
 from guardian.shortcuts import get_objects_for_user  # 导入 guardian
-
 
 # ====================================================================
 # SpaceType Admin (空间类型管理)
@@ -13,13 +12,15 @@ from guardian.shortcuts import get_objects_for_user  # 导入 guardian
 class SpaceTypeAdmin(admin.ModelAdmin):
     list_display = (
         'name', 'is_basic_infrastructure', 'default_is_bookable', 'default_requires_approval',
+        'default_check_in_method', # <--- 新增
         'default_available_start_time', 'default_available_end_time',
         'description'
     )
     search_fields = ('name',)
     list_filter = (
         'is_basic_infrastructure',
-        'default_is_bookable', 'default_requires_approval'
+        'default_is_bookable', 'default_requires_approval',
+        'default_check_in_method' # <--- 新增
     )
     ordering = ('name',)
 
@@ -28,7 +29,9 @@ class SpaceTypeAdmin(admin.ModelAdmin):
         ('类型属性', {'fields': ('is_basic_infrastructure',)}),
         ('默认预订规则 (创建空间时可作为默认值)', {
             'fields': (
-                'default_is_bookable', 'default_requires_approval',
+                'default_is_bookable',
+                'default_requires_approval',
+                'default_check_in_method', # <--- 新增
                 'default_available_start_time', 'default_available_end_time',
                 'default_min_booking_duration', 'default_max_booking_duration',
                 'default_buffer_time_minutes'
@@ -69,8 +72,6 @@ class SpaceTypeAdmin(admin.ModelAdmin):
             return request.user.has_perm(permission_codename)
 
         return False
-
-
 
     def has_view_permission(self, request, obj=None):
         if not request.user.is_authenticated: return False

@@ -1,4 +1,4 @@
-# spaces/admin/space_admin.py (终极修订版 - 更严格的空间管理员权限控制)
+# spaces/admin/space_admin.py
 import logging
 
 from django.contrib import admin
@@ -6,12 +6,11 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import transaction, models
 from django.contrib.auth.models import Group
-from django.forms.models import BaseInlineFormSet  # 导入 BaseInlineFormSet
-from django.db.models import Q  # 导入 Q 对象，用于复杂的查询
+from django.forms.models import BaseInlineFormSet
+from django.db.models import Q
 
-# 直接导入本应用的模型
 from spaces.models import Amenity, Space, SpaceType, BookableAmenity, \
-    SPACE_MANAGEMENT_PERMISSIONS, BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS  # 导入权限列表
+    SPACE_MANAGEMENT_PERMISSIONS, BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS
 
 from django.conf import settings
 from guardian.admin import GuardedModelAdmin
@@ -56,7 +55,7 @@ except ImportError:
     Booking = MockBooking
 
 # ====================================================================
-# BookableAmenity Inline
+# BookableAmenity Inline (保持不变)
 # ====================================================================
 class BookableAmenityInline(admin.TabularInline):
     model = BookableAmenity
@@ -71,7 +70,6 @@ class BookableAmenityInline(admin.TabularInline):
 
     def has_add_permission(self, request, obj=None):
         return True
-        # --- END IMPORTANT MODIFICATION ---
 
     def has_change_permission(self, request, obj=None):
         return True
@@ -90,10 +88,12 @@ class SpaceAdmin(GuardedModelAdmin):
     list_display = (
         'name', 'location', 'space_type_name', 'parent_space_name', 'capacity',
         'is_bookable', 'is_active', 'is_container', 'requires_approval',
+        'check_in_method', # <--- 新增
         'display_permitted_groups', 'managed_by_display'
     )
     list_filter = (
         'is_bookable', 'is_active', 'is_container', 'requires_approval',
+        'check_in_method', # <--- 新增
         'space_type',
         ('parent_space', admin.RelatedOnlyFieldListFilter),
         'permitted_groups',
@@ -111,7 +111,9 @@ class SpaceAdmin(GuardedModelAdmin):
         fieldsets = [
             (None, {'fields': ('name', 'location', 'description', 'image',)}),
             ('层级与类型', {'fields': ('space_type', 'parent_space', 'is_container',)}),
-            ('预订设置', {'fields': ('capacity', 'is_bookable', 'is_active', 'requires_approval',)}),
+            ('行为设置', { # <--- 更改为更通用的名称
+                'fields': ('capacity', 'is_bookable', 'is_active', 'requires_approval', 'check_in_method')} # <--- 新增 check_in_method
+            ),
             ('可预订用户组 (白名单)', {'fields': ('permitted_groups',),
                                        'description': '如果空间非基础型基础设施，则只有选择的用户组可以预订此空间。若为空，则除管理员、空间经理和基础型之外，该空间对非管理员用户不可访问。',
                                        'classes': ('collapse',)}),
@@ -139,13 +141,13 @@ class SpaceAdmin(GuardedModelAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         readonly_fields = list(super().get_readonly_fields(request, obj))
-
-        readonly_fields.extend(['created_at', 'updated_at'])
+        readonly_fields.extend(['created_at', 'updated_at']) # 确保这些字段总是只读
 
         if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
-            if not (obj is None and getattr(request.user, 'is_space_manager', False)):
-                if 'managed_by' not in readonly_fields:
-                    readonly_fields.append('managed_by')
+            # 如果当前用户是空间管理员且不是系统管理员
+            # 并且不是在新建空间时 (obj is not None)，则 managed_by 字段只读
+            if obj is not None and ('managed_by' not in readonly_fields): # 仅当是编辑现有对象时
+                readonly_fields.append('managed_by')
         return readonly_fields
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
@@ -201,10 +203,8 @@ class SpaceAdmin(GuardedModelAdmin):
                                     klass=qs).distinct()
 
     def has_module_permission(self, request):
-        if not request.user.is_authenticated:
-            return False
-        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False):
-            return True
+        if not request.user.is_authenticated: return False
+        if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
         if getattr(request.user, 'is_space_manager', False):
             app_label = self.opts.app_label
