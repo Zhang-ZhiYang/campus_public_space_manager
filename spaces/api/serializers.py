@@ -6,13 +6,14 @@ import datetime
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 
-
-from spaces.models import Amenity, Space, SpaceType, BookableAmenity
+from spaces.models import Amenity, Space, SpaceType, BookableAmenity, \
+    CHECK_IN_METHOD_CHOICES  # <--- 导入 CHECK_IN_METHOD_CHOICES
 from spaces.service.space_service import SpaceService  # Import SpaceService
 from spaces.service.amenity_service import AmenityService  # Import AmenityService
 from spaces.service.space_type_service import SpaceTypeService  # Import SpaceTypeService
 
 CustomUser = get_user_model()
+
 
 class UserSerializerMinimal(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source='id', read_only=True)
@@ -21,6 +22,7 @@ class UserSerializerMinimal(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ('user_id', 'username', 'full_name')
+
 
 class SpaceTypeSerializerMinimal(serializers.ModelSerializer):
     space_type_id = serializers.IntegerField(source='id', read_only=True)
@@ -70,6 +72,9 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
     effective_min_booking_duration = serializers.SerializerMethodField()
     effective_max_booking_duration = serializers.SerializerMethodField()
     effective_buffer_time_minutes = serializers.SerializerMethodField()
+    # 新增：有效的签到方式及显示名称
+    effective_check_in_method = serializers.SerializerMethodField()  # <--- 新增
+    effective_check_in_method_display = serializers.SerializerMethodField()  # <--- 新增
 
     class Meta:
         model = Space
@@ -112,14 +117,16 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
                                   default_value_if_no_spacetype=None):
         if hasattr(obj, '_data') and isinstance(obj._data, dict):  # Handle CachedDictObject
             obj_val = obj._data.get(field_name)
-            if obj_val is not None:
+            if obj_val is not None and obj_val != '':  # Also check for empty string
                 return obj_val
 
             # FIX: Safely get space_type_data, defaulting to an empty dict if space_type is None or missing.
             space_type_data = obj._data.get('space_type') or {}
 
-            if space_type_data.get(default_field_name) is not None:
-                return space_type_data.get(default_field_name)
+            spacetype_val = space_type_data.get(default_field_name)
+            if spacetype_val is not None and spacetype_val != '':  # Also check for empty string
+                return spacetype_val
+
             return default_value_if_no_spacetype
 
         # Original logic for model instance
@@ -163,6 +170,15 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
     def get_effective_buffer_time_minutes(self, obj: Any) -> int | None:
         return self._get_field_value_from_obj(obj, 'buffer_time_minutes', 'default_buffer_time_minutes', 0)
 
+    # <--- 新增两个方法来获取有效的签到方式及其显示名称
+    def get_effective_check_in_method(self, obj: Any) -> str:
+        # 默认 None 的 fallback 值应与模型中的 save() 方法保持一致
+        return self._get_field_value_from_obj(obj, 'check_in_method', 'default_check_in_method', 'HYBRID')
+
+    def get_effective_check_in_method_display(self, obj: Any) -> str:
+        effective_method = self.get_effective_check_in_method(obj)
+        return dict(CHECK_IN_METHOD_CHOICES).get(effective_method, '未知')
+
 
 class SpaceListSerializer(SpaceBaseSerializer):
     """
@@ -183,6 +199,8 @@ class SpaceListSerializer(SpaceBaseSerializer):
             'effective_min_booking_duration',
             'effective_max_booking_duration',
             'effective_buffer_time_minutes',
+            'effective_check_in_method',  # <--- 新增
+            'effective_check_in_method_display',  # <--- 新增
             'bookable_amenities',
         ]
 
@@ -227,6 +245,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             'is_bookable', 'is_active', 'is_container', 'requires_approval', 'image',
             'available_start_time', 'available_end_time',
             'min_booking_duration', 'max_booking_duration', 'buffer_time_minutes',
+            'check_in_method',  # <--- 允许创建/更新时设置签到方式
             'space_type', 'parent_space', 'managed_by', 'permitted_groups',  # Direct instances
             'amenity_ids'
         ]
@@ -235,7 +254,8 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             'min_booking_duration': {'allow_null': True},
             'max_booking_duration': {'allow_null': True},
             'buffer_time_minutes': {'allow_null': True},
-            'image': {'required': False, 'allow_null': True}
+            'image': {'required': False, 'allow_null': True},
+            'check_in_method': {'required': False, 'allow_null': True, 'allow_blank': True}  # <--- 允许为空
         }
 
     def validate(self, data):
@@ -244,7 +264,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         """
         instance = self.instance
 
-        # 1. 时间字段一致性验证
+        # 1. 时间字段一致性验证 (保持不变)
         start_time_new = data.get('available_start_time', instance.available_start_time if instance else None)
         end_time_new = data.get('available_end_time', instance.available_end_time if instance else None)
 
@@ -254,7 +274,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
                 code='invalid_time_range'
             )
 
-        # 2. is_active, is_bookable, is_container 业务规则验证
+        # 2. is_active, is_bookable, is_container 业务规则验证 (保持不变)
         is_active_new = data.get('is_active', instance.is_active if instance else True)
         is_bookable_new = data.get('is_bookable', instance.is_bookable if instance else True)
         is_container_new = data.get('is_container', instance.is_container if instance else False)
@@ -271,7 +291,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
                 code='container_space_not_bookable'
             )
 
-        # 3. SpaceType.default_is_bookable 与 Space.is_bookable 的一致性
+        # 3. SpaceType.default_is_bookable 与 Space.is_bookable 的一致性 (保持不变)
         space_type_new = data.get('space_type',
                                   instance.space_type if instance else None)  # space_type_new is SpaceType instance
         if space_type_new and not space_type_new.default_is_bookable and is_bookable_new:
@@ -280,7 +300,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
                 code='space_type_not_bookable_conflict'
             )
 
-        # 4. 父级空间不能是自身
+        # 4. 父级空间不能是自身 (保持不变)
         parent_space_new = data.get('parent_space',
                                     instance.parent_space if instance else None)  # parent_space_new is Space instance
         if parent_space_new and instance and parent_space_new == instance:
@@ -289,7 +309,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
                 code='self_parent_space'
             )
 
-        # 5. 确保 is_bookable_individually 为 False 的 Amenity 不会尝试单独预订
+        # 5. 确保 is_bookable_individually 为 False 的 Amenity 不会尝试单独预订 (保持不变)
         amenity_ids = data.get('amenity_ids', None)
         if amenity_ids is not None:
             non_bookable_amenities = Amenity.objects.filter(id__in=amenity_ids, is_bookable_individually=False)
@@ -348,7 +368,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             raise service_result.to_exception()
 
 
-# --------- Amenity Type Serializers ---------
+# --------- Amenity Type Serializers (保持不变) ---------
 
 class AmenityBaseSerializer(serializers.ModelSerializer):
     """
@@ -399,11 +419,16 @@ class SpaceTypeBaseSerializer(serializers.ModelSerializer):
     """
     空间类型（SpaceType）的基础序列化器，包含所有字段。
     """
+    # 新增：方便前端显示签到方式的显示名称
+    default_check_in_method_display = serializers.SerializerMethodField()  # <--- 新增
 
     class Meta:
         model = SpaceType
         fields = '__all__'
         read_only_fields = ('id', 'created_at', 'updated_at')
+
+    def get_default_check_in_method_display(self, obj: SpaceType) -> str:  # <--- 新增
+        return dict(CHECK_IN_METHOD_CHOICES).get(obj.default_check_in_method, '未知')
 
 
 class SpaceTypeCreateUpdateSerializer(serializers.ModelSerializer):
@@ -421,6 +446,8 @@ class SpaceTypeCreateUpdateSerializer(serializers.ModelSerializer):
             'default_min_booking_duration': {'allow_null': True},
             'default_max_booking_duration': {'allow_null': True},
             'default_buffer_time_minutes': {'allow_null': True},
+            'default_check_in_method': {'required': False, 'allow_null': False, 'allow_blank': False}
+            # <--- 允许设置，且不允许空字符串
         }
 
     def validate(self, data):

@@ -25,7 +25,7 @@ BOOKING_STATUS_CHOICES_TUPLE = (
     ('COMPLETED', '已完成'),
     ('NO_SHOW', '未到场'),
     ('CHECKED_IN', '已签到'),
-    ('CHECKED_OUT', '已签出'),
+    # ('CHECKED_OUT', '已签出'),
 )
 
 # 新增预订处理状态，用于异步流程

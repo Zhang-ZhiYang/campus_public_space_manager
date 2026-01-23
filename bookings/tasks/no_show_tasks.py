@@ -55,7 +55,7 @@ def create_no_show_violation_for_single_booking(self, booking_id: int):
             logger.info(f"Booking {booking.pk} is already NO_SHOW, skipping violation creation for {now}.")
             return
 
-        if booking.status not in [BookingModel.BOOKING_STATUS_PENDING, BookingModel.BOOKING_STATUS_APPROVED]:
+        if booking.status not in [BookingModel.BOOKING_STATUS_APPROVED]:
             logger.warning(
                 f"Booking {booking.pk} (status: {booking.status}) is no longer PENDING or APPROVED. "
                 "可能在任务调度后被签到、拒绝或取消。跳过处理。"
@@ -109,7 +109,7 @@ def process_overdue_approved_bookings_for_no_show(self):
     overdue_approved_bookings = booking_dao.get_queryset().select_related(
         'user', 'space__space_type', 'bookable_amenity__space__space_type', 'related_space__space_type'
     ).filter(
-        status__in=[BookingModel.BOOKING_STATUS_PENDING, BookingModel.BOOKING_STATUS_APPROVED],
+        status__in=[BookingModel.BOOKING_STATUS_APPROVED],
         end_time__lt=now
     )
 

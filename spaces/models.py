@@ -1,4 +1,4 @@
-# spaces/models.py (终极修订版 - 包含权限继承逻辑 - 已清理 Signal - 添加 to_dict 方法并修复DurationField)
+# spaces/models.py
 from django.contrib.auth import get_user_model
 from django.db import models
 from django.db.models import Manager, Index, Q
@@ -43,6 +43,20 @@ BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS = [
     'can_change_bookable_amenity_status',
 ]
 
+# 签到方法选择项 <--- NEW: 增加了 NO_CHECK_IN 选项
+CHECK_IN_METHOD_CHOICES = (
+    ('NONE', '不需要签到'),  # <--- 新增
+    ('SELF', '用户自行签到'),
+    ('STAFF', '仅限签到员签到'),
+    ('HYBRID', '用户和签到员均可签到'),
+)
+
+CHECK_IN_METHOD_NONE = 'NONE'  # <--- 新增常量
+CHECK_IN_METHOD_SELF = 'SELF'
+CHECK_IN_METHOD_STAFF = 'STAFF'
+CHECK_IN_METHOD_HYBRID = 'HYBRID'
+
+
 # ====================================================================
 # 辅助函数：获取空间的所有后代 (子孙) 空间
 # ====================================================================
@@ -82,6 +96,7 @@ def get_all_descendant_spaces(space_instance):
 
     return descendants
 
+
 # ====================================================================
 # SpaceType Model (空间类型)
 # ====================================================================
@@ -107,6 +122,14 @@ class SpaceType(models.Model):
         default=False,
         verbose_name="默认是否需要审批",
         help_text="新创建的空间默认是否需要管理员审核批准"
+    )
+    # 新增：默认签到方式，包含 NONE 选项
+    default_check_in_method = models.CharField(
+        max_length=10,
+        choices=CHECK_IN_METHOD_CHOICES,
+        default=CHECK_IN_METHOD_HYBRID,  # 默认允许用户和签到员均可签到，除非明确设置为 'NONE' 或 'STAFF'
+        verbose_name="默认签到方式",
+        help_text="该类型空间默认的签到方式，可被具体空间覆盖。"
     )
     default_available_start_time = models.TimeField(
         null=True, blank=True,
@@ -163,15 +186,17 @@ class SpaceType(models.Model):
             'description': self.description,
             'is_basic_infrastructure': self.is_basic_infrastructure,
             'default_is_bookable': self.default_is_bookable,
+            'default_check_in_method': self.default_check_in_method,  # <--- 包含新字段
             'default_requires_approval': self.default_requires_approval,
             'default_available_start_time': self.default_available_start_time.strftime(
                 '%H:%M:%S') if self.default_available_start_time else None,
             'default_available_end_time': self.default_available_end_time.strftime(
                 '%H:%M:%S') if self.default_available_end_time else None,
-            'default_min_booking_duration': self.default_min_booking_duration,  # <-- 移除 str()
-            'default_max_booking_duration': self.default_max_booking_duration,  # <-- 移除 str()
+            'default_min_booking_duration': self.default_min_booking_duration,
+            'default_max_booking_duration': self.default_max_booking_duration,
             'default_buffer_time_minutes': self.default_buffer_time_minutes,
         }
+
 
 # ====================================================================
 # Amenity Model (设施 - 定义设施的种类)
@@ -219,6 +244,7 @@ class Amenity(models.Model):
             'description': self.description,
             'is_bookable_individually': self.is_bookable_individually,
         }
+
 
 # ====================================================================
 # BookableAmenity Model (可预订设施实例 - Space 下的设施具体数量)
@@ -318,6 +344,7 @@ class BookableAmenity(models.Model):
             'is_active': self.is_active,
         }
 
+
 class Space(models.Model):
     """
     可预订空间模型，定义了每个空间的属性和预订规则。
@@ -360,6 +387,15 @@ class Space(models.Model):
         default=False,
         verbose_name="需要管理员审批",
         help_text="预订此空间是否需要管理员审核批准"
+    )
+
+    # 签到方式字段，允许为空以继承 SpaceType 的默认值
+    check_in_method = models.CharField(
+        max_length=10,
+        choices=CHECK_IN_METHOD_CHOICES,
+        null=True, blank=True,  # 允许为空，表示继承 SpaceType 的默认值
+        verbose_name="签到方式",
+        help_text="该空间的签到方式。若为空，则继承空间类型的默认值。若为'不需要签到'，则无需用户或签到员操作。"
     )
 
     available_start_time = models.TimeField(
@@ -437,6 +473,7 @@ class Space(models.Model):
             Index(fields=['requires_approval']),
             Index(fields=['managed_by']),
             Index(fields=['created_at']),
+            Index(fields=['check_in_method']),  # <--- 新增索引
         ]
 
     def clean(self):
@@ -461,7 +498,7 @@ class Space(models.Model):
         if self.pk and self.parent_space == self:
             raise ValidationError({'parent_space': '空间不能将自身设置为父级空间。'})
 
-        # 循环引用检测
+        # 循环引用检测 (保持不变)
         if self.parent_space and self.pk:
             current = self.parent_space
             processed_pks = {self.pk}
@@ -498,10 +535,15 @@ class Space(models.Model):
                 self.max_booking_duration = self.space_type.default_max_booking_duration
             if self.buffer_time_minutes is None:
                 self.buffer_time_minutes = self.space_type.default_buffer_time_minutes
+            if self.check_in_method is None or self.check_in_method == '':  # <--- 继承签到方式
+                self.check_in_method = self.space_type.default_check_in_method
 
             # 如果空间类型默认不可预订，则此空间也不可预订
             if not self.space_type.default_is_bookable:
                 self.is_bookable = False
+        else:  # 如果没有 space_type，则默认为 HYBRID (或 NONE，根据实际情况选择更宽松或更严格的默认)
+            if self.check_in_method is None or self.check_in_method == '':
+                self.check_in_method = CHECK_IN_METHOD_HYBRID  # 默认 HYBRID 使得在无 SpaceType 时能够正常工作
 
         self.full_clean()
         super().save(*args, **kwargs)
@@ -527,11 +569,12 @@ class Space(models.Model):
             'is_active': self.is_active,
             'image': self.image.url if self.image else None,
             'requires_approval': self.requires_approval,  # 模型字段值
+            'check_in_method': self.check_in_method,  # <--- 包含新字段
             'available_start_time': self.available_start_time.strftime(
                 '%H:%M:%S') if self.available_start_time else None,
             'available_end_time': self.available_end_time.strftime('%H:%M:%S') if self.available_end_time else None,
-            'min_booking_duration': self.min_booking_duration,  # <-- 移除 str()
-            'max_booking_duration': self.max_booking_duration,  # <-- 移除 str()
+            'min_booking_duration': self.min_booking_duration,
+            'max_booking_duration': self.max_booking_duration,
             'buffer_time_minutes': self.buffer_time_minutes,
             'managed_by_id': self.managed_by_id,
             'created_at': self.created_at.isoformat(),
@@ -549,14 +592,13 @@ class Space(models.Model):
                 self.space_type.default_requires_approval if self.space_type else False)
             data['effective_available_start_time'] = (self.available_start_time or (
                 self.space_type.default_available_start_time if self.space_type else None)).strftime('%H:%M:%S') if (
-                        self.available_start_time or (
-                    self.space_type.default_available_start_time if self.space_type else None)) else None
+                    self.available_start_time or (
+                self.space_type.default_available_start_time if self.space_type else None)) else None
             data['effective_available_end_time'] = (self.available_end_time or (
                 self.space_type.default_available_end_time if self.space_type else None)).strftime('%H:%M:%S') if (
-                        self.available_end_time or (
-                    self.space_type.default_available_end_time if self.space_type else None)) else None
+                    self.available_end_time or (
+                self.space_type.default_available_end_time if self.space_type else None)) else None
 
-            # 这里也应返回 timedelta 对象，或 None。由 serializer 负责转换为字符串。
             data['effective_min_booking_duration'] = self.min_booking_duration or (
                 self.space_type.default_min_booking_duration if self.space_type else None)
             data['effective_max_booking_duration'] = self.max_booking_duration or (
@@ -568,5 +610,14 @@ class Space(models.Model):
             data['permitted_groups_display'] = ", ".join(
                 [group.name for group in self.permitted_groups.all()]) if self.permitted_groups.exists() else (
                 "所有人" if self.space_type and self.space_type.is_basic_infrastructure else "无特定限制 (需权限)")
+
+            # 计算并添加有效的签到方式 <--- 新增
+            data['effective_check_in_method'] = self.check_in_method if self.check_in_method is not None else (
+                self.space_type.default_check_in_method if self.space_type else CHECK_IN_METHOD_HYBRID
+            # 如果都没有设置，默认 HYBRID
+            )
+            # 添加签到方式的显示名称，方便前端展示
+            data['effective_check_in_method_display'] = dict(CHECK_IN_METHOD_CHOICES).get(
+                data['effective_check_in_method'], '未知')
 
         return data
