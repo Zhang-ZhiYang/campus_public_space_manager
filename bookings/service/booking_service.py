@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, Union
 from datetime import datetime
 
 from django.db.models import QuerySet, Q
-from django.db import transaction
+from django.db import transaction  # 确保导入 transaction
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from rest_framework import status as http_status
@@ -25,8 +25,11 @@ from bookings.models import Booking  # 直接导入 Booking 模型
 from bookings.tasks import booking_tasks
 # 导入初步校验服务
 from bookings.service.booking_preliminary_service import BookingPreliminaryService
+# 导入通知服务
+from notifications.services import NotificationService
 
 logger = logging.getLogger(__name__)
+
 
 class BookingService(BaseService):
     """
@@ -47,12 +50,152 @@ class BookingService(BaseService):
     def __init__(self):
         super().__init__()
         self.booking_dao = self._get_dao_instance('booking')
-        self._booking_preliminary_service = None
+        self._booking_preliminary_service: Optional[BookingPreliminaryService] = None
+        self._notification_service: Optional[NotificationService] = None
 
     def _get_booking_preliminary_service(self) -> BookingPreliminaryService:
         if self._booking_preliminary_service is None:
             self._booking_preliminary_service = ServiceFactory.get_service('BookingPreliminaryService')
         return self._booking_preliminary_service
+
+    def _get_notification_service(self) -> NotificationService:
+        if self._notification_service is None:
+            self._notification_service = ServiceFactory.get_service('NotificationService')
+        return self._notification_service
+
+    def _send_booking_notification(self, booking_instance: Booking, message_type: str, reason: Optional[str] = None):
+        """
+        Helper to send booking-related notifications.
+        This function now uses transaction.on_commit to ensure notifications are
+        dispatched only after the main transaction (e.g., booking creation/update) commits.
+        Assumes booking_instance has 'user', 'space', 'bookable_amenity__amenity' pre-loaded.
+        """
+        # 提前检查用户和邮件地址，避免不必要的处理和在 on_commit 中再次检查
+        if not booking_instance.user or not booking_instance.user.email:
+            logger.warning(
+                f"Skipping notification for booking {booking_instance.pk}: User {booking_instance.user.pk if booking_instance.user else 'N/A'} has no email configured (username: {booking_instance.user.username if booking_instance.user else 'N/A'}).")
+            return
+
+        # 捕获所有必要的原始数据，以避免在 on_commit 中访问可能已失效的对象
+        booking_pk = booking_instance.pk
+        user_pk = booking_instance.user.pk
+        user_email = booking_instance.user.email  # 用于日志记录
+
+        booking_item_name = booking_instance.space.name if booking_instance.space else \
+            (
+                booking_instance.bookable_amenity.amenity.name if booking_instance.bookable_amenity and booking_instance.bookable_amenity.amenity else "未知预订项目")
+
+        start_time_formatted = booking_instance.start_time.strftime(
+            '%Y-%m-%d %H:%M') if booking_instance.start_time else "未知开始时间"
+        end_time_formatted = booking_instance.end_time.strftime(
+            '%Y-%m-%d %H:%M') if booking_instance.end_time else "未知结束时间"
+
+        # 安全获取用户的全名
+        full_name_callable = getattr(booking_instance.user, 'get_full_name', None)
+        if callable(full_name_callable):
+            full_name = full_name_callable()
+        else:  # 如果不是可调用方法，则直接取属性值
+            full_name = full_name_callable
+
+        if not full_name:  # 如果 full_name 为空，则回退到 username 或默认值
+            full_name = booking_instance.user.username or "用户"
+
+        email_subject = ""
+        email_content = ""
+
+        if message_type == 'BOOKING_SUBMITTED':
+            email_subject = f"您的预订已成功提交！(ID: {booking_pk})"
+            email_content = (
+                f"尊敬的 {full_name}，\n\n"
+                f"您的预订请求已成功提交至系统。\n"
+                f"预订ID: {booking_pk}\n"
+                f"预订项目: {booking_item_name}\n"
+                f"开始时间: {start_time_formatted}\n"
+                f"结束时间: {end_time_formatted}\n"
+                f"当前状态: {booking_instance.get_status_display()}\n\n"  # 使用 get_status_display()
+                f"我们将在审核后尽快通知您结果（如果需要审核）。您可以登录系统查看预订详情。\n\n"
+                f"此致，\n您的系统团队"
+            )
+        elif message_type == 'BOOKING_APPROVED':
+            email_subject = f"您的预订已成功批准！(ID: {booking_pk})"
+            email_content = (
+                f"尊敬的 {full_name}，\n\n"
+                f"恭喜！您的预订请求已获得批准！\n"
+                f"预订ID: {booking_pk}\n"
+                f"预订项目: {booking_item_name}\n"
+                f"开始时间: {start_time_formatted}\n"
+                f"结束时间: {end_time_formatted}\n"
+                f"状态: 已批准\n\n"
+                f"请按照预订时间前往使用。如有疑问，请联系管理人员。\n\n"
+                f"此致，\n您的系统团队"
+            )
+        elif message_type == 'BOOKING_REJECTED':
+            email_subject = f"您的预订申请已被拒绝 (ID: {booking_pk})"
+            email_content = (
+                f"尊敬的 {full_name}，\n\n"
+                f"很抱歉通知您，您的预订请求已被拒绝。\n"
+                f"预订ID: {booking_pk}\n"
+                f"预订项目: {booking_item_name}\n"
+                f"开始时间: {start_time_formatted}\n"
+                f"结束时间: {end_time_formatted}\n"
+                f"状态: 已拒绝\n"
+                f"原因: {reason or '管理人员未说明具体原因。'}\n\n"
+                f"如有疑问，请联系管理人员。\n\n"
+                f"此致，\n您的系统团队"
+            )
+        elif message_type == 'BOOKING_CANCELLED':
+            email_subject = f"您的预订已被取消 (ID: {booking_pk})"
+            email_content = (
+                f"尊敬的 {full_name}，\n\n"
+                f"您的预订请求已被成功取消。\n"
+                f"预订ID: {booking_pk}\n"
+                f"预订项目: {booking_item_name}\n"
+                f"开始时间: {start_time_formatted}\n"
+                f"结束时间: {end_time_formatted}\n"
+                f"状态: 已取消\n"
+                f"原因: {reason or '用户自行取消。'}\n\n"
+                f"如有疑问，请联系管理人员。\n\n"
+                f"此致，\n您的系统团队"
+            )
+        else:
+            logger.warning(
+                f"Unknown message type '{message_type}' for booking ID {booking_pk}, skipping notification content generation.")
+            return
+
+        # 将实际的通知发送逻辑包装在 transaction.on_commit 中
+        # 这个可调用函数只会在当前的事务（无论是创建、取消还是更新）成功提交后执行。
+        def _deferred_send_notification_task():
+            try:
+                # 在 on_commit 任务中重新获取用户对象，以确保它是最新的并对当前事务可见
+                try:
+                    user_obj_for_notification = CustomUser.objects.get(pk=user_pk)
+                except CustomUser.DoesNotExist:
+                    logger.error(
+                        f"Cannot re-fetch user {user_pk} for notification for booking {booking_pk} in on_commit task.")
+                    return
+
+                notification_service = self._get_notification_service()
+
+                notification_result = notification_service.send_notification(
+                    user=user_obj_for_notification,
+                    title=email_subject,
+                    content=email_content,
+                    message_type=message_type
+                )
+
+                if not notification_result.success:
+                    logger.error(
+                        f"Failed to send booking notification for booking ID {booking_pk}, type {message_type} during on_commit execution: {notification_result.message}. Details: {notification_result.errors}")
+                else:
+                    logger.info(
+                        f"Booking notification ({message_type}) dispatched via on_commit for user {user_pk} (email: {user_email}), booking ID {booking_pk}.")
+
+            except Exception as e:
+                logger.exception(
+                    f"An unexpected error occurred in deferred notification sending for booking ID {booking_pk}, type {message_type}.")
+
+        # 调度 _deferred_send_notification_task 在当前事务提交后运行
+        transaction.on_commit(_deferred_send_notification_task)
 
     def create_booking(self, user: CustomUser, request_data: Dict[str, Any]) -> ServiceResult[Dict[str, Any]]:
         logger.info(f"Received booking creation request for user {user.pk} with data: {request_data}")
@@ -72,6 +215,21 @@ class BookingService(BaseService):
 
         logger.info(
             f"Booking ID {booking_id} created in SUBMITTED state and deep validation task dispatched by preliminary service.")
+
+        try:
+            # 重新加载 booking_instance，确保所有关联对象都被 select_related 预加载，以便通知内容完整
+            booking_instance = self.booking_dao.get_queryset().select_related(
+                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
+            ).filter(pk=booking_id).first()
+
+            if booking_instance:
+                # 预订在此阶段为 SUBMITTED 状态，发送提交通知
+                self._send_booking_notification(booking_instance, 'BOOKING_SUBMITTED')
+            else:
+                logger.error(f"Could not fetch booking instance {booking_id} for initial notification after creation.")
+        except Exception as e:
+            logger.exception(f"Error preparing initial booking submitted notification for booking ID {booking_id}.")
+
         return pre_validate_result
 
     @CacheService.cache_method(key_prefix='bookings:booking')
@@ -95,7 +253,7 @@ class BookingService(BaseService):
             return self._handle_exception(e, default_message="获取预订详情失败。")
 
     def get_all_bookings(self, user: CustomUser, filters: Optional[Dict[str, Any]] = None) -> ServiceResult[
-        QuerySet[Booking]]:  # 类型提示使用 Booking
+        QuerySet[Booking]]:
         try:
             base_filters = Q(user=user)
 
@@ -122,7 +280,11 @@ class BookingService(BaseService):
     @transaction.atomic
     def cancel_booking(self, user: CustomUser, pk: int, reason: str) -> ServiceResult[None]:
         try:
-            booking = self.booking_dao.get_booking_by_id(pk)
+            # 在事务开始时获取预订实例，并确保加载相关数据用于权限检查
+            booking = self.booking_dao.get_queryset().select_for_update().select_related(
+                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
+            ).filter(pk=pk).first()
+
             if not booking:
                 raise NotFoundException(detail="预订记录未找到。")
 
@@ -137,9 +299,8 @@ class BookingService(BaseService):
             if not can_cancel:
                 raise ForbiddenException(detail="您没有权限取消此预订。")
 
-            # 确保使用正确的 常量名称
-            # 这里的 Booking.BOOKING_STATUS_CHECKED_IN 仍然未在你的 models.py 中定义，已根据之前提供的内容移除
-            if booking.status not in [Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED]:
+            if booking.status not in [Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED,
+                                      Booking.BOOKING_STATUS_CHECKED_IN]:  # 允许已签到取消
                 raise BadRequestException(detail=f"当前预订状态 '{booking.get_status_display()}' 不允许取消。",
                                           code="invalid_status_for_cancel")
 
@@ -159,6 +320,19 @@ class BookingService(BaseService):
             CacheService.delete_many_by_prefix('spaces:space')
 
             logger.info(f"Booking {pk} cancelled by user {user.pk}.")
+
+            # NEW: 重新加载 booking_instance 以确保所有关联对象都已加载，用于通知
+            final_booking_for_notification = self.booking_dao.get_queryset().select_related(
+                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
+            ).filter(pk=updated_booking.pk).first()
+
+            if final_booking_for_notification:
+                self._send_booking_notification(final_booking_for_notification, 'BOOKING_CANCELLED', reason=reason)
+            else:
+                logger.error(
+                    f"Failed to re-fetch booking {updated_booking.pk} for cancellation notification. Notification will not be sent.")
+            # END NEW
+
             return ServiceResult.success_result(message="预订取消成功。")
         except CustomAPIException as e:
             raise e
@@ -168,9 +342,13 @@ class BookingService(BaseService):
 
     @transaction.atomic
     def update_booking_status(self, user: CustomUser, pk: int, new_status: str, admin_notes: Optional[str] = None) -> \
-            ServiceResult[Booking]:  # 返回类型现在是 Booking 模型实例
+            ServiceResult[Booking]:
         try:
-            booking = self.booking_dao.get_booking_by_id(pk)
+            # 在事务开始时获取预订实例，并确保加载相关数据用于权限检查和状态流转
+            booking = self.booking_dao.get_queryset().select_for_update().select_related(
+                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
+            ).filter(pk=pk).first()
+
             if not booking:
                 raise NotFoundException(detail="预订记录未找到。")
 
@@ -178,26 +356,27 @@ class BookingService(BaseService):
                     not (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user):
                 raise ForbiddenException(detail="您没有权限修改此预订的状态。")
 
-            # --- 修正点：将 Booking.STATUS_CHOICES 改为 Booking.BOOKING_STATUS_CHOICES ---
+            current_status = booking.status  # 存储原始状态
+
             valid_statuses = [choice[0] for choice in Booking.BOOKING_STATUS_CHOICES]
             if new_status not in valid_statuses:
                 raise BadRequestException(detail=f"无效的预订状态 '{new_status}'。", code="invalid_booking_status")
 
-            # 状态流转规则检查 (请确保在 Booking 模型中定义的常量名称与此一致)
-            if new_status == Booking.BOOKING_STATUS_APPROVED and booking.status != Booking.BOOKING_STATUS_PENDING:
+            # 状态流转规则检查
+            if new_status == Booking.BOOKING_STATUS_APPROVED and current_status != Booking.BOOKING_STATUS_PENDING:
                 raise BadRequestException(detail="只有待审核状态的预订才能被批准。", code="invalid_status_transition")
 
-            if new_status == Booking.BOOKING_STATUS_REJECTED and booking.status != Booking.BOOKING_STATUS_PENDING:
+            if new_status == Booking.BOOKING_STATUS_REJECTED and current_status != Booking.BOOKING_STATUS_PENDING:
                 raise BadRequestException(detail="只有待审核状态的预订才能被拒绝。", code="invalid_status_transition")
 
-            # 根据你提供的 bookings/models.py，这些常量存在
-            if new_status == Booking.BOOKING_STATUS_CHECKED_IN and booking.status != Booking.BOOKING_STATUS_APPROVED:
+            if new_status == Booking.BOOKING_STATUS_CHECKED_IN and current_status != Booking.BOOKING_STATUS_APPROVED:
                 raise BadRequestException(detail="只有已批准状态的预订才能签到。", code="invalid_status_transition")
 
-            if new_status == Booking.BOOKING_STATUS_COMPLETED and booking.status not in [Booking.BOOKING_STATUS_CHECKED_IN, Booking.BOOKING_STATUS_APPROVED]: # Completed usually from checked-in, but sometimes directly from approved depending on use case
-                raise BadRequestException(detail="只有已签到或已批准状态的预订才能完成。", code="invalid_status_transition")
+            if new_status == Booking.BOOKING_STATUS_COMPLETED and current_status not in [
+                Booking.BOOKING_STATUS_CHECKED_IN, Booking.BOOKING_STATUS_APPROVED]:
+                raise BadRequestException(detail="只有已签到或已批准状态的预订才能完成。",
+                                          code="invalid_status_transition")
 
-            # --- 修正点：传递 pk 而不是 booking 实例 ---
             updated_booking = self.booking_dao.update_booking_status(
                 pk,
                 new_status=new_status,
@@ -215,6 +394,23 @@ class BookingService(BaseService):
             CacheService.delete_many_by_prefix('spaces:space')
 
             logger.info(f"Booking {pk} status updated to {new_status} by user {user.pk}.")
+
+            # NEW: 重新加载 booking_instance 以确保所有关联对象都已加载，用于通知
+            final_booking_for_notification = self.booking_dao.get_queryset().select_related(
+                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
+            ).filter(pk=updated_booking.pk).first()
+
+            if final_booking_for_notification:
+                if new_status == Booking.BOOKING_STATUS_APPROVED:
+                    self._send_booking_notification(final_booking_for_notification, 'BOOKING_APPROVED')
+                elif new_status == Booking.BOOKING_STATUS_REJECTED:
+                    # 对于拒绝，admin_notes 可以作为原因
+                    self._send_booking_notification(final_booking_for_notification, 'BOOKING_REJECTED',
+                                                    reason=admin_notes)
+            else:
+                logger.error(
+                    f"Failed to re-fetch booking {updated_booking.pk} for status update notification. Notification will not be sent.")
+            # END NEW
 
             return ServiceResult.success_result(
                 data=updated_booking,

@@ -280,126 +280,126 @@ SPECTACULAR_SETTINGS = {
 # 13. 日志配置 (Logging)
 # ==============================================================================
 
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,  # 不要禁用现有的 logger，以便可以修改 Django 的默认 logger
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
-            'style': '{',
-        },
-        'django.server': {  # 专门用于 Django runserver 的输出格式
-            'format': '[{asctime}] {message}',
-            'style': '{',
-        },
-    },
-    'handlers': {
-        'console': {  # 控制台输出
-            'level': 'DEBUG' if DEBUG else 'INFO',  # DEBUG模式显示DEBUG，生产显示INFO
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose' if DEBUG else 'simple',  # DEBUG模式用详细格式，生产用简洁格式
-        },
-        'file_debug': {  # 调试日志文件：记录所有详细信息
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs/debug.log',
-            'formatter': 'verbose',
-        },
-        'file_error': {  # 错误日志文件：只记录 ERROR 和 CRITICAL
-            'level': 'ERROR',
-            'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs/error.log',
-            'formatter': 'verbose',
-        },
-        'django.server': {  # 为 Django 的开发服务器提供专门处理程序
-            'level': 'INFO',
-            'class': 'logging.StreamHandler',
-            'formatter': 'django.server',
-        },
-
-        # 可以根据需要添加其他更细粒度的文件 handler，例如
-        # 'cache_file': {
-        #     'level': 'DEBUG',
-        #     'class': 'logging.FileHandler',
-        #     'filename': BASE_DIR / 'logs/cache.log',
-        #     'formatter': 'verbose',
-        # },
-    },
-    'loggers': {
-        'django': {  # Django 框架自身的日志
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'INFO',  # 默认 INFO，但如果 DEBUG=True，文件输出会是 DEBUG
-            'propagate': False,  # 不将日志消息传递给父级或根 logger
-        },
-        'django.request': {  # HTTP 请求和响应日志
-            'handlers': ['file_debug', 'file_error'],  # 通常在生产环境记录 WARNING 或 ERROR
-            'level': 'WARNING' if DEBUG else 'INFO',  # DEBUG模式可设为INFO，生产模式设为WARNING
-            'propagate': False,
-        },
-        'django.server': {  # Django 开发服务器的日志 (如 runserver)
-            'handlers': ['django.server'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'django.db.backends': {  # 数据库查询日志 - 仅在 DEBUG 模式下激活 DEBUG 级别
-            'handlers': ['file_debug'],  # SQL 查询很详细，通常只记录到 debug.log
-            'level': 'DEBUG' if DEBUG else 'INFO',  # 设为 DEBUG 会打印所有 SQL 查询
-            'propagate': False,
-        },
-        'celery': {  # Celery 相关的日志
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'INFO',  # Celery worker 自己的日志级别，与 Celery worker 命令的 -l 参数协同
-            'propagate': False,
-        },
-
-        # --- 自定义应用 logger ---
-        'core': {  # 你的核心通用逻辑
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'DEBUG' if DEBUG else 'INFO',  # 核心部分在开发环境可设为 DEBUG
-            'propagate': False,
-        },
-        'core.cache': {  # 专门用于 CacheService 的日志
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'DEBUG' if DEBUG else 'INFO',  # 缓存操作可设为 DEBUG 以观察命中与失效
-            'propagate': False,
-        },
-        'users': {  # 用户应用
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'spaces': {  # 空间管理应用
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'DEBUG' if DEBUG else 'INFO',  # 空间逻辑可能较复杂，开发时设为 DEBUG
-            'propagate': False,
-        },
-        'bookings': {  # 预订管理应用
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'notifications': {  # 通知应用
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-
-        '': {  # 根 logger，捕获所有未被其他 logger 处理的消息
-            'handlers': ['console', 'file_debug', 'file_error'],
-            'level': 'WARNING',  # 默认只处理 WARNING 及以上级别，避免过多垃圾信息
-            'propagate': False,
-        },
-    },
-}
-
-# 确保日志目录存在
-LOG_DIR = BASE_DIR / 'logs'
-if not LOG_DIR.exists():
-    LOG_DIR.mkdir()
+# LOGGING = {
+#     'version': 1,
+#     'disable_existing_loggers': False,  # 不要禁用现有的 logger，以便可以修改 Django 的默认 logger
+#     'formatters': {
+#         'verbose': {
+#             'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+#             'style': '{',
+#         },
+#         'simple': {
+#             'format': '{levelname} {message}',
+#             'style': '{',
+#         },
+#         'django.server': {  # 专门用于 Django runserver 的输出格式
+#             'format': '[{asctime}] {message}',
+#             'style': '{',
+#         },
+#     },
+#     'handlers': {
+#         'console': {  # 控制台输出
+#             'level': 'DEBUG' if DEBUG else 'INFO',  # DEBUG模式显示DEBUG，生产显示INFO
+#             'class': 'logging.StreamHandler',
+#             'formatter': 'verbose' if DEBUG else 'simple',  # DEBUG模式用详细格式，生产用简洁格式
+#         },
+#         'file_debug': {  # 调试日志文件：记录所有详细信息
+#             'level': 'DEBUG',
+#             'class': 'logging.FileHandler',
+#             'filename': BASE_DIR / 'logs/debug.log',
+#             'formatter': 'verbose',
+#         },
+#         'file_error': {  # 错误日志文件：只记录 ERROR 和 CRITICAL
+#             'level': 'ERROR',
+#             'class': 'logging.FileHandler',
+#             'filename': BASE_DIR / 'logs/error.log',
+#             'formatter': 'verbose',
+#         },
+#         'django.server': {  # 为 Django 的开发服务器提供专门处理程序
+#             'level': 'INFO',
+#             'class': 'logging.StreamHandler',
+#             'formatter': 'django.server',
+#         },
+#
+#         # 可以根据需要添加其他更细粒度的文件 handler，例如
+#         # 'cache_file': {
+#         #     'level': 'DEBUG',
+#         #     'class': 'logging.FileHandler',
+#         #     'filename': BASE_DIR / 'logs/cache.log',
+#         #     'formatter': 'verbose',
+#         # },
+#     },
+#     'loggers': {
+#         'django': {  # Django 框架自身的日志
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'INFO',  # 默认 INFO，但如果 DEBUG=True，文件输出会是 DEBUG
+#             'propagate': False,  # 不将日志消息传递给父级或根 logger
+#         },
+#         'django.request': {  # HTTP 请求和响应日志
+#             'handlers': ['file_debug', 'file_error'],  # 通常在生产环境记录 WARNING 或 ERROR
+#             'level': 'WARNING' if DEBUG else 'INFO',  # DEBUG模式可设为INFO，生产模式设为WARNING
+#             'propagate': False,
+#         },
+#         'django.server': {  # Django 开发服务器的日志 (如 runserver)
+#             'handlers': ['django.server'],
+#             'level': 'INFO',
+#             'propagate': False,
+#         },
+#         'django.db.backends': {  # 数据库查询日志 - 仅在 DEBUG 模式下激活 DEBUG 级别
+#             'handlers': ['file_debug'],  # SQL 查询很详细，通常只记录到 debug.log
+#             'level': 'DEBUG' if DEBUG else 'INFO',  # 设为 DEBUG 会打印所有 SQL 查询
+#             'propagate': False,
+#         },
+#         'celery': {  # Celery 相关的日志
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'INFO',  # Celery worker 自己的日志级别，与 Celery worker 命令的 -l 参数协同
+#             'propagate': False,
+#         },
+#
+#         # --- 自定义应用 logger ---
+#         'core': {  # 你的核心通用逻辑
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',  # 核心部分在开发环境可设为 DEBUG
+#             'propagate': False,
+#         },
+#         'core.cache': {  # 专门用于 CacheService 的日志
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',  # 缓存操作可设为 DEBUG 以观察命中与失效
+#             'propagate': False,
+#         },
+#         'users': {  # 用户应用
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'INFO',
+#             'propagate': False,
+#         },
+#         'spaces': {  # 空间管理应用
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',  # 空间逻辑可能较复杂，开发时设为 DEBUG
+#             'propagate': False,
+#         },
+#         'bookings': {  # 预订管理应用
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'INFO',
+#             'propagate': False,
+#         },
+#         'notifications': {  # 通知应用
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'INFO',
+#             'propagate': False,
+#         },
+#
+#         '': {  # 根 logger，捕获所有未被其他 logger 处理的消息
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'WARNING',  # 默认只处理 WARNING 及以上级别，避免过多垃圾信息
+#             'propagate': False,
+#         },
+#     },
+# }
+#
+# # 确保日志目录存在
+# LOG_DIR = BASE_DIR / 'logs'
+# if not LOG_DIR.exists():
+#     LOG_DIR.mkdir()
 
 EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
 
