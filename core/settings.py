@@ -400,3 +400,23 @@ LOGGING = {
 LOG_DIR = BASE_DIR / 'logs'
 if not LOG_DIR.exists():
     LOG_DIR.mkdir()
+
+EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
+
+# SMTP 服务器配置
+EMAIL_HOST = config('EMAIL_HOST', default='smtp.qq.com')
+EMAIL_PORT = config('EMAIL_PORT', default=465, cast=int) # 自动转换为整数
+
+# 安全设置
+# QQ邮箱通常使用 SSL (端口 465)
+EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=True, cast=bool) # 自动转换为布尔值
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=False, cast=bool)
+
+# 认证信息
+EMAIL_HOST_USER = config('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD')
+
+# 默认发件人
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
+# 用于发送错误报警邮件的地址 (通常与发件人一致)
+SERVER_EMAIL = config('SERVER_EMAIL', default=EMAIL_HOST_USER)
