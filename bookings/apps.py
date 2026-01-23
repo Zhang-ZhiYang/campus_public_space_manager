@@ -14,7 +14,7 @@ class BookingsConfig(AppConfig):
         from core.dao import DAOFactory
         from core.service import ServiceFactory
         import bookings.signals
-
+        import bookings.signal_scheduling
         from bookings.dao import (
             BookingDAO, DailyBookingLimitDAO, ViolationDAO,
             UserPenaltyPointsPerSpaceTypeDAO, SpaceTypeBanPolicyDAO,
@@ -57,3 +57,4 @@ class BookingsConfig(AppConfig):
         from celery import current_app
         from celery.schedules import crontab
         from bookings.tasks.violation_tasks import recalculate_all_penalty_points_and_apply_bans_task
+        from bookings.tasks.no_show_tasks import create_no_show_violation_for_single_booking,process_overdue_approved_bookings_for_no_show

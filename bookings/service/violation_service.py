@@ -22,9 +22,11 @@ from guardian.shortcuts import get_objects_for_user, assign_perm
 
 # ====================================================================
 # 模块级别的辅助函数 (从 bookings.signals 导入，防止循环依赖)
-# ====================================================================
+# NOTE: _get_violation_target_space_type is NO LONGER imported directly FROM signals here.
+# Instead, the logic to infer space_type from a booking is directly implemented within
+# _create_no_show_violation_for_booking to adhere to the Open/Closed Principle.
 from bookings.signals import (
-    _get_violation_target_space_type,
+    # _get_violation_target_space_type, # This import is removed.
     _recalculate_user_penalty_points,
     _apply_ban_policy
 )
@@ -282,7 +284,95 @@ class ViolationService(BaseService):
         )
 
     @transaction.atomic
+    def _create_no_show_violation_for_booking(self, booking: Booking, issued_by_user: Optional[CustomUser] = None) -> \
+    ServiceResult[Violation]:
+        """
+        内部方法：为指定的预订创建一条“未到场”违规记录。
+        此方法旨在供自动化任务或已通过权限检查的流程调用，不执行额外的权限检查。
+        它会同时将预订状态更新为 `NO_SHOW`。
+
+        :param booking: 关联的 Booking 实例。此实例应已预加载 'user', 'space', 'bookable_amenity', 'related_space' 等相关字段。
+        :param issued_by_user: 记录此违规的用户 (如果是手动操作)。对于自动化任务，可为 None。
+        :return: ServiceResult，包含新创建的 Violation 实例。
+        """
+        if booking.status not in [Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED]:
+            logger.debug(
+                f"Booking {booking.pk} status is {booking.status}, not PENDING or APPROVED. Cannot mark as NO_SHOW.")
+            return ServiceResult.error_result(
+                message=f"预订 {booking.pk} 状态为 {booking.get_status_display()}，无法标记为未到场。",
+                error_code="invalid_booking_status_for_no_show",
+                status_code=400
+            )
+
+        # 确保预订已过期
+        if booking.end_time >= timezone.now():
+            logger.debug(
+                f"Booking {booking.pk} end_time ({booking.end_time}) has not passed yet. Cannot mark as NO_SHOW.")
+            return ServiceResult.error_result(
+                message=f"预订 {booking.pk} 尚未过期，无法标记为未到场。",
+                error_code="booking_not_overdue_for_no_show",
+                status_code=400
+            )
+
+        # 标记预订为 NO_SHOW
+        # Use a dict for update fields for clarity and potential future expansion
+        update_fields = {'status': Booking.BOOKING_STATUS_NO_SHOW}
+        admin_notes_prefix = f"系统自动标记为未到场，因预订过期未签到。"
+        if booking.admin_notes:
+            update_fields['admin_notes'] = f"{booking.admin_notes}\n{admin_notes_prefix}" + (
+                f" 操作员: {issued_by_user.username}" if issued_by_user else "")
+        else:
+            update_fields['admin_notes'] = admin_notes_prefix + (
+                f" 操作员: {issued_by_user.username}" if issued_by_user else "")
+
+        updated_booking = self.booking_dao.update(
+            booking,  # 直接传入 booking 实例
+            **update_fields
+        )
+        if not updated_booking:
+            raise InternalServerError(f"更新预订 {booking.pk} 状态为 NO_SHOW 失败。")
+
+        # --- IMPORTANT CHANGE: Infer space_type directly from Booking (without signals helper) ---
+        space_type_for_violation = None
+        if updated_booking.space and updated_booking.space.space_type:
+            space_type_for_violation = updated_booking.space.space_type
+        elif updated_booking.bookable_amenity and \
+                updated_booking.bookable_amenity.space and \
+                updated_booking.bookable_amenity.space.space_type:
+            space_type_for_violation = updated_booking.bookable_amenity.space.space_type
+        elif updated_booking.related_space and updated_booking.related_space.space_type:  # Fallback to related_space
+            space_type_for_violation = updated_booking.related_space.space_type
+        # --- END IMPORTANT CHANGE ---
+
+        if not space_type_for_violation:
+            logger.warning(
+                f"Could not determine space type for booking {updated_booking.pk}. Violation may not apply correctly for penalty points.")
+
+        # 创建违规记录
+        try:
+            target_space_name = getattr(booking.related_space, 'name', '未知空间') if booking.related_space else '未知空间'
+            violation_data_for_creation = {
+                'user': booking.user,
+                'booking': booking,  # 关联原始 booking
+                'space_type': space_type_for_violation,
+                'violation_type': Violation.VIOLATION_TYPE_NO_SHOW,
+                'description': f"用户 {booking.user.get_full_name} 未在 {target_space_name} (预订ID: {booking.pk}) 预订中签到，系统自动创建。",
+                'issued_by': issued_by_user,  # 对于自动化任务，此项为 None
+                'penalty_points': 1  # 未到场的默认违约点数
+            }
+            new_violation = self.violation_dao.create(**violation_data_for_creation)  # 使用 DAO 的 create 方法
+            logger.info(f"Violation ID:{new_violation.pk} created for booking {booking.pk} (user {booking.user.pk}).")
+            return ServiceResult.success_result(data=new_violation, message="未到场违规记录创建成功。")
+        except Exception as e:
+            logger.exception(f"Failed to create violation for booking {booking.pk}: {e}")
+            raise InternalServerError(f"创建未到场违规记录失败: {e}")
+
+    @transaction.atomic
     def mark_no_show_and_violate(self, user: CustomUser, pk_list: List[int]) -> ServiceResult[Tuple[int, int]]:
+        """
+        批量标记预订为未到场并创建违规记录。
+        此方法用于API层的手动操作，会执行权限检查。
+        """
         no_show_count = 0
         violation_count = 0
         warnings = []
@@ -304,15 +394,19 @@ class ViolationService(BaseService):
         has_global_create_violation_perm = is_system_admin_or_superuser or \
                                            user.has_perm('bookings.can_create_violation_record')
 
-        queryset = self.booking_dao.filter(pk__in=pk_list)
+        # 预加载 bookings，减少循环内的数据库查询
+        bookings_to_process = self.booking_dao.filter(pk__in=pk_list).select_related(
+            'user', 'space__space_type', 'bookable_amenity__space__space_type', 'related_space__space_type'
+        )
 
-        for booking in queryset:
-            target_space = self.booking_dao.get_target_space_for_booking(booking)
+        for booking in bookings_to_process:
+            target_space = booking.related_space  # 已预加载
 
             can_mark_single_no_show = has_global_mark_no_show_and_violate_perm or \
                                       (target_space and user.has_perm('spaces.can_checkin_space_bookings',
                                                                       target_space))
 
+            # 创建违规记录的权限检查
             can_create_single_violation_record = has_global_create_violation_perm
             if not can_create_single_violation_record and user.is_space_manager and target_space and target_space.space_type:
                 managed_spacetypes = self.violation_dao.get_managed_spacetypes_by_user(user)
@@ -324,40 +418,25 @@ class ViolationService(BaseService):
                 logger.warning(f"User {user.id} has no permission to mark no-show for booking {booking.id}.")
                 continue
 
-            # 使用常量
-            if booking.status in [Booking.BOOKING_STATUS_PENDING,
-                                  Booking.BOOKING_STATUS_APPROVED] and booking.end_time < timezone.now():
+            # 仅处理状态为 APPROVED 或 PENDING 且已过期的预订
+            # 内部方法 _create_no_show_violation_for_booking 会进行状态和过期时间检查，因此这里只需简单判断即可。
+            if booking.status in [Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED] \
+                    and booking.end_time < timezone.now():
                 try:
-                    self.booking_dao.update(booking, status=Booking.BOOKING_STATUS_NO_SHOW)  # 使用常量
-                    no_show_count += 1
+                    # 调用内部方法来处理每个预订，并由当前用户作为操作者
+                    service_result = self._create_no_show_violation_for_booking(booking=booking, issued_by_user=user)
 
-                    space_type_for_violation = None
-                    if target_space:
-                        space_type_for_violation = target_space.space_type
-
-                    if space_type_for_violation and can_create_single_violation_record:
-                        # Call DAO which then calls model.save()
-                        self.violation_dao.create_violation(
-                            user=booking.user, booking=booking, space_type=space_type_for_violation,
-                            violation_type='NO_SHOW',
-                            # Violation type is a string constant defined in models.py (or global constant)
-                            description=f"用户 {booking.user.get_full_name} 未在 {getattr(target_space, 'name', '未知空间')} 预订中签到。",
-                            issued_by=user, penalty_points=1
-                        )
-                        violation_count += 1
-                        logger.info(
-                            f"Violation created for booking {booking.id} (user {booking.user.id}, space_type {space_type_for_violation.id}).")
-                    elif space_type_for_violation and not can_create_single_violation_record:
-                        warnings.append(f"用户 {user.username} 无权为预订 {booking.id} 创建违规记录，已跳过。")
+                    if service_result.success:
+                        no_show_count += 1
+                        violation_count += 1  # 如果内部方法成功，则违规记录也已创建
                     else:
-                        warnings.append(f"预订 {booking.id} 无法确定空间类型，未能创建违规记录。")
-
+                        errors.append(f"标记预订 {booking.id} 为未到场或创建违规记录失败: {service_result.message}")
                 except Exception as e:
                     errors.append(f"标记预订 {booking.id} 为未到场或创建违规记录失败: {e}")
                     logger.error(f"Error marking booking {booking.id} as no-show or creating violation: {e}",
                                  exc_info=True)
             else:
-                warnings.append(f"预订 {booking.id} 状态为 {booking.status} 或未过期，无法标记为未到场。")
+                warnings.append(f"预订 {booking.id} 状态为 {booking.get_status_display()} 或未过期，无法标记为未到场。")
 
         if errors:
             return ServiceResult.error_result(
