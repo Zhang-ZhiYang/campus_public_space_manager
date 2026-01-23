@@ -63,7 +63,8 @@ class BookingService(BaseService):
             self._notification_service = ServiceFactory.get_service('NotificationService')
         return self._notification_service
 
-    def _send_booking_notification(self, booking_instance: Booking, message_type: str, reason: Optional[str] = None):
+    def _send_booking_notification(self, booking_instance: Booking, message_type: str, performed_by_user: CustomUser,
+                                   reason: Optional[str] = None):
         """
         Helper to send booking-related notifications.
         This function now uses transaction.on_commit to ensure notifications are
@@ -76,10 +77,10 @@ class BookingService(BaseService):
                 f"Skipping notification for booking {booking_instance.pk}: User {booking_instance.user.pk if booking_instance.user else 'N/A'} has no email configured (username: {booking_instance.user.username if booking_instance.user else 'N/A'}).")
             return
 
-        # 捕获所有必要的原始数据，以避免在 on_commit 中访问可能已失效的对象
+        # --- 捕获所有必要的原始数据，以避免在 on_commit 中访问可能已失效的对象 ---
         booking_pk = booking_instance.pk
-        user_pk = booking_instance.user.pk
-        user_email = booking_instance.user.email  # 用于日志记录
+        booking_user_pk = booking_instance.user.pk  # 这是邮件的接收者
+        booking_user_email = booking_instance.user.email  # 用于日志记录
 
         booking_item_name = booking_instance.space.name if booking_instance.space else \
             (
@@ -90,15 +91,27 @@ class BookingService(BaseService):
         end_time_formatted = booking_instance.end_time.strftime(
             '%Y-%m-%d %H:%M') if booking_instance.end_time else "未知结束时间"
 
-        # 安全获取用户的全名
-        full_name_callable = getattr(booking_instance.user, 'get_full_name', None)
-        if callable(full_name_callable):
-            full_name = full_name_callable()
-        else:  # 如果不是可调用方法，则直接取属性值
-            full_name = full_name_callable
+        # 安全获取预订用户 (接收者) 的全名
+        full_name_callable_recipient = getattr(booking_instance.user, 'get_full_name', None)
+        if callable(full_name_callable_recipient):
+            full_name_recipient = full_name_callable_recipient()
+        else:
+            full_name_recipient = full_name_callable_recipient
+        if not full_name_recipient:
+            full_name_recipient = booking_instance.user.username or "用户"
 
-        if not full_name:  # 如果 full_name 为空，则回退到 username 或默认值
-            full_name = booking_instance.user.username or "用户"
+        # 安全获取执行操作的用户 (例如，取消预订的管理员) 的全名和电话
+        full_name_callable_performer = getattr(performed_by_user, 'get_full_name', None)
+        if callable(full_name_callable_performer):
+            full_name_performer = full_name_callable_performer()
+        else:
+            full_name_performer = full_name_callable_performer
+        if not full_name_performer:
+            full_name_performer = performed_by_user.username or "操作人"
+
+        performed_by_user_phone = performed_by_user.phone_number if hasattr(performed_by_user,
+                                                                            'phone_number') and performed_by_user.phone_number else None
+        # --- 原始数据捕获结束 ---
 
         email_subject = ""
         email_content = ""
@@ -106,20 +119,20 @@ class BookingService(BaseService):
         if message_type == 'BOOKING_SUBMITTED':
             email_subject = f"您的预订已成功提交！(ID: {booking_pk})"
             email_content = (
-                f"尊敬的 {full_name}，\n\n"
+                f"尊敬的 {full_name_recipient}，\n\n"
                 f"您的预订请求已成功提交至系统。\n"
                 f"预订ID: {booking_pk}\n"
                 f"预订项目: {booking_item_name}\n"
                 f"开始时间: {start_time_formatted}\n"
                 f"结束时间: {end_time_formatted}\n"
-                f"当前状态: {booking_instance.get_status_display()}\n\n"  # 使用 get_status_display()
+                f"当前状态: {booking_instance.get_status_display()}\n\n"
                 f"我们将在审核后尽快通知您结果（如果需要审核）。您可以登录系统查看预订详情。\n\n"
                 f"此致，\n您的系统团队"
             )
         elif message_type == 'BOOKING_APPROVED':
             email_subject = f"您的预订已成功批准！(ID: {booking_pk})"
             email_content = (
-                f"尊敬的 {full_name}，\n\n"
+                f"尊敬的 {full_name_recipient}，\n\n"
                 f"恭喜！您的预订请求已获得批准！\n"
                 f"预订ID: {booking_pk}\n"
                 f"预订项目: {booking_item_name}\n"
@@ -132,7 +145,7 @@ class BookingService(BaseService):
         elif message_type == 'BOOKING_REJECTED':
             email_subject = f"您的预订申请已被拒绝 (ID: {booking_pk})"
             email_content = (
-                f"尊敬的 {full_name}，\n\n"
+                f"尊敬的 {full_name_recipient}，\n\n"
                 f"很抱歉通知您，您的预订请求已被拒绝。\n"
                 f"预订ID: {booking_pk}\n"
                 f"预订项目: {booking_item_name}\n"
@@ -140,21 +153,39 @@ class BookingService(BaseService):
                 f"结束时间: {end_time_formatted}\n"
                 f"状态: 已拒绝\n"
                 f"原因: {reason or '管理人员未说明具体原因。'}\n\n"
-                f"如有疑问，请联系管理人员。\n\n"
+                f"如有疑问，请咨询相关管理员。\n\n"
                 f"此致，\n您的系统团队"
             )
         elif message_type == 'BOOKING_CANCELLED':
             email_subject = f"您的预订已被取消 (ID: {booking_pk})"
+            cancellation_reason_input = reason or ''  # 从函数入参接收的理由
+            # 判断是预订用户自行取消还是管理员/空间管理员取消
+            if performed_by_user.pk == booking_user_pk:  # 预订用户执行的取消
+                email_reason_details = (
+                    f"原因: {cancellation_reason_input or '您主动取消了预订。'}\n\n"
+                )
+            else:  # 管理员/空间管理员取消
+                admin_action_text = "管理员强制取消"
+
+                admin_contact_info_line = ""
+                if performed_by_user_phone:
+                    admin_contact_info_line = f"联系电话: {performed_by_user_phone}\n"
+
+                email_reason_details = (
+                    f"操作人: {full_name_performer} （管理员）\n"
+                    f"操作详情: {admin_action_text}\n"
+                    f"{admin_contact_info_line}"  # 添加联系电话
+                    f"如有疑问，请咨询相关管理员。\n\n"
+                )
+
             email_content = (
-                f"尊敬的 {full_name}，\n\n"
-                f"您的预订请求已被成功取消。\n"
-                f"预订ID: {booking_pk}\n"
+                f"尊敬的 {full_name_recipient}，\n\n"
+                f"您的预订请求（ID: {booking_pk}）已被成功取消。\n"
                 f"预订项目: {booking_item_name}\n"
                 f"开始时间: {start_time_formatted}\n"
                 f"结束时间: {end_time_formatted}\n"
                 f"状态: 已取消\n"
-                f"原因: {reason or '用户自行取消。'}\n\n"
-                f"如有疑问，请联系管理人员。\n\n"
+                f"{email_reason_details}"  # 这里插入构造好的理由详情
                 f"此致，\n您的系统团队"
             )
         else:
@@ -166,12 +197,12 @@ class BookingService(BaseService):
         # 这个可调用函数只会在当前的事务（无论是创建、取消还是更新）成功提交后执行。
         def _deferred_send_notification_task():
             try:
-                # 在 on_commit 任务中重新获取用户对象，以确保它是最新的并对当前事务可见
+                # 在 on_commit 任务中重新获取接收者用户对象，以确保它是最新的并对当前事务可见
                 try:
-                    user_obj_for_notification = CustomUser.objects.get(pk=user_pk)
+                    user_obj_for_notification = CustomUser.objects.get(pk=booking_user_pk)  # Recipient user
                 except CustomUser.DoesNotExist:
                     logger.error(
-                        f"Cannot re-fetch user {user_pk} for notification for booking {booking_pk} in on_commit task.")
+                        f"Cannot re-fetch recipient user {booking_user_pk} for notification for booking {booking_pk} in on_commit task.")
                     return
 
                 notification_service = self._get_notification_service()
@@ -182,14 +213,12 @@ class BookingService(BaseService):
                     content=email_content,
                     message_type=message_type
                 )
-
                 if not notification_result.success:
                     logger.error(
                         f"Failed to send booking notification for booking ID {booking_pk}, type {message_type} during on_commit execution: {notification_result.message}. Details: {notification_result.errors}")
                 else:
                     logger.info(
-                        f"Booking notification ({message_type}) dispatched via on_commit for user {user_pk} (email: {user_email}), booking ID {booking_pk}.")
-
+                        f"Booking notification ({message_type}) dispatched via on_commit for user {booking_user_pk} (email: {booking_user_email}), booking ID {booking_pk}.")
             except Exception as e:
                 logger.exception(
                     f"An unexpected error occurred in deferred notification sending for booking ID {booking_pk}, type {message_type}.")
@@ -223,8 +252,8 @@ class BookingService(BaseService):
             ).filter(pk=booking_id).first()
 
             if booking_instance:
-                # 预订在此阶段为 SUBMITTED 状态，发送提交通知
-                self._send_booking_notification(booking_instance, 'BOOKING_SUBMITTED')
+                # 预订在此阶段为 SUBMITTED 状态，发送提交通知，执行操作者是预订用户
+                self._send_booking_notification(booking_instance, 'BOOKING_SUBMITTED', performed_by_user=user)
             else:
                 logger.error(f"Could not fetch booking instance {booking_id} for initial notification after creation.")
         except Exception as e:
@@ -327,7 +356,9 @@ class BookingService(BaseService):
             ).filter(pk=updated_booking.pk).first()
 
             if final_booking_for_notification:
-                self._send_booking_notification(final_booking_for_notification, 'BOOKING_CANCELLED', reason=reason)
+                # 执行操作者是当前用户
+                self._send_booking_notification(final_booking_for_notification, 'BOOKING_CANCELLED', reason=reason,
+                                                performed_by_user=user)
             else:
                 logger.error(
                     f"Failed to re-fetch booking {updated_booking.pk} for cancellation notification. Notification will not be sent.")
@@ -356,7 +387,7 @@ class BookingService(BaseService):
                     not (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user):
                 raise ForbiddenException(detail="您没有权限修改此预订的状态。")
 
-            current_status = booking.status  # 存储原始状态
+            current_status = booking.status
 
             valid_statuses = [choice[0] for choice in Booking.BOOKING_STATUS_CHOICES]
             if new_status not in valid_statuses:
@@ -401,12 +432,14 @@ class BookingService(BaseService):
             ).filter(pk=updated_booking.pk).first()
 
             if final_booking_for_notification:
+                # 执行操作者是当前用户
                 if new_status == Booking.BOOKING_STATUS_APPROVED:
-                    self._send_booking_notification(final_booking_for_notification, 'BOOKING_APPROVED')
+                    self._send_booking_notification(final_booking_for_notification, 'BOOKING_APPROVED',
+                                                    performed_by_user=user)
                 elif new_status == Booking.BOOKING_STATUS_REJECTED:
                     # 对于拒绝，admin_notes 可以作为原因
                     self._send_booking_notification(final_booking_for_notification, 'BOOKING_REJECTED',
-                                                    reason=admin_notes)
+                                                    reason=admin_notes, performed_by_user=user)
             else:
                 logger.error(
                     f"Failed to re-fetch booking {updated_booking.pk} for status update notification. Notification will not be sent.")
