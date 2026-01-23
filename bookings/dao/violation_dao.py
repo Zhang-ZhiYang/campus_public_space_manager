@@ -8,6 +8,8 @@ from bookings.models import Violation, Booking, UserPenaltyPointsPerSpaceType
 from core.dao import BaseDAO
 from spaces.models import Space, SpaceType
 from users.models import CustomUser
+from django.utils import timezone  # NEW: 导入 timezone
+
 
 class ViolationDAO(BaseDAO):
     model = Violation
@@ -68,15 +70,21 @@ class ViolationDAO(BaseDAO):
         if issued_by is None:
             issued_by = user
 
-        return self.create(
+        instance = self.model(
             user=user,
             booking=booking,
             space_type=space_type,
             violation_type=violation_type,
             description=description,
             issued_by=issued_by,
-            penalty_points=penalty_points
+            penalty_points=penalty_points,
+            is_resolved=False,  # 确保新创建的违规默认为未解决
+            resolved_at=None,
+            resolved_by=None
         )
+        instance.full_clean()  # 强制执行模型验证
+        instance.save()  # 调用 save 方法触发信号
+        return instance
 
     def update_violation(self, violation_instance: Violation, **kwargs) -> Violation:
         """
@@ -86,14 +94,43 @@ class ViolationDAO(BaseDAO):
         for attr, value in kwargs.items():
             setattr(violation_instance, attr, value)
         violation_instance.full_clean()
-        violation_instance.save()
+        violation_instance.save()  # 调用 save 方法触发信号
+        return violation_instance
+
+    # NEW: 新增更新解决状态的方法
+    def update_violation_status(self, violation_id: int, is_resolved: bool,
+                                resolved_by: Optional[CustomUser] = None) -> Optional[Violation]:
+        """
+        更新违规记录的解决状态。
+        此方法将获取实例，更新字段，然后调用 `save()` 来触发信号，确保点数和禁用状态的更新。
+        """
+        violation_instance = self.get_violation_by_id(violation_id)
+        if not violation_instance:
+            return None
+
+        # 存储旧状态，以便信号能使用
+        violation_instance._old_is_resolved = violation_instance.is_resolved
+        violation_instance._old_penalty_points = violation_instance.penalty_points
+        # 必须存储旧的空间类型，因为修改违规记录的关联空间类型会影响不同统计维度
+        violation_instance._old_cached_space_type_for_penalty_calc = violation_instance.space_type
+
+        violation_instance.is_resolved = is_resolved
+        if is_resolved:
+            violation_instance.resolved_at = timezone.now()
+            violation_instance.resolved_by = resolved_by
+        else:
+            violation_instance.resolved_at = None
+            violation_instance.resolved_by = None
+
+        # 调用 save() 触发 signals
+        violation_instance.save(update_fields=['is_resolved', 'resolved_at', 'resolved_by', 'updated_at'])
         return violation_instance
 
     def delete_violation(self, violation_instance: Violation) -> None:
         """
         删除指定的违规记录实例。
         """
-        violation_instance.delete()
+        violation_instance.delete()  # 调用 delete 方法触发信号
 
     def get_user_penalty_points_record(self, user: CustomUser, space_type: Optional[SpaceType]) -> Optional[
         UserPenaltyPointsPerSpaceType]:

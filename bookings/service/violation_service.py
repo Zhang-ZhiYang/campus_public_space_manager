@@ -1,246 +1,47 @@
 # bookings/service/violation_service.py
+from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction, models
 from django.utils import timezone
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Set
 from django.db.models import QuerySet, Q
 from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
 
-from bookings.models import Violation, UserPenaltyPointsPerSpaceType, SpaceTypeBanPolicy, UserSpaceTypeBan, Booking # import Booking
+from bookings.models import Violation, UserPenaltyPointsPerSpaceType, SpaceTypeBanPolicy, UserSpaceTypeBan, \
+    Booking  # import Booking
 
 from spaces.models import Space, SpaceType
 from users.models import CustomUser
 
 from core.service import BaseService, ServiceResult
-from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException
+from core.utils.exceptions import ForbiddenException, BadRequestException, NotFoundException, InternalServerError
 from guardian.shortcuts import get_objects_for_user, assign_perm
 
 # ====================================================================
-# 模块级别的辅助函数 (为了避免循环引用和保持 Service 类的纯净)
+# 模块级别的辅助函数 (从 bookings.signals 导入，防止循环依赖)
 # ====================================================================
+from bookings.signals import (
+    _get_violation_target_space_type,
+    _recalculate_user_penalty_points,
+    _apply_ban_policy
+)
 
-def _get_violation_target_space_type(violation_instance: Violation) -> SpaceType | None:
-    """
-    辅助函数：确定违规点数应归属的空间类型。
-    优先使用 Violation 自身指定的 space_type，否则尝试从关联的 Booking 中获取。
-    为了提高效率，并避免在同一个实例生命周期内重复查询，可以缓存结果。
-    """
-    if hasattr(violation_instance, '_cached_space_type'):
-        return violation_instance._cached_space_type
-
-    target_space_type = None
-    if violation_instance.space_type:
-        target_space_type = violation_instance.space_type
-    elif violation_instance.booking_id:
-        try:
-            booking_obj = Booking.objects.select_related(
-                'space__space_type',
-                'bookable_amenity__space__space_type'
-            ).get(pk=violation_instance.booking_id)
-
-            if booking_obj.space and booking_obj.space.space_type:
-                target_space_type = booking_obj.space.space_type
-            elif booking_obj.bookable_amenity and \
-                    booking_obj.bookable_amenity.space and \
-                    booking_obj.bookable_amenity.space.space_type:
-                target_space_type = booking_obj.bookable_amenity.space.space_type
-        except Booking.DoesNotExist:
-            logger.debug(
-                f"Booking {violation_instance.booking_id} not found for violation {violation_instance.pk if violation_instance.pk else 'new'}, cannot infer space type.")
-            pass
-
-    violation_instance._cached_space_type = target_space_type
-    return target_space_type
-
-def _recalculate_user_penalty_points(user: CustomUser, space_type: SpaceType | None) -> int:
-    """
-    私有辅助函数：重新计算用户在特定空间类型下所有未解决的违规点数总和。
-    """
-    total_active_points = Violation.objects.filter(
-        user=user,
-        space_type=space_type,
-        is_resolved=False
-    ).aggregate(total=models.Sum('penalty_points'))['total'] or 0
-    logger.debug(
-        f"Recalculated penalty points for user {user.id} in space type {space_type.id if space_type else 'Global'}: {total_active_points}")
-    return total_active_points
-
-def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
-    """
-    私有辅助函数：检查用户的活跃违约点数是否达到禁用策略的阈值，并创建/更新/解除禁用记录。
-    此函数应在 UserPenaltyPointsPerSpaceType 更新后被调用。
-    """
-    if not penalty_points_record.user:
-        return
-
-    ban_user = penalty_points_record.user
-    ban_space_type = penalty_points_record.space_type
-    space_type_name = ban_space_type.name if ban_space_type else '全局'
-    current_points = penalty_points_record.current_penalty_points
-
-    logger.debug(f"Evaluating ban policy for user {ban_user.id} in {space_type_name} with {current_points} points.")
-
-    existing_active_ban = UserSpaceTypeBan.objects.filter(
-        user=ban_user,
-        space_type=ban_space_type,
-        end_date__gt=timezone.now()
-    ).first()
-
-    applicable_policies = SpaceTypeBanPolicy.objects.filter(
-        Q(space_type=ban_space_type) | Q(space_type__isnull=True),
-        is_active=True,
-        threshold_points__lte=current_points
-    ).order_by('-threshold_points', '-priority')
-
-    policy_to_apply = applicable_policies.first()
-
-    if policy_to_apply:
-        ban_start = timezone.now()
-        ban_end = ban_start + policy_to_apply.ban_duration
-        reason_message = f"因在 {space_type_name} 累计 {policy_to_apply.threshold_points} 点触发禁用"
-
-        if existing_active_ban:
-            if ban_end > existing_active_ban.end_date:
-                existing_active_ban.end_date = ban_end
-                existing_active_ban.ban_policy_applied = policy_to_apply
-                existing_active_ban.reason = reason_message + "，更新延长禁用"
-                existing_active_ban.save(update_fields=['end_date', 'ban_policy_applied', 'reason'])
-                logger.info(
-                    f"Ban extended for user {ban_user.id} in {space_type_name} until {ban_end.strftime('%Y-%m-%d %H:%M')}.")
-            else:
-                logger.debug(
-                    f"Existing ban for user {ban_user.id} in {space_type_name} is already longer or equal, no extension needed.")
-        else:
-            UserSpaceTypeBan.objects.create(
-                user=ban_user,
-                space_type=ban_space_type,
-                start_date=ban_start,
-                end_date=ban_end,
-                ban_policy_applied=policy_to_apply,
-                reason=reason_message,
-                issued_by=None
-            )
-            logger.info(
-                f"New ban created for user {ban_user.id} in {space_type_name} until {ban_end.strftime('%Y-%m-%d %H:%M')}.")
-
-        penalty_points_record.last_ban_trigger_at = ban_start
-        penalty_points_record.save(update_fields=['last_ban_trigger_at'])
-
-    else:
-        if existing_active_ban:
-            original_end_date = existing_active_ban.end_date
-            existing_active_ban.end_date = timezone.now()
-            existing_active_ban.reason += f" (自动解除: 点数降至 {current_points}，低于所有禁用策略阈值)"
-            existing_active_ban.save(update_fields=['end_date', 'reason'])
-            logger.info(
-                f"Ban for user {ban_user.id} in {space_type_name} automatically lifted. Was set until {original_end_date.strftime('%Y-%m-%d %H:%M')}.")
-        else:
-            logger.debug(
-                f"No applicable ban policy and no existing active ban for user {ban_user.id} in {space_type_name}.")
-
-def handle_violation_save(violation_instance: Violation, created: bool, old_is_resolved: bool, old_penalty_points: int,
-                          old_cached_space_type: SpaceType | None):
-    """
-    业务逻辑：处理 Violation 保存后的逻辑：更新用户违约点数并触发禁用检查。
-    此函数由 post_save 信号调用。
-    """
-    if not violation_instance.user:
-        logger.warning(
-            f"Violation {violation_instance.pk if violation_instance.pk else 'new'} has no associated user, skipping penalty points update.")
-        return
-
-    current_target_space_type = _get_violation_target_space_type(violation_instance)
-
-    affected_space_types = set()
-    if current_target_space_type is not None:
-        affected_space_types.add(current_target_space_type)
-    if old_cached_space_type is not None:
-        affected_space_types.add(old_cached_space_type)
-
-    if not affected_space_types:
-        logger.warning(
-            f"Violation {violation_instance.pk if violation_instance.pk else 'new'} cannot determine a target space type, skipping penalty points update.")
-        return
-
-    for target_space_type in affected_space_types:
-        current_total_active_points = _recalculate_user_penalty_points(violation_instance.user, target_space_type)
-
-        penalty_points_record, created_pp = UserPenaltyPointsPerSpaceType.objects.get_or_create(
-            user=violation_instance.user,
-            space_type=target_space_type
-        )
-        if created_pp:
-            logger.info(
-                f"Created new UserPenaltyPointsPerSpaceType record for user {violation_instance.user.id} in space type {target_space_type.id if target_space_type else 'Global'}.")
-
-        if penalty_points_record.current_penalty_points != current_total_active_points:
-            logger.info(
-                f"User {violation_instance.user.id} penalty points changed from {penalty_points_record.current_penalty_points} to {current_total_active_points} in space type {target_space_type.id if target_space_type else 'Global'}.")
-            penalty_points_record.current_penalty_points = current_total_active_points
-            penalty_points_record.last_violation_at = timezone.now()
-            penalty_points_record.save()
-            _apply_ban_policy(penalty_points_record)
-        elif created or \
-                (not created and (violation_instance.is_resolved != old_is_resolved or \
-                                  violation_instance.penalty_points != old_penalty_points or \
-                                  current_target_space_type != old_cached_space_type)):
-            logger.debug(
-                f"Violation {violation_instance.pk} updated (status/points/space_type changed without affecting total points in {target_space_type.id if target_space_type else 'Global'}), re-evaluating ban policy.")
-            _apply_ban_policy(penalty_points_record)
-        else:
-            logger.debug(
-                f"No significant change detected for penalty points and ban policy for user {violation_instance.user.id} in space type {target_space_type.id if target_space_type else 'Global'}.")
-
-def handle_violation_delete(violation_instance: Violation):
-    """
-    业务逻辑：处理 Violation 删除后的逻辑：减少用户活跃违约点数并触发禁用检查。
-    此函数由 post_delete 信号调用。
-    """
-    if not violation_instance.user:
-        logger.warning(
-            f"Violation {violation_instance.pk} deleted has no associated user, skipping penalty points update.")
-        return
-
-    target_space_type = _get_violation_target_space_type(violation_instance)
-
-    if target_space_type is None:
-        logger.warning(
-            f"Violation {violation_instance.pk} deleted was unable to determine its space type, skipping penalty points update.")
-        return
-
-    try:
-        penalty_points_record = UserPenaltyPointsPerSpaceType.objects.get(
-            user=violation_instance.user,
-            space_type=target_space_type
-        )
-
-        current_total_active_points = _recalculate_user_penalty_points(violation_instance.user, target_space_type)
-
-        if penalty_points_record.current_penalty_points != current_total_active_points:
-            logger.info(
-                f"User {violation_instance.user.id} penalty points changed from {penalty_points_record.current_penalty_points} to {current_total_active_points} after deleting violation {violation_instance.pk} in space type {target_space_type.id if target_space_type else 'Global'}.")
-            penalty_points_record.current_penalty_points = current_total_active_points
-            penalty_points_record.save()
-
-        else:
-            logger.debug(
-                f"User {violation_instance.user.id} penalty points not changed after deleting violation {violation_instance.pk} in space type {target_space_type.id if target_space_type else 'Global'}.")
-
-        _apply_ban_policy(penalty_points_record)
-
-    except UserPenaltyPointsPerSpaceType.DoesNotExist:
-        logger.info(
-            f"No UserPenaltyPointsPerSpaceType record found for user {violation_instance.user.id} in space type {target_space_type.id if target_space_type else 'Global'} after deleting violation {violation_instance.pk}.")
-        pass
 
 class ViolationService(BaseService):
     _dao_map = {
         'violation_dao': 'violation',
         'booking_dao': 'booking',
+        'penalty_dao': 'user_penalty_points',  # Add penalty DAO
     }
+
+    def __init__(self):
+        super().__init__()
+        self.violation_dao = self._get_dao_instance('violation')
+        self.booking_dao = self._get_dao_instance('booking')
+        self.penalty_dao = self._get_dao_instance('user_penalty_points')  # Init penalty DAO
 
     def get_admin_violations_queryset(self, user: CustomUser) -> ServiceResult[QuerySet[Violation]]:
         if user.is_superuser or user.is_system_admin:
@@ -249,6 +50,18 @@ class ViolationService(BaseService):
                 message="成功获取所有违规记录。"
             )
 
+        # Ensure user is CustomUser instance
+        ActualCustomUser = get_user_model()
+        if not isinstance(user, ActualCustomUser):
+            # Attempt to fetch the actual user instance, although usually request.user is already a CustomUser
+            try:
+                user = ActualCustomUser.objects.get(pk=user.pk)
+            except ActualCustomUser.DoesNotExist:
+                return ServiceResult.error_result(
+                    message="用户实例未找到。", error_code=NotFoundException.default_code,
+                    status_code=NotFoundException.status_code
+                )
+
         if user.is_authenticated and user.has_perm('bookings.can_view_all_violations'):
             return ServiceResult.success_result(
                 data=self.violation_dao.get_queryset(),
@@ -256,7 +69,8 @@ class ViolationService(BaseService):
             )
 
         if user.is_authenticated and user.is_space_manager:
-            space_ct = ContentType.objects.get_for_model(Space)
+            # Replaced ContentType import with direct model references for simplicity if not strictly needed elsewhere
+            # space_ct = ContentType.objects.get_for_model(Space)
             managed_spaces = get_objects_for_user(
                 user, 'spaces.can_view_space', klass=Space
             )
@@ -294,12 +108,22 @@ class ViolationService(BaseService):
         booking_instance_from_data = violation_data.get('booking')
         if not violation_data.get('space_type') and booking_instance_from_data:
             # If booking_instance_from_data is a Booking instance, access its attributes
-            if isinstance(booking_instance_from_data, Booking): # Ensure it's a Booking instance
+            if isinstance(booking_instance_from_data, Booking):  # Ensure it's a Booking instance
                 if booking_instance_from_data.space and booking_instance_from_data.space.space_type:
                     violation_data['space_type'] = booking_instance_from_data.space.space_type
                 elif booking_instance_from_data.bookable_amenity and booking_instance_from_data.bookable_amenity.space \
                         and booking_instance_from_data.bookable_amenity.space.space_type:
                     violation_data['space_type'] = booking_instance_from_data.bookable_amenity.space.space_type
+
+        # Ensure user is CustomUser instance, or handle the case where it might be a raw ID
+        ActualCustomUser = get_user_model()
+        if 'user' in violation_data and not isinstance(violation_data['user'], ActualCustomUser):
+            try:
+                violation_data['user'] = ActualCustomUser.objects.get(pk=violation_data['user'])
+            except ActualCustomUser.DoesNotExist:
+                return ServiceResult.error_result(message="指定的用户不存在。",
+                                                  error_code=NotFoundException.default_code,
+                                                  status_code=NotFoundException.status_code)
 
         if violation_id:
             violation_obj = self.violation_dao.get_violation_by_id(violation_id)
@@ -309,9 +133,11 @@ class ViolationService(BaseService):
                     status_code=NotFoundException.status_code
                 )
 
-            if not user.is_system_admin:
+            # Permissions check for editing
+            is_system_admin = user.is_superuser or getattr(user, 'is_system_admin', False)
+            if not is_system_admin:
                 if user.has_perm('bookings.can_edit_violation_record'):
-                    pass
+                    pass  # User has global edit permission
                 elif violation_obj.space_type and user.is_space_manager:
                     managed_spacetypes = self.violation_dao.get_managed_spacetypes_by_user(user)
                     if not managed_spacetypes.filter(id=violation_obj.space_type.id).exists():
@@ -324,8 +150,9 @@ class ViolationService(BaseService):
                         message=ForbiddenException.default_detail + " (无编辑违规记录权限)",
                         error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                     )
-        else:
-            if not user.is_system_admin:
+        else:  # Creating a new violation
+            is_system_admin = user.is_superuser or getattr(user, 'is_system_admin', False)
+            if not is_system_admin:
                 if not user.has_perm('bookings.can_create_violation_record'):
                     return ServiceResult.error_result(
                         message=ForbiddenException.default_detail + " (无创建违规记录权限)",
@@ -338,41 +165,34 @@ class ViolationService(BaseService):
                             message=ForbiddenException.default_detail + " (无创建此空间类型违规记录权限)",
                             error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                         )
-                elif user.is_space_manager and 'space_type' not in violation_data:
+                elif user.is_space_manager and (
+                        'space_type' not in violation_data or violation_data['space_type'] is None):
+                    # Space manager is trying to create a global violation without system admin permission
                     return ServiceResult.error_result(
-                        message=ForbiddenException.default_detail + " (无法确定空间类型，无权创建违规记录)",
-                        error_code=BadRequestException.default_code, status_code=BadRequestException.status_code
-                    )
-                elif not user.is_space_manager:
-                    return ServiceResult.error_result(
-                        message=ForbiddenException.default_detail + " (无创建违规记录权限)",
+                        message=ForbiddenException.default_detail + " (空间管理员无法创建全局违规记录)",
                         error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
                     )
 
         try:
             if violation_id:
-                violation_obj._old_is_resolved = violation_obj.is_resolved
-                violation_obj._old_penalty_points = violation_obj.penalty_points
-                violation_obj._old_cached_space_type = _get_violation_target_space_type(violation_obj)
+                # _old_* attributes are no longer set here, they are handled by pre_save signal now
 
-                resolved_changed = 'is_resolved' in violation_data and violation_obj.is_resolved != violation_data[
-                    'is_resolved']
+                # Check for resolution changes if not a system admin
+                if not is_system_admin:
+                    # Non-system admins can only change 'is_resolved', 'resolved_by', 'resolved_at'
+                    allowed_fields_for_resolution = {'is_resolved', 'resolved_by', 'resolved_at'}
+                    if any(field not in allowed_fields_for_resolution for field in violation_data.keys()):
+                        return ServiceResult.error_result(
+                            message=ForbiddenException.default_detail + " (您没有权限修改此违规记录的非解决状态字段)",
+                            error_code=ForbiddenException.default_code, status_code=ForbiddenException.status_code
+                        )
 
-                for key, value in violation_data.items():
-                    setattr(violation_obj, key, value)
-
-                if resolved_changed:
-                    if violation_obj.is_resolved and not violation_obj.resolved_at:
-                        violation_obj.resolved_at = timezone.now()
-                        violation_obj.resolved_by = user
-                    elif not violation_obj.is_resolved:
-                        violation_obj.resolved_at = None
-                        violation_obj.resolved_by = None
-
-                updated_violation = self.violation_dao.update(violation_obj, **violation_data)
+                updated_violation = self.violation_dao.update_violation(violation_obj, **violation_data)
                 return ServiceResult.success_result(data=updated_violation, message="违规记录更新成功。")
             else:
                 new_violation = self.violation_dao.create_violation(user=violation_data['user'], **violation_data)
+                # Assign object-level permissions if created by a space manager for their managed space type
+                from guardian.shortcuts import assign_perm  # Import here to avoid potential circular dependency
                 if user.is_space_manager and new_violation.space_type:
                     assign_perm('bookings.can_edit_violation_record', user, new_violation)
                     assign_perm('bookings.can_resolve_violation_record', user, new_violation)
@@ -387,25 +207,64 @@ class ViolationService(BaseService):
         warnings = []
         errors = []
 
-        has_global_resolve_perm = user.is_system_admin or user.has_perm('bookings.can_resolve_violation_record')
+        # 获取实际的 CustomUser 模型类
+        ActualCustomUser = get_user_model()
+        if not isinstance(user, ActualCustomUser):
+            try:
+                user = ActualCustomUser.objects.get(pk=user.pk)
+            except ActualCustomUser.DoesNotExist:
+                return ServiceResult.error_result(
+                    message="当前操作用户不存在。", error_code=NotFoundException.default_code,
+                    status_code=NotFoundException.status_code
+                )
+        is_system_admin_or_superuser = user.is_superuser or getattr(user, 'is_system_admin', False)
 
-        queryset = self.violation_dao.filter(pk__in=pk_list)
+        has_global_resolve_perm = is_system_admin_or_superuser or user.has_perm('bookings.can_resolve_violation_record')
+
+        queryset = self.violation_dao.filter(pk__in=pk_list).select_related('space_type',
+                                                                            'booking__space__space_type')  # 预加载相关字段
 
         for violation in queryset:
-            if not has_global_resolve_perm and not user.has_perm('bookings.can_resolve_violation_record', violation):
+            target_space = violation.booking.related_space if violation.booking else None  # 优先从 booking 的 related_space 获取
+
+            # --- 权限检查增强 ---
+            can_resolve_single_violation = False
+            if is_system_admin_or_superuser:
+                can_resolve_single_violation = True
+            elif user.is_space_manager and user.has_perm('bookings.can_resolve_violation_record', violation):
+                # Space manager has object-level permission for this specific violation
+                can_resolve_single_violation = True
+            elif user.is_space_manager and target_space:
+                # Fallback: if not obj level perm, check if they manage the space associated with the violation
+                can_resolve_single_violation = user.has_perm('spaces.can_view_space_bookings', target_space)
+            elif user.is_space_manager and violation.space_type:
+                # If no specific target_space, check if they manage the space_type
+                # This needs careful implementation for object-level permission using SpaceType
+                # For simplicity, if space_type is present as managed, allow. This needs `get_managed_spacetypes_by_user`.
+                managed_spacetypes = self.violation_dao.get_managed_spacetypes_by_user(user)
+                if managed_spacetypes.filter(id=violation.space_type.id).exists():
+                    can_resolve_single_violation = True
+
+            if not can_resolve_single_violation:
                 errors.append(f"您没有权限解决违规 {violation.id}。")
                 logger.warning(
                     f"User {user.id} attempted to resolve violation {violation.id} without sufficient permission.")
                 continue
+            # --- 权限检查增强结束 ---
 
             try:
                 if not violation.is_resolved:
-                    self.violation_dao.update_violation(
-                        violation,
-                        is_resolved=True, resolved_by=user, resolved_at=timezone.now()
+                    # 使用 DAO 的新方法来更新状态，它会确保 save() 被调用
+                    updated_violation = self.violation_dao.update_violation_status(
+                        violation_id=violation.pk,
+                        is_resolved=True,
+                        resolved_by=user
                     )
-                    resolved_count += 1
-                    logger.info(f"Violation {violation.id} marked as resolved by user {user.id}.")
+                    if updated_violation:
+                        resolved_count += 1
+                        logger.info(f"Violation {violation.id} marked as resolved by user {user.id}.")
+                    else:
+                        errors.append(f"解决违规 {violation.id} 失败：更新操作未生效。")
                 else:
                     warnings.append(f"违规 {violation.id} 已是解决状态，无需重复操作。")
             except Exception as e:
@@ -429,9 +288,20 @@ class ViolationService(BaseService):
         warnings = []
         errors = []
 
-        has_global_mark_no_show_and_violate_perm = user.is_system_admin or \
-                                                    user.has_perm('bookings.can_mark_no_show_and_create_violation')
-        has_global_create_violation_perm = user.is_system_admin or \
+        ActualCustomUser = get_user_model()
+        if not isinstance(user, ActualCustomUser):
+            try:
+                user = ActualCustomUser.objects.get(pk=user.pk)
+            except ActualCustomUser.DoesNotExist:
+                return ServiceResult.error_result(
+                    message="当前操作用户不存在。", error_code=NotFoundException.default_code,
+                    status_code=NotFoundException.status_code
+                )
+        is_system_admin_or_superuser = user.is_superuser or getattr(user, 'is_system_admin', False)
+
+        has_global_mark_no_show_and_violate_perm = is_system_admin_or_superuser or \
+                                                   user.has_perm('bookings.can_mark_no_show_and_create_violation')
+        has_global_create_violation_perm = is_system_admin_or_superuser or \
                                            user.has_perm('bookings.can_create_violation_record')
 
         queryset = self.booking_dao.filter(pk__in=pk_list)
@@ -455,9 +325,10 @@ class ViolationService(BaseService):
                 continue
 
             # 使用常量
-            if booking.status in [Booking.BOOKING_STATUS_PENDING, Booking.BOOKING_STATUS_APPROVED] and booking.end_time < timezone.now():
+            if booking.status in [Booking.BOOKING_STATUS_PENDING,
+                                  Booking.BOOKING_STATUS_APPROVED] and booking.end_time < timezone.now():
                 try:
-                    self.booking_dao.update(booking, status=Booking.BOOKING_STATUS_NO_SHOW) # 使用常量
+                    self.booking_dao.update(booking, status=Booking.BOOKING_STATUS_NO_SHOW)  # 使用常量
                     no_show_count += 1
 
                     space_type_for_violation = None
@@ -465,9 +336,11 @@ class ViolationService(BaseService):
                         space_type_for_violation = target_space.space_type
 
                     if space_type_for_violation and can_create_single_violation_record:
+                        # Call DAO which then calls model.save()
                         self.violation_dao.create_violation(
                             user=booking.user, booking=booking, space_type=space_type_for_violation,
-                            violation_type='NO_SHOW', # Violation type is a string constant defined in models.py (or global constant)
+                            violation_type='NO_SHOW',
+                            # Violation type is a string constant defined in models.py (or global constant)
                             description=f"用户 {booking.user.get_full_name} 未在 {getattr(target_space, 'name', '未知空间')} 预订中签到。",
                             issued_by=user, penalty_points=1
                         )
@@ -496,3 +369,60 @@ class ViolationService(BaseService):
             message=f"成功标记 {no_show_count} 条预订为未到场，创建 {violation_count} 条违规记录。",
             warnings=warnings
         )
+
+    @transaction.atomic
+    def recalculate_and_apply_ban_policies_for_user_and_space_type(
+            self, user: CustomUser, space_type: Optional[SpaceType]
+    ) -> ServiceResult[UserPenaltyPointsPerSpaceType]:
+        """
+        重新计算用户在给定空间类型（或全局）下的活跃违约点数，
+        并根据当前的违约点数评估和应用禁用策略。
+        此方法主要供定时任务调用。
+        """
+        try:
+            # 1. 重新计算活跃点数
+            current_total_active_points = _recalculate_user_penalty_points(user, space_type)
+
+            # 2. 获取或创建 UserPenaltyPointsPerSpaceType 记录
+            penalty_points_record, created = UserPenaltyPointsPerSpaceType.objects.get_or_create(
+                user=user,
+                space_type=space_type,
+                defaults={'current_penalty_points': current_total_active_points, 'last_violation_at': timezone.now()}
+            )
+
+            # --- 关键修改：无论点数是否变化，都确保更新最后违规时间并触发保存 ----
+            # 即使 current_penalty_points 没有变化，但如果最后活跃时间有变更，也应该触发 save
+            # 确保 updated_at 更新，并重新触发 post_save 信号调用 _apply_ban_policy
+            needs_save = False
+            if penalty_points_record.current_penalty_points != current_total_active_points:
+                penalty_points_record.current_penalty_points = current_total_active_points
+                penalty_points_record.last_violation_at = timezone.now()
+                needs_save = True
+                logger.info(
+                    f"[Recalculate Task] User {user.pk} penalty points updated to {current_total_active_points} for space type {space_type.pk if space_type else 'Global'} (created: {created}).")
+            elif created:  # 如果是新创建的记录
+                penalty_points_record.last_violation_at = timezone.now()
+                needs_save = True
+                logger.info(
+                    f"[Recalculate Task] New UserPenaltyPointsPerSpaceType record created for user {user.pk} in space type {space_type.pk if space_type else 'Global'} with {current_total_active_points} points.")
+
+            if needs_save:
+                # 只更新需要修改的字段，减少不必要的数据库写入。
+                # 即使不需要更新 current_penalty_points，也更新 updated_at 确保 post_save 信号被触发。
+                penalty_points_record.save(update_fields=['current_penalty_points', 'last_violation_at', 'updated_at'])
+            else:
+                # 即使没有数据字段变化，也要确保 _apply_ban_policy 被调用，
+                # 因为禁用策略本身可能发生变化，或某个禁令已过期
+                logger.debug(
+                    f"[Recalculate Task] No penalty points update for user {user.pk} in space type {space_type.pk if space_type else 'Global'}. Re-applying ban policy for consistency.")
+                _apply_ban_policy(penalty_points_record)  # 直接调用，因为 post_save 信号不会触发
+
+            return ServiceResult.success_result(
+                data=penalty_points_record,
+                message=f"用户 {user.pk} 在 {space_type.name if space_type else '全局'} 的违约点数已更新并评估禁用策略。"
+            )
+
+        except Exception as e:
+            logger.exception(
+                f"Error in recalculate_and_apply_ban_policies_for_user_and_space_type for user {user.pk}, space type {space_type.pk if space_type else 'Global'}: {e}")
+            return self._handle_exception(e, default_message="批处理违约点数和禁用策略失败。")

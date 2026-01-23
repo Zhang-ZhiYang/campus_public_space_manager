@@ -47,7 +47,6 @@ VIOLATION_TYPE_CHOICES = (
     ('OTHER', '其他'),
 )
 
-
 # ====================================================================
 # Booking Model (预订)
 # ====================================================================
@@ -263,7 +262,7 @@ class Booking(models.Model):
 
     def save(self, *args, **kwargs):
         self.full_clean()
-        super().save(*args, *kwargs)
+        super().save(*args, **kwargs)
 
     def _get_related_object_dict(self, obj):
         if hasattr(obj, 'to_dict') and callable(obj.to_dict):
@@ -292,7 +291,6 @@ class Booking(models.Model):
             data['reviewed_by'] = self._get_related_object_dict(self.reviewed_by)
             if self.reviewed_at: data['reviewed_at'] = self.reviewed_at.isoformat()
         return data
-
 
 # ====================================================================
 # Violation Model (违约记录)
@@ -377,11 +375,13 @@ class Violation(models.Model):
         verbose_name="解决人员",
         help_text="将本次违约标记为已解决的管理员/空间管理员"
     )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间") # NEW: 添加创建时间
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间") # NEW: 添加更新时间
 
     class Meta:
         verbose_name = '违约记录'
         verbose_name_plural = verbose_name
-        ordering = ['-issued_at']
+        ordering = ['-created_at']
         permissions = (
             ("can_view_all_violations", "Can view all violation records"),
             ("can_create_violation_record", "Can create new violation records"),
@@ -397,6 +397,8 @@ class Violation(models.Model):
             Index(fields=['violation_type']),
             Index(fields=['issued_at']),
             Index(fields=['is_resolved']),
+            Index(fields=['created_at']), # NEW: 添加索引
+            Index(fields=['updated_at']), # NEW: 添加索引
         ]
 
     def __str__(self):
@@ -414,6 +416,8 @@ class Violation(models.Model):
             'issued_at': self.issued_at.isoformat(),
             'is_resolved': self.is_resolved,
             'resolved_at': self.resolved_at.isoformat() if self.resolved_at else None,
+            'created_at': self.created_at.isoformat(), # NEW:
+            'updated_at': self.updated_at.isoformat(), # NEW:
         }
         if include_related:
             data['user'] = self._get_related_object_dict(self.user)
@@ -422,7 +426,6 @@ class Violation(models.Model):
             data['issued_by'] = self._get_related_object_dict(self.issued_by)
             data['resolved_by'] = self._get_related_object_dict(self.resolved_by)
         return data
-
 
 # ====================================================================
 # UserPenaltyPointsPerSpaceType Model (用户违约点数统计 - 按空间类型)
@@ -476,6 +479,7 @@ class UserPenaltyPointsPerSpaceType(models.Model):
             Index(fields=['user']),
             Index(fields=['space_type']),
             Index(fields=['current_penalty_points']),
+            Index(fields=['updated_at']), # NEW: 添加索引
         ]
 
     def __str__(self):
@@ -501,7 +505,6 @@ class UserPenaltyPointsPerSpaceType(models.Model):
             data['user'] = self._get_related_object_dict(self.user)
             data['space_type'] = self._get_related_object_dict(self.space_type)
         return data
-
 
 # ====================================================================
 # SpaceTypeBanPolicy Model (空间类型禁用策略)
@@ -580,7 +583,6 @@ class SpaceTypeBanPolicy(models.Model):
         if include_related:
             data['space_type'] = self._get_related_object_dict(self.space_type)
         return data
-
 
 # ====================================================================
 # UserSpaceTypeBan Model (用户空间类型禁用记录)
@@ -671,7 +673,6 @@ class UserSpaceTypeBan(models.Model):
             data['issued_by'] = self._get_related_object_dict(self.issued_by)
         return data
 
-
 # ====================================================================
 # UserSpaceTypeExemption Model (用户空间类型豁免 - 白名单)
 # ====================================================================
@@ -760,7 +761,6 @@ class UserSpaceTypeExemption(models.Model):
             data['space_type'] = self._get_related_object_dict(self.space_type)
             data['granted_by'] = self._get_related_object_dict(self.granted_by)
         return data
-
 
 # ====================================================================
 # DailyBookingLimit Model (每日预订限制)

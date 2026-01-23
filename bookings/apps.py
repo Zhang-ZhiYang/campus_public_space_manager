@@ -2,6 +2,8 @@
 from django.apps import AppConfig
 import logging
 
+from django.db.models.signals import post_migrate
+
 logger = logging.getLogger(__name__)
 
 class BookingsConfig(AppConfig):
@@ -50,3 +52,8 @@ class BookingsConfig(AppConfig):
         ServiceFactory.register_service(BookingStatusQueryService)
         ServiceFactory.register_service(ViolationService) # 注册 ViolationService
         logger.info("Bookings Services registered with ServiceFactory.")
+
+
+        from celery import current_app
+        from celery.schedules import crontab
+        from bookings.tasks.violation_tasks import recalculate_all_penalty_points_and_apply_bans_task
