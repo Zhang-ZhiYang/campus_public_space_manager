@@ -1,4 +1,3 @@
-# bookings/signals.py
 import logging
 from datetime import timedelta
 from typing import Optional, Set
@@ -70,26 +69,29 @@ def _get_violation_target_space_type(violation_instance: Violation) -> Optional[
 def _recalculate_user_penalty_points(user: CustomUser, space_type: Optional[SpaceType]) -> int:
     """
     私有辅助函数：重新计算用户在特定空间类型下所有未解决的违规点数总和。
+    当 space_type 为 None 时，将累加该用户所有 space_type 下的未解决违规点数。
     """
-    # 构建查询条件，确保正确处理 None (表示全局) 的情况
     q_conditions = Q(user=user, is_resolved=False)
     if space_type:
+        # 如果提供了具体的 space_type，则只计算该 space_type 下的违规点数
         q_conditions &= Q(space_type=space_type)
     else:
-        q_conditions &= Q(space_type__isnull=True)
+        # MODIFICATION: 如果 space_type 为 None（表示计算全局点数），
+        # 则不再限制 space_type 字段，即计算所有（包括特定 space_type 和 space_type 为 None 的）违规点数。
+        pass # q_conditions 保持为 Q(user=user, is_resolved=False)
 
     total_active_points = Violation.objects.filter(q_conditions).aggregate(total=models.Sum('penalty_points'))[
                               'total'] or 0
 
     logger.debug(
-        f"Recalculated penalty points for user {user.id} in space type {space_type.id if space_type else 'Global'}: {total_active_points}")
+        f"Recalculated penalty points for user {user.id} in space type {space_type.id if space_type else 'Global'} (cumulative): {total_active_points}")
     return total_active_points
-
 
 def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
     """
     私有辅助函数：检查用户的活跃违约点数是否达到禁用策略的阈值，并创建/更新/解除禁用记录。
     此函数应在 UserPenaltyPointsPerSpaceType 更新后被调用。
+    修改：优先应用特定空间类型策略，其次是全局策略。
     """
     if not penalty_points_record.user:
         return
@@ -108,13 +110,38 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
     )
     existing_active_ban = existing_active_ban_query.first()
 
-    applicable_policies_query = SpaceTypeBanPolicy.objects.filter(
-        Q(space_type=ban_space_type) | Q(space_type__isnull=True),
-        is_active=True,
-        threshold_points__lte=current_points
-    ).order_by('-priority', '-threshold_points')
+    policy_to_apply = None
 
-    policy_to_apply = applicable_policies_query.first()
+    if ban_space_type: # 如果是针对特定的空间类型记录
+        # Step 1: 优先查找与当前 space_type **严格匹配** 的策略
+        specific_policies_query = SpaceTypeBanPolicy.objects.filter(
+            space_type=ban_space_type,
+            is_active=True,
+            threshold_points__lte=current_points
+        ).order_by('-priority', '-threshold_points')
+        policy_to_apply = specific_policies_query.first()
+
+        # Step 2: 如果没有找到特定空间类型的策略，才查找全局策略
+        if not policy_to_apply:
+            logger.debug(f"No specific policy found for {space_type_name}, checking global policies.")
+            global_policies_query = SpaceTypeBanPolicy.objects.filter(
+                space_type__isnull=True,
+                is_active=True,
+                threshold_points__lte=current_points
+            ).order_by('-priority', '-threshold_points')
+            policy_to_apply = global_policies_query.first()
+        else:
+            logger.debug(f"Specific policy found for {space_type_name}: {policy_to_apply.pk}.")
+
+    else: # 如果是针对全局点数记录 (ban_space_type is None)
+        # Step 1: 仅查找全局策略
+        logger.debug(f"Evaluating global penalty points, checking only global policies.")
+        global_policies_query = SpaceTypeBanPolicy.objects.filter(
+            space_type__isnull=True,
+            is_active=True,
+            threshold_points__lte=current_points
+        ).order_by('-priority', '-threshold_points')
+        policy_to_apply = global_policies_query.first()
 
     ban_start = timezone.now()
 
@@ -129,22 +156,19 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
 
             old_policy = existing_active_ban.ban_policy_applied
 
-            is_new_policy_stricter = False
+            is_new_policy_stricter_or_different = False
             if old_policy:
-                if policy_to_apply.priority > old_policy.priority:
-                    is_new_policy_stricter = True
-                elif policy_to_apply.priority == old_policy.priority and policy_to_apply.threshold_points > old_policy.threshold_points:
-                    is_new_policy_stricter = True
-                # 新旧策略完全不同，即使不更严格也需要更新关联策略和原因
-                elif policy_to_apply.pk != old_policy.pk:
-                    is_new_policy_stricter = True  # Treat as stricter if policy changes even if numeric values are same for simplicity in this path
-
+                # 如果新策略优先级更高，或者优先级相同但阈值更高，或者策略本身发生了变化（ID不同）
+                if policy_to_apply.priority > old_policy.priority or \
+                   (policy_to_apply.priority == old_policy.priority and policy_to_apply.threshold_points > old_policy.threshold_points) or \
+                   (policy_to_apply.pk != old_policy.pk):
+                    is_new_policy_stricter_or_different = True
             else:
-                is_new_policy_stricter = True
+                is_new_policy_stricter_or_different = True # 没有旧策略，新策略自然是“更严格或不同”
 
             # 检查是否需要更新现有禁令（延长、加强、或重新激活）
             if new_ban_end > existing_active_ban.end_date or \
-                    is_new_policy_stricter or \
+                    is_new_policy_stricter_or_different or \
                     existing_active_ban.end_date <= timezone.now():  # 重新激活过期禁令
 
                 existing_active_ban.start_date = ban_start
@@ -155,9 +179,9 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
                 should_update_existing_ban = True
                 action_description = "更新/延长/重新激活禁用"
             elif new_ban_end < existing_active_ban.end_date:
-                # 策略降级，禁用时间缩短
+                # 策略降级，禁用时间缩短 (但要确保新策略仍然是适用的最高优先级策略)
                 existing_active_ban.end_date = new_ban_end
-                existing_active_ban.reason = reason_template + " - 调整缩短禁用"
+                existing_active_ban.reason = reason_template + " - 调整缩短禁用 (因策略调整)"
                 update_fields.add('end_date')
                 update_fields.add('reason')
                 should_update_existing_ban = True
@@ -167,10 +191,11 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
                 pass
 
             if should_update_existing_ban:
-                # NEW: 避免 UserSpaceTypeBan 的 post_save 信号再次触发 _apply_ban_policy
-                # 虽然 UserSpaceTypeBan 的 post_save 信号只触发 ban_cache_invalidation_task
-                # 但这里依然可以加一个防御性措施，或者更重要的是确保其自身不会再次触发 penalty_points_record.save
-                existing_active_ban.save(update_fields=list(update_fields))
+                post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                try:
+                    existing_active_ban.save(update_fields=list(update_fields))
+                finally:
+                    post_save.connect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
                 logger.info(
                     f"Ban ID {existing_active_ban.pk} for user {ban_user.id} in {space_type_name} {action_description} until {existing_active_ban.end_date.strftime('%Y-%m-%d %H:%M')}.")
             else:
@@ -190,32 +215,24 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
             logger.info(
                 f"New ban created for user {ban_user.id} in {space_type_name}(ID:{ban_space_type.pk if ban_space_type else None}) until {new_ban_end.strftime('%Y-%m-%d %H:%M')}.")
 
-        # NEW: 确保 penalty_points_record.last_ban_trigger_at 的更新不引起无限递归
-        # 仅当实际需要更新 last_ban_trigger_at 且其值真的改变时才调用 save
         if penalty_points_record.last_ban_trigger_at != ban_start:
-            # 临时断开 UserPenaltyPointsPerSpaceType 的 post_save 信号
             post_save.disconnect(user_penalty_points_post_save_handler, sender=UserPenaltyPointsPerSpaceType)
             try:
                 penalty_points_record.last_ban_trigger_at = ban_start
                 penalty_points_record.save(update_fields=['last_ban_trigger_at', 'updated_at'])
             finally:
-                # 重新连接信号
-                post_save.disconnect(user_penalty_points_post_save_handler, sender=UserPenaltyPointsPerSpaceType)
                 post_save.connect(user_penalty_points_post_save_handler, sender=UserPenaltyPointsPerSpaceType)
 
     else:
         if existing_active_ban:
             original_end_date = existing_active_ban.end_date
             if existing_active_ban.end_date > timezone.now():
-                # NEW: 临时断开 UserSpaceTypeBan 的 post_save 信号
                 post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
                 try:
                     existing_active_ban.end_date = timezone.now()
                     existing_active_ban.reason += f" (自动解除: 点数降至 {current_points}，低于所有禁用策略阈值)"
                     existing_active_ban.save(update_fields=['end_date', 'reason'])
                 finally:
-                    # 重新连接信号
-                    post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
                     post_save.connect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
 
                 logger.info(
@@ -524,9 +541,7 @@ def violation_post_save_handler(sender, instance, created, **kwargs):
     affected_space_types: Set[Optional[SpaceType]] = set()
     if current_target_space_type: affected_space_types.add(current_target_space_type)
     if old_target_space_type: affected_space_types.add(old_target_space_type)
-    # 如果当前或旧的都不是特定空间类型，那么全局维度可能被影响到
-    if current_target_space_type is None or old_target_space_type is None:
-        affected_space_types.add(None)
+    affected_space_types.add(None) # MODIFICATION: 总是包含 None，以确保全局点数被重新评估
 
     # 仅当以下任何条件发生时才需要重新评估点数和禁用策略：
     # 1. 违规记录是新创建的

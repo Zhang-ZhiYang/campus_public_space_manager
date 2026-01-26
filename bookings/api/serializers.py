@@ -21,15 +21,17 @@ from bookings.models import (
 )
 
 from bookings.service.booking_preliminary_service import BookingPreliminaryService
-from core.utils.exceptions import CustomAPIException, InternalServerError
+from core.utils.exceptions import CustomAPIException, InternalServerError, ForbiddenException, BadRequestException
 from core.utils.constants import HTTP_200_OK, HTTP_202_ACCEPTED
 from spaces.models import BookableAmenity, CustomUser, SpaceType, Space
 
 logger = logging.getLogger(__name__)
 
 
-# --- Helper Serializers for nested representation ---
+# --- Helper Serializers for nested representation (这些是针对实际模型实例的) ---
 class CustomUserMinimalSerializer(serializers.ModelSerializer):
+    """用于序列化 CustomUser 模型的最小信息"""
+
     class Meta:
         model = CustomUser
         fields = ['id', 'username', 'email', 'get_full_name']
@@ -37,24 +39,32 @@ class CustomUserMinimalSerializer(serializers.ModelSerializer):
 
 
 class SpaceMinimalSerializer(serializers.ModelSerializer):
+    """用于序列化 Space 模型的最小信息"""
+
     class Meta:
         model = Space
-        fields = ['id', 'name', 'location', 'capacity', 'is_bookable']
+        fields = ['id', 'name', 'location', 'capacity', 'is_bookable', 'is_active']  # 添加 is_active
+        read_only_fields = ['id', 'name', 'location', 'capacity', 'is_bookable', 'is_active']
 
 
 class BookableAmenityMinimalSerializer(serializers.ModelSerializer):
+    """用于序列化 BookableAmenity 模型的最小信息，包含关联的 Amenity 名称和 Space 名称"""
     amenity_name = serializers.CharField(source='amenity.name', read_only=True)
     space_name = serializers.CharField(source='space.name', read_only=True)
 
     class Meta:
         model = BookableAmenity
         fields = ['id', 'amenity_name', 'space_name', 'quantity', 'is_bookable', 'is_active']
+        read_only_fields = ['id', 'amenity_name', 'space_name', 'quantity', 'is_bookable', 'is_active']
 
 
 class SpaceTypeMinimalSerializer(serializers.ModelSerializer):
+    """用于序列化 SpaceType 模型的最小信息"""
+
     class Meta:
         model = SpaceType
         fields = ['id', 'name', 'code', 'is_bookable_default']
+        read_only_fields = ['id', 'name', 'code', 'is_bookable_default']
 
 
 class CustomBookingDateTimeField(serializers.DateTimeField):
@@ -229,13 +239,18 @@ class BookingMinimalSerializer(serializers.ModelSerializer):
 
 
 class BookingDetailSerializer(serializers.ModelSerializer):
-    user = CustomUserMinimalSerializer(read_only=True)
-    space = SpaceMinimalSerializer(read_only=True)
-    bookable_amenity = BookableAmenityMinimalSerializer(read_only=True)
-    related_space = SpaceMinimalSerializer(read_only=True)
+    # 重写关联字段，使其直接处理 Service 返回的字典数据 (无论 obj 是模型实例还是 CachedDictObject/纯字典)
+    user = serializers.SerializerMethodField()
+    space = serializers.SerializerMethodField()
+    bookable_amenity = serializers.SerializerMethodField()
+    related_space = serializers.SerializerMethodField()
+    reviewed_by = serializers.SerializerMethodField()
 
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     processing_status_display = serializers.CharField(source='get_processing_status_display', read_only=True)
+
+    # NEW: 添加 check_in_qrcode_url 字段
+    check_in_qrcode_url = serializers.URLField(read_only=True, allow_null=True)
 
     class Meta:
         model = BookingModel
@@ -244,59 +259,109 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'id', 'request_uuid', 'user', 'space', 'bookable_amenity',
             'status', 'processing_status', 'created_at', 'updated_at',
             'reviewed_by', 'reviewed_at', 'admin_notes', 'status_display',
-            'processing_status_display', 'related_space'
+            'processing_status_display', 'related_space', 'check_in_qrcode_url'
         ]
+
+    # Helper methods to serialize the dict-based related objects or real model instances
+    def _get_related_data_from_obj(self, obj, field_name: str, serializer_class: serializers.BaseSerializer):
+        """通用辅助方法，根据 obj 类型获取相关数据并序列化。"""
+        if isinstance(obj, BookingModel):  # If it's a real model instance
+            related_instance = getattr(obj, field_name)
+            return serializer_class(related_instance).data if related_instance else None
+        else:  # Assumed to be dict-like (CachedDictObject or pure dict from .to_dict())
+            related_data = getattr(obj, field_name, None)  # Access obj.user, obj.space etc directly
+            # If related_data is already a dict, return it directly. No need to re-serialize.
+            return related_data if isinstance(related_data, dict) else None
+
+    def get_user(self, obj) -> Optional[Dict[str, Any]]:
+        return self._get_related_data_from_obj(obj, 'user', CustomUserMinimalSerializer)
+
+    def get_space(self, obj) -> Optional[Dict[str, Any]]:
+        return self._get_related_data_from_obj(obj, 'space', SpaceMinimalSerializer)
+
+    def get_bookable_amenity(self, obj) -> Optional[Dict[str, Any]]:
+        return self._get_related_data_from_obj(obj, 'bookable_amenity', BookableAmenityMinimalSerializer)
+
+    def get_related_space(self, obj) -> Optional[Dict[str, Any]]:
+        return self._get_related_data_from_obj(obj, 'related_space', SpaceMinimalSerializer)
+
+    def get_reviewed_by(self, obj) -> Optional[Dict[str, Any]]:
+        return self._get_related_data_from_obj(obj, 'reviewed_by', CustomUserMinimalSerializer)
 
     def update(self, instance: BookingModel, validated_data: Dict[str, Any]) -> BookingModel:
         user = self.context['request'].user
 
-        # 始终不允许直接修改的字段
+        # 1. 检查不允许直接修改的字段 (这些是核心数据，任何用户都不能通过此接口直接修改)
+        # 移除了 'user', 'status', 'processing_status'，因为它们现在由特定的逻辑处理
         read_only_on_update_immutable_fields = [
-            'space', 'bookable_amenity', 'start_time', 'end_time', 'booked_quantity', 'request_uuid'
+            'space', 'bookable_amenity', 'start_time', 'end_time', 'booked_quantity', 'request_uuid',
+            'created_at', 'updated_at', 'admin_notes', 'reviewed_by', 'reviewed_at', 'check_in_qrcode'
         ]
+
+        # 检查是否有尝试修改这些不可变字段
         for field in read_only_on_update_immutable_fields:
             if field in validated_data:
-                raise serializers.ValidationError({field: f"字段 '{field}' 不允许直接修改。"})
+                # 使用 ForbiddenException 而不是 ValidationError，因为这是权限问题
+                raise ForbiddenException(detail=f"字段 '{field}' 不允许通过此接口直接修改。",
+                                         code='immutable_field_modification_forbidden')
 
-        # 执行更新
+        # 2. 特权用户 (系统管理员/超级用户) 拥有最高权限
         if user.is_system_admin or user.is_superuser:
-            # 系统管理员和超级用户可以修改 purpose 和 expected_attendees
+            # 允许修改 'purpose' 和 'expected_attendees'
             instance.purpose = validated_data.get('purpose', instance.purpose)
             instance.expected_attendees = validated_data.get('expected_attendees', instance.expected_attendees)
-            # 他们也可以修改其他的字段，如果需要精细控制，可以额外添加逻辑。
-            # 这里简单地允许他们修改所有非immutable字段。
-            for attr, value in validated_data.items():
-                if attr not in read_only_on_update_immutable_fields:
-                    setattr(instance, attr, value)
+            # 其他字段如果需要扩展给管理员，可以在这里逐一添加
 
-        else:  # 普通用户
-            # 1. 权限检查：普通用户只能修改自己的预订
-            if instance.user != user:
-                raise serializers.ValidationError({'detail': '您没有权限修改此预订。'},
-                                                  code='forbidden_to_modify_others_booking')
+            instance.save()
+            return instance
 
-            # 2. 字段限制：普通用户只能修改 'purpose'
-            allowed_fields_for_ordinary_user = ['purpose']
+        # 3. 空间管理员权限：不能修改详情，只能修改状态 (Status 字段已在 immutable_fields 中被拦截)
+        #    如果空间管理员尝试修改任何非 immutable 字段，则拒绝。
+        #    注意：这里假设 SpaceManager 已经在视图层被 `is_admin_or_space_manager_required` 装饰器通过
+        #    要判断是否是管理当前预订相关空间的 SpaceManager
+        is_space_manager_for_this_booking = (
+                user.is_space_manager and instance.related_space and instance.related_space.managed_by_id == user.id
+        )
+        if user.is_space_manager and not is_space_manager_for_this_booking:
+            raise ForbiddenException(
+                detail="您是空间管理员但没有管理此预订相关空间的权限，因此不能修改预订详情。",
+                code="spaceman_unauthorized_for_this_booking")
 
-            # 检查是否有未授权的字段被修改
-            disallowed_fields_attempted = [
-                field for field in validated_data.keys()
-                if field not in allowed_fields_for_ordinary_user
-            ]
+        if is_space_manager_for_this_booking:
+            if validated_data:  # 如果有任何数据尝试更新，都拒绝
+                raise ForbiddenException(
+                    detail="空间管理员无权通过此接口修改预订详情，只能通过 /status/ 端点修改预订状态。",
+                    code="spaceman_cannot_modify_booking_details"
+                )
 
-            if disallowed_fields_attempted:
-                # 给出一个更具体的错误信息，指出哪些字段不允许修改
-                errors = {field: f"普通用户无权修改字段 '{field}'。" for field in disallowed_fields_attempted}
-                raise serializers.ValidationError(errors, code='forbidden_field_modification_for_ordinary_user')
+        # 4. 普通用户 (预订拥有者) 权限：
+        if instance.user != user:
+            raise ForbiddenException(detail="您没有权限修改此预订。", code='forbidden_to_modify_others_booking')
 
-            # 如果只有允许的字段，则进行更新 (这里只有purpose)
-            instance.purpose = validated_data.get('purpose', instance.purpose)
+        # 只有在 'PENDING' 状态下才允许修改 'purpose'
+        if instance.status != BookingModel.BOOKING_STATUS_PENDING:
+            raise ForbiddenException(detail="只有待审核状态的预订才能修改目的。",
+                                     code='booking_not_pending_for_purpose_edit')
+
+        allowed_fields_for_owner_in_pending = ['purpose', 'expected_attendees']  # 允许普通用户修改 expected_attendees
+        # 检查是否有未授权的字段被修改
+        for field in validated_data.keys():
+            if field not in allowed_fields_for_owner_in_pending:
+                raise ForbiddenException(
+                    detail=f"普通用户只能修改 'purpose' 和 'expected_attendees' 字段，且仅限待审核状态。字段 '{field}' 不允许修改。",
+                    code='forbidden_field_modification_for_ordinary_user'
+                )
+
+        # 如果通过所有检查，则更新允许的字段
+        instance.purpose = validated_data.get('purpose', instance.purpose)
+        instance.expected_attendees = validated_data.get('expected_attendees', instance.expected_attendees)
 
         instance.save()
         return instance
 
 
 class BookingStatusSerializer(serializers.Serializer):
+    # This serializer directly works with dictionary data
     id = serializers.IntegerField(read_only=True, help_text="预订ID")
     request_uuid = serializers.UUIDField(read_only=True, help_text="请求唯一标识 UUID")
     processing_status = serializers.CharField(read_only=True, help_text="异步处理状态")

@@ -30,7 +30,6 @@ from notifications.services import NotificationService
 
 logger = logging.getLogger(__name__)
 
-
 class BookingService(BaseService):
     """
     负责处理 Booking 模型相关的核心业务逻辑。
@@ -236,20 +235,19 @@ class BookingService(BaseService):
             logger.warning(f"Preliminary validation failed: {pre_validate_result.message}")
             return pre_validate_result
 
-        booking_id, target_space, target_amenity = pre_validate_result.data
-
-        if target_space is None and target_amenity is None:
-            logger.info(f"Idempotent request received. Returning existing booking ID {booking_id}.")
-            return pre_validate_result
+        # PreliminaryService.pre_validate 已经创建了 booking 实例 (status: SUBMITTED, processing_status: SUBMITTED)
+        # 且返回了 booking_id
+        booking_id = pre_validate_result.data.get('booking_id')
 
         logger.info(
             f"Booking ID {booking_id} created in SUBMITTED state and deep validation task dispatched by preliminary service.")
 
         try:
             # 重新加载 booking_instance，确保所有关联对象都被 select_related 预加载，以便通知内容完整
-            booking_instance = self.booking_dao.get_queryset().select_related(
-                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
-            ).filter(pk=booking_id).first()
+            # 这里的 get_booking_by_id 现在会返回模型实例 (而不是 DAO service result)，
+            # 但实际上我们希望它包含 DAO 定义的 eager loading
+            # 所以直接调用 DAO 的 get_booking_by_id 更合适。
+            booking_instance = self.booking_dao.get_booking_by_id(booking_id)
 
             if booking_instance:
                 # 预订在此阶段为 SUBMITTED 状态，发送提交通知，执行操作者是预订用户
@@ -273,6 +271,8 @@ class BookingService(BaseService):
                     not (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user):
                 raise ForbiddenException(detail="您没有权限查看此预订记录。")
 
+            # NEW: 将模型实例转换为字典，包括所有关联字段，以便缓存和服务层使用
+            # 确保 to_dict() 方法在 Booking 模型中已准备好，并能够递归地将关联对象也转换为字典
             booking_dict = booking.to_dict(include_related=True)
             return ServiceResult.success_result(data=booking_dict)
         except CustomAPIException as e:
@@ -290,9 +290,11 @@ class BookingService(BaseService):
 
             if is_admin_or_space_manager:
                 if user.is_system_admin:
-                    base_filters = Q()
+                    base_filters = Q() # 系统管理员查看所有
                 elif user.is_space_manager:
+                    # 空间管理员可以查看自己管理空间的预订，以及自己发起的预订
                     managed_space_ids = user.managed_spaces.values_list('pk', flat=True)
+                    # 组合查询条件：用户本人预订 或 管理的空间下的预订
                     base_filters |= Q(related_space__in=managed_space_ids)
 
             queryset = self.booking_dao.get_all_bookings(
@@ -310,9 +312,7 @@ class BookingService(BaseService):
     def cancel_booking(self, user: CustomUser, pk: int, reason: str) -> ServiceResult[None]:
         try:
             # 在事务开始时获取预订实例，并确保加载相关数据用于权限检查
-            booking = self.booking_dao.get_queryset().select_for_update().select_related(
-                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
-            ).filter(pk=pk).first()
+            booking = self.booking_dao.get_booking_by_id(pk) # 直接通过 DAO 获取模型实例
 
             if not booking:
                 raise NotFoundException(detail="预订记录未找到。")
@@ -334,7 +334,7 @@ class BookingService(BaseService):
                                           code="invalid_status_for_cancel")
 
             updated_booking = self.booking_dao.update_booking_status(
-                pk,
+                booking_pk=pk,
                 new_status=Booking.BOOKING_STATUS_CANCELLED,
                 admin_notes=f"被 {user.username} 取消，原因: {reason}",
                 admin_user=user
@@ -346,23 +346,13 @@ class BookingService(BaseService):
             CacheService.invalidate_object_cache('bookings:booking', booking.pk)
             CacheService.delete_many_by_prefix('bookings:booking:list_by_user')
             CacheService.delete_many_by_prefix('bookings:booking:list_active')
-            CacheService.delete_many_by_prefix('spaces:space')
+            CacheService.delete_many_by_prefix('spaces:space') # invalidate space-related caches as well due to booking change
 
             logger.info(f"Booking {pk} cancelled by user {user.pk}.")
 
-            # NEW: 重新加载 booking_instance 以确保所有关联对象都已加载，用于通知
-            final_booking_for_notification = self.booking_dao.get_queryset().select_related(
-                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
-            ).filter(pk=updated_booking.pk).first()
-
-            if final_booking_for_notification:
-                # 执行操作者是当前用户
-                self._send_booking_notification(final_booking_for_notification, 'BOOKING_CANCELLED', reason=reason,
-                                                performed_by_user=user)
-            else:
-                logger.error(
-                    f"Failed to re-fetch booking {updated_booking.pk} for cancellation notification. Notification will not be sent.")
-            # END NEW
+            # updated_booking 已经是带有预加载的模型实例
+            self._send_booking_notification(updated_booking, 'BOOKING_CANCELLED', reason=reason,
+                                            performed_by_user=user)
 
             return ServiceResult.success_result(message="预订取消成功。")
         except CustomAPIException as e:
@@ -376,16 +366,15 @@ class BookingService(BaseService):
             ServiceResult[Booking]:
         try:
             # 在事务开始时获取预订实例，并确保加载相关数据用于权限检查和状态流转
-            booking = self.booking_dao.get_queryset().select_for_update().select_related(
-                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
-            ).filter(pk=pk).first()
+            booking = self.booking_dao.get_booking_by_id(pk) # 使用 DAO 获取模型实例
 
             if not booking:
                 raise NotFoundException(detail="预订记录未找到。")
 
+            # 只有系统管理员和管理相关空间的空间管理员才能通过此入口修改状态
             if not user.is_system_admin and \
                     not (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user):
-                raise ForbiddenException(detail="您没有权限修改此预订的状态。")
+                raise ForbiddenException(detail="您没有权限修改此预订的状态。", code="unauthorized_status_update")
 
             current_status = booking.status
 
@@ -409,7 +398,7 @@ class BookingService(BaseService):
                                           code="invalid_status_transition")
 
             updated_booking = self.booking_dao.update_booking_status(
-                pk,
+                booking_pk=pk,
                 new_status=new_status,
                 admin_notes=f"由 {user.username} 更新状态为 {new_status}。" + (
                     f" 备注: {admin_notes}" if admin_notes else ""),
@@ -422,28 +411,19 @@ class BookingService(BaseService):
             CacheService.invalidate_object_cache('bookings:booking', booking.pk)
             CacheService.delete_many_by_prefix('bookings:booking:list_by_user')
             CacheService.delete_many_by_prefix('bookings:booking:list_active')
-            CacheService.delete_many_by_prefix('spaces:space')
+            CacheService.delete_many_by_prefix('spaces:space') # invalidate space-related caches as well due to booking change
 
             logger.info(f"Booking {pk} status updated to {new_status} by user {user.pk}.")
 
-            # NEW: 重新加载 booking_instance 以确保所有关联对象都已加载，用于通知
-            final_booking_for_notification = self.booking_dao.get_queryset().select_related(
-                'user', 'space', 'bookable_amenity__amenity', 'bookable_amenity__space'
-            ).filter(pk=updated_booking.pk).first()
-
-            if final_booking_for_notification:
-                # 执行操作者是当前用户
-                if new_status == Booking.BOOKING_STATUS_APPROVED:
-                    self._send_booking_notification(final_booking_for_notification, 'BOOKING_APPROVED',
-                                                    performed_by_user=user)
-                elif new_status == Booking.BOOKING_STATUS_REJECTED:
-                    # 对于拒绝，admin_notes 可以作为原因
-                    self._send_booking_notification(final_booking_for_notification, 'BOOKING_REJECTED',
-                                                    reason=admin_notes, performed_by_user=user)
-            else:
-                logger.error(
-                    f"Failed to re-fetch booking {updated_booking.pk} for status update notification. Notification will not be sent.")
-            # END NEW
+            # updated_booking 已经是带有预加载的模型实例
+            # 执行操作者是当前用户
+            if new_status == Booking.BOOKING_STATUS_APPROVED:
+                self._send_booking_notification(updated_booking, 'BOOKING_APPROVED',
+                                                performed_by_user=user)
+            elif new_status == Booking.BOOKING_STATUS_REJECTED:
+                # 对于拒绝，admin_notes 可以作为原因
+                self._send_booking_notification(updated_booking, 'BOOKING_REJECTED',
+                                                reason=admin_notes, performed_by_user=user)
 
             return ServiceResult.success_result(
                 data=updated_booking,
