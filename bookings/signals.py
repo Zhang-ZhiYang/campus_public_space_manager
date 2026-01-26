@@ -191,11 +191,12 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
                 pass
 
             if should_update_existing_ban:
-                post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                # Removed: post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
                 try:
                     existing_active_ban.save(update_fields=list(update_fields))
                 finally:
-                    post_save.connect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                    # Removed: post_save.connect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                    pass # Ensure this block is empty or removed, or removed entirely
                 logger.info(
                     f"Ban ID {existing_active_ban.pk} for user {ban_user.id} in {space_type_name} {action_description} until {existing_active_ban.end_date.strftime('%Y-%m-%d %H:%M')}.")
             else:
@@ -227,13 +228,14 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
         if existing_active_ban:
             original_end_date = existing_active_ban.end_date
             if existing_active_ban.end_date > timezone.now():
-                post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                # Removed: post_save.disconnect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
                 try:
                     existing_active_ban.end_date = timezone.now()
                     existing_active_ban.reason += f" (自动解除: 点数降至 {current_points}，低于所有禁用策略阈值)"
                     existing_active_ban.save(update_fields=['end_date', 'reason'])
                 finally:
-                    post_save.connect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                    # Removed: post_save.connect(user_ban_post_save_handler, sender=UserSpaceTypeBan)
+                    pass # Ensure this block is empty or removed, or removed entirely
 
                 logger.info(
                     f"Ban ID {existing_active_ban.pk} for user {ban_user.id} in {space_type_name} automatically lifted. Was set until {original_end_date.strftime('%Y-%m-%d %H:%M')}.")
@@ -243,6 +245,7 @@ def _apply_ban_policy(penalty_points_record: UserPenaltyPointsPerSpaceType):
         else:
             logger.debug(
                 f"No applicable ban policy and no existing active ban for user {ban_user.id} in {space_type_name}. No ban operations needed.")
+
 
 # --- Booking 模型的信号处理 (保持不变) ---
 @receiver(pre_save, sender=Booking)

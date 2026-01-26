@@ -440,7 +440,17 @@ class Space(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
-
+    @property
+    def effective_check_in_method(self):
+        """
+        计算并返回此空间的有效签到方式。
+        优先使用空间自身设置，其次是空间类型默认设置，最后是兜底默认值。
+        """
+        if self.check_in_method:
+            return self.check_in_method
+        elif self.space_type and self.space_type.default_check_in_method:
+            return self.space_type.default_check_in_method
+        return CHECK_IN_METHOD_HYBRID # 兜底默认值，确保总返回一个有效值
     class Meta:
         verbose_name = '空间'
         verbose_name_plural = verbose_name

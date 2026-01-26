@@ -67,6 +67,10 @@ class UserBanService(BaseService):
         try:
             space_type_id_str = str(space_type.pk) if space_type else "None"
             cache_identifier = f"user:{user.pk}:spacetype:{space_type_id_str}"
+            full_cache_key = f"{self.CACHE_KEY_PREFIX}:{cache_identifier}:{self.CACHE_DETAIL_POSTFIX}"  # 新增用于日志的完整缓存键
+
+            logger.debug(
+                f"[UserBanService] Checking ban status for user {user.pk}, space_type {space_type_id_str}. Cache key: {full_cache_key}")
 
             cached_result = CacheService.get(
                 key_prefix=self.CACHE_KEY_PREFIX,
@@ -74,21 +78,31 @@ class UserBanService(BaseService):
                 custom_postfix=self.CACHE_DETAIL_POSTFIX
             )
             if cached_result is not None:
-                logger.debug(
-                    f"Cache HIT for ban status for user {user.pk}, space_type {space_type_id_str}. Result: {cached_result}")
+                logger.info(
+                    f"[UserBanService] Cache HIT for key: {full_cache_key}. Cached result: {cached_result}")  # 从 DEBUG 改为 INFO 更容易看到
                 return ServiceResult.success_result(data=cached_result)
 
+            logger.warning(
+                f"[UserBanService] Cache MISS for key: {full_cache_key}. Querying database for ban status...")  # 从 INFO 改为 WARNING 更突出
             active_ban = self.user_ban_dao.get_active_ban_for_user(user=user, space_type=space_type)
             is_banned = active_ban is not None
+
+            if active_ban:
+                logger.warning(
+                    f"[UserBanService] DB Query found active ban (ID:{active_ban.pk}) for user {user.pk}, space_type {space_type_id_str}. End Date: {active_ban.end_date}. Current Time: {timezone.now()}")
+            else:
+                logger.info(
+                    f"[UserBanService] DB Query found NO active ban for user {user.pk}, space_type {space_type_id_str}.")
 
             CacheService.set(
                 key_prefix=self.CACHE_KEY_PREFIX,
                 identifier=cache_identifier,
                 custom_postfix=self.CACHE_DETAIL_POSTFIX,
-                value=is_banned
+                value=is_banned,
+                timeout=60 * 5  # 示例：如果缓存失效有问题，可以尝试设置一个较短的 TTL (例如5分钟)，以避免长时间的错误状态
             )
             logger.info(
-                f"Calculated ban status for user {user.pk}, space_type {space_type_id_str}. Is banned: {is_banned}. Cached result.")
+                f"[UserBanService] Set cache for key: {full_cache_key} with value: {is_banned}. Timeout: {60 * 5}s.")
             return ServiceResult.success_result(data=is_banned)
 
         except Exception as e:

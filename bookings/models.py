@@ -274,10 +274,10 @@ class Booking(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
 
-        is_new = self.pk is None
+        is_new = (self.check_in_qrcode  is None or self.check_in_qrcode  == '') and self.space.requires_approval==False
         super().save(*args, **kwargs)  # 保存以确保 self.pk 存在
 
-        if is_new or (self.check_in_qrcode is None and self.status == Booking.BOOKING_STATUS_APPROVED):
+        if is_new or ((self.check_in_qrcode  is None or self.check_in_qrcode  == '') and self.status == Booking.BOOKING_STATUS_APPROVED):
             if self.related_space and self.related_space.effective_check_in_method == 'STAFF':  # 仅当签到方式为 STAFF 时自动生成
                 self._generate_check_in_qrcode()
 

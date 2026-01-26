@@ -1,4 +1,3 @@
-# settings.py
 """
 Django settings for core project.
 Enhanced for SpaceRes Analysis System.
@@ -22,7 +21,7 @@ SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
 
 # 读取 .env, 支持 CSV 格式
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.0.0.1,localhost', cast=Csv())
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='127.000.1,localhost', cast=Csv())
 
 # ==============================================================================
 # 2. 应用定义 (Applications)
@@ -151,8 +150,16 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [ BASE_DIR / 'static' ]
 
+# 恢复 MEDIA_URL 和 MEDIA_ROOT 为独立配置，避免与 STATIC_URL 冲突
+# MEDIA_URL 用于通过 URL 访问媒体文件，应与 STATIC_URL 不同
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media' # <-- NEW: 明确定义 MEDIA_ROOT
+# MEDIA_ROOT 是媒体文件在文件系统上的存储位置
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# 确保 MEDIA_ROOT 目录存在
+if not MEDIA_ROOT.exists():
+    MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+    print(f"INFO: Created MEDIA_ROOT directory: {MEDIA_ROOT}")
 
 # ==============================================================================
 # 7. Django REST Framework 配置 (DRF)
@@ -222,7 +229,7 @@ CORS_ALLOW_CREDENTIALS = True
 # 10. Celery & Redis 配置 (缺失部分已补全)
 # ==============================================================================
 
-REDIS_CACHE_URL = config('REDIS_URL', default='redis://127.0.0.1:6379/0') # 假设你的 .env 中定义了 REDIS_URL
+REDIS_CACHE_URL = config('REDIS_URL', default='redis://127.000.1:6379/0') # 假设你的 .env 中定义了 REDIS_URL
 
 CACHES = {
     'default': {
@@ -243,8 +250,8 @@ CACHES = {
 }
 
 # 从 .env 读取 Celery 配置
-CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://127.0.0.1:6379/1') # 你的 .env 定义了 /1
-CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://127.0.0.1:6379/2') # 你的 .env 定义了 /2
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://127.000.1:6379/1') # 你的 .env 定义了 /1
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://127.000.1:6379/2') # 你的 .env 定义了 /2
 
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'

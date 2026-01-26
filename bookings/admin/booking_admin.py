@@ -5,6 +5,7 @@ from django.contrib import messages
 from django.utils import timezone
 from django.db.models import Q, Manager, QuerySet
 from django.core.exceptions import ValidationError
+from django.utils.html import format_html # <-- 新增导入
 
 from guardian.admin import GuardedModelAdmin
 from guardian.shortcuts import get_objects_for_user
@@ -27,25 +28,20 @@ except ImportError:
     # 在生产环境中，这意味着配置问题
     SPACES_MODELS_LOADED = False
 
-
     class Space:  # 提供一个极简的 Mock，防止名称错误，但不提供功能
         def __init__(self): self.name = "Mock Space"
-
 
     class SpaceType:
         def __init__(self): self.name = "Mock SpaceType"
 
-
     class BookableAmenity:
         def __init__(self): self.name = "Mock BookableAmenity"
-
 
     print("Warning: Could not import Space models. Using dummy mocks. Admin functionality will be limited.")
 
 import logging
 
 logger = logging.getLogger(__name__)
-
 
 # --- 明确移除所有 Mock 对象定义代码 ---
 # (原文件中此部分已被删除或注释，此处不再包含以保持代码整洁)
@@ -55,7 +51,8 @@ logger = logging.getLogger(__name__)
 class BookingAdmin(GuardedModelAdmin):
     list_display = (
         'id', 'user_display', 'booking_target_display', 'status', 'booked_quantity',
-        'start_time', 'end_time', 'reviewed_by_display', 'requires_approval_status'
+        'start_time', 'end_time', 'reviewed_by_display', 'requires_approval_status',
+        'qrcode_thumbnail' # <-- 新增：在列表视图中显示二维码缩略图
     )
     list_filter = (
         'status', 'start_time', 'end_time', 'space__space_type', 'space',
@@ -72,13 +69,15 @@ class BookingAdmin(GuardedModelAdmin):
         (None, {'fields': (('user', 'status'), ('space', 'bookable_amenity', 'booked_quantity'), 'purpose',)}),
         ('时间信息', {'fields': (('start_time', 'end_time'),)}),
         ('审核信息', {'fields': ('admin_notes', ('reviewed_by', 'reviewed_at'))}),
+        ('签到二维码', {'fields': ('check_in_qrcode', 'qrcode_thumbnail_fieldset')}), # <-- 新增：在详情页显示二维码
         ('系统信息', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)})
     )
     # 确保 reviewed_at 在 readonly_fields 中，因为它由系统填充
-    readonly_fields = ('created_at', 'updated_at', 'reviewed_at')
+    # check_in_qrcode 也应该在 readonly_fields 中，因为它由系统生成
+    readonly_fields = ('created_at', 'updated_at', 'reviewed_at', 'check_in_qrcode', 'qrcode_thumbnail_fieldset') # <-- 新增：check_in_qrcode
 
     actions = ['approve_bookings', 'reject_bookings', 'cancel_bookings', 'mark_completed_bookings', 'mark_checked_in',
-               'mark_no_show_and_violate']
+               'mark_no_show_and_violate', 'regenerate_qrcodes'] # <-- 新增：重新生成二维码的动作
 
     @admin.display(description='预订用户')
     def user_display(self, obj: 'Booking'):
@@ -106,6 +105,18 @@ class BookingAdmin(GuardedModelAdmin):
         return bool(target_obj and getattr(target_obj, 'requires_approval', False))
 
     requires_approval_status.boolean = True
+
+    @admin.display(description='签到二维码') # <-- 新增：显示二维码缩略图的方法
+    def qrcode_thumbnail(self, obj):
+        if obj.check_in_qrcode and hasattr(obj.check_in_qrcode, 'url'):
+            # 返回一个图片和链接，方便直接查看或下载
+            return format_html('<a href="{}" target="_blank"><img src="{}" width="50" height="50" /></a>',
+                               obj.check_in_qrcode.url, obj.check_in_qrcode.url)
+        return "无"
+
+    @admin.display(description='签到二维码') # <-- 新增：用于 fieldsets 中显示
+    def qrcode_thumbnail_fieldset(self, obj):
+        return self.qrcode_thumbnail(obj)
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
@@ -191,7 +202,7 @@ class BookingAdmin(GuardedModelAdmin):
         if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
             space_manager_specific_actions = [
                 'approve_bookings', 'reject_bookings', 'cancel_bookings', 'mark_completed_bookings',
-                'mark_checked_in', 'mark_no_show_and_violate'
+                'mark_checked_in', 'mark_no_show_and_violate', 'regenerate_qrcodes' # <-- 允许空间管理员重新生成二维码
             ]
             actions.pop('delete_selected', None)  # 空间管理员不能批量删除
 
@@ -243,7 +254,7 @@ class BookingAdmin(GuardedModelAdmin):
                 continue
 
             # 状态检查
-            if booking.status not in status_conditions:
+            if status_conditions and booking.status not in status_conditions: # status_conditions 可以为空，例如重新生成二维码
                 warning_messages.append(
                     f"预订 {booking.id} 状态为 {booking.status}，无法执行 '{action_type}'。当前状态不允许此操作。")
                 logger.warning(
@@ -265,14 +276,16 @@ class BookingAdmin(GuardedModelAdmin):
                         f"Admin Action '{action_type}': A selected booking instance ({booking.id}) has no PK. Highly unexpected.")
                     continue
 
-                update_fields = {'status': new_status, 'updated_at': timezone.now()}
+                update_fields = {'status': new_status, 'updated_at': timezone.now()} if new_status else {'updated_at': timezone.now()}
                 if update_reviewer_info:
                     update_fields['reviewed_by'] = request.user
                     update_fields['reviewed_at'] = timezone.now()
 
                 # 使用 QuerySet.update() 执行更新
                 # 再次过滤确保状态满足条件，处理并发
-                update_filter = Q(pk=booking.pk, status__in=status_conditions)
+                update_filter = Q(pk=booking.pk)
+                if status_conditions:
+                    update_filter &= Q(status__in=status_conditions)
                 if check_end_time:  # 只有当需要检查 end_time 时才加入这个过滤条件
                     update_filter &= Q(end_time__lt=timezone.now())
 
@@ -281,7 +294,7 @@ class BookingAdmin(GuardedModelAdmin):
                 if updated_rows > 0:
                     processed_count += 1
                     logger.info(
-                        f"Admin Action '{action_type}': Successfully updated booking ID: {booking.id} to {new_status}.")
+                        f"Admin Action '{action_type}': Successfully updated booking ID: {booking.id} to {new_status if new_status else booking.status}.")
 
                     # 特殊处理：创建违规记录 (仅用于 mark_no_show_and_violate)
                     if create_violation and target_space:
@@ -300,6 +313,12 @@ class BookingAdmin(GuardedModelAdmin):
                             warning_messages.append(f"预订 {booking.id} 无法确定空间类型，未能创建违规记录。")
                             logger.warning(
                                 f"Admin Action '{action_type}': Booking {booking.id} space type not found for violation.")
+                    # 特殊处理：重新生成二维码 (仅用于 regenerate_qrcodes)
+                    if action_type == "重新生成二维码" and booking.status == Booking.BOOKING_STATUS_APPROVED and target_space and target_space.effective_check_in_method == 'STAFF':
+                        booking._generate_check_in_qrcode() # 触发模型中的二维码生成方法
+                        logger.info(f"Admin Action '{action_type}': Regenerated QR code for booking ID: {booking.id}.")
+                    elif action_type == "重新生成二维码" and (booking.status != Booking.BOOKING_STATUS_APPROVED or not target_space or target_space.effective_check_in_method != 'STAFF'):
+                         warning_messages.append(f"预订 {booking.id} 未被重新生成二维码：状态不是已批准或空间签到方式不是工作人员扫描。")
 
                 else:
                     warning_messages.append(f"预订 {booking.id} 未被更新，可能其状态已不满足操作条件，或 ID 不匹配。")
@@ -326,6 +345,7 @@ class BookingAdmin(GuardedModelAdmin):
             permission_codename='spaces.can_approve_space_bookings',
             update_reviewer_info=True
         )
+        # 在批准后，Booking 的 save 方法会自动检查并生成二维码
         for msg in error_messages: self.message_user(request, msg, messages.ERROR)
         for msg in warning_messages: self.message_user(request, msg, messages.WARNING)
         if not error_messages and not warning_messages:
@@ -410,3 +430,39 @@ class BookingAdmin(GuardedModelAdmin):
         if not error_messages and not warning_messages:
             self.message_user(request, f"成功标记 {processed_count} 条预订为未到场，创建 {violation_count} 条违规记录。",
                               messages.SUCCESS)
+
+    @admin.action(description="重新生成签到二维码") # <-- 新增：Admin Action
+    def regenerate_qrcodes(self, request, queryset):
+        processed_count = 0
+        error_messages = []
+        warning_messages = []
+
+        for booking in queryset:
+            target_space = booking.space or (booking.bookable_amenity.space if booking.bookable_amenity else None)
+
+            # 权限检查：确保用户有权限对此预订的所属空间进行操作
+            if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False) or \
+                    (getattr(request.user, 'is_space_manager', False) and SPACES_MODELS_LOADED and \
+                     request.user.has_perm('spaces.can_approve_space_bookings', target_space))): # 使用can_approve作为代理权限
+                error_messages.append(f"您没有权限对预订 {booking.id} 重新生成二维码。")
+                continue
+
+            if booking.status == Booking.BOOKING_STATUS_APPROVED and target_space and target_space.effective_check_in_method == 'STAFF':
+                try:
+                    booking._generate_check_in_qrcode() # 调用模型中的生成方法
+                    processed_count += 1
+                    logger.info(f"Admin Action 'regenerate_qrcodes': Regenerated QR code for booking ID: {booking.id}.")
+                except Exception as e:
+                    error_messages.append(f"为预订 {booking.id} 生成二维码失败: {e}")
+                    logger.error(f"Error regenerating QR for booking {booking.id}: {e}", exc_info=True)
+            else:
+                warning_messages.append(f"预订 {booking.id} 的状态不是 '已批准' 或空间签到方式不是 '工作人员扫描'，无法生成二维码。")
+
+        if error_messages:
+            for msg in error_messages:
+                self.message_user(request, msg, messages.ERROR)
+        if warning_messages:
+            for msg in warning_messages:
+                self.message_user(request, msg, messages.WARNING)
+        if processed_count > 0:
+            self.message_user(request, f"成功为 {processed_count} 条预订重新生成了二维码。", messages.SUCCESS)
