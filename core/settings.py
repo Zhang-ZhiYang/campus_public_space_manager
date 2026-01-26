@@ -139,7 +139,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # ==============================================================================
 
 LANGUAGE_CODE = 'zh-hans'
-TIME_ZONE = 'Asia/Shanghai' # <-- 建议改为本地时区，例如 'Asia/Shanghai' 或 'Asia/Chongqing'
+TIME_ZONE = 'UTC' # <-- 建议改为本地时区，例如 'Asia/Shanghai' 或 'Asia/Chongqing'
 USE_I18N = True
 USE_TZ = True
 

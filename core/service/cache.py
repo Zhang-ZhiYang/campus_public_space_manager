@@ -1,4 +1,4 @@
-# core/cache.py
+# core/service/cache.py
 import json
 import logging
 import hashlib
@@ -51,7 +51,16 @@ class ServiceResult:
     def to_exception(self):
         detail_message = self.message
         if self.errors:
-            detail_message = f"{self.message}: {'; '.join(self.errors)}"
+            # 如果 errors 是字典，尝试将其转换为字符串
+            if isinstance(self.errors, dict):
+                error_strings = [f"{k}: {', '.join(v) if isinstance(v, list) else v}" for k, v in self.errors.items()]
+                detail_message = f"{self.message}: {'; '.join(error_strings)}"
+            else:  # 否则按预期处理为列表
+                detail_message = f"{self.message}: {'; '.join(map(str, self.errors))}"
+
+        # 如果 detail_message 为空，则仅返回 message
+        if not detail_message:
+            detail_message = self.message or "An error occurred"
 
         return CustomAPIException(
             detail=detail_message,
@@ -63,40 +72,48 @@ class ServiceResult:
 # --- Helper for get_object when Service returns dict from cache ---
 class CachedDictObject:
     """
-    A simple wrapper for dictionary data that mimics a Django model instance
-    enough for DRF's `get_object()` and serializers to work,
-    specifically by providing a `pk` attribute and handling related fields.
-    It also stores the original `_model_class` for resolution in update/delete in views.
+    一个简单的包装器，将字典数据模拟成一个具有某些Django模型行为的对象，
+    特别是能够通过属性访问键值，并模拟 `pk` 和 `to_dict` 方法。
+    DRF 序列化器可能仍会假设所有嵌套对象都是模型实例。
     """
 
     def __init__(self, data: Dict[str, Any], model_class=None):
         self._data = data
         self._model_class = model_class
+        # 直接设置pk属性，便于DRF直接访问obj.pk
+        self.pk = data.get('id') if 'id' in data else None
 
     def __getattr__(self, name):
-        """Allow direct access to dict keys as attributes. Modified to handle nested dicts (related objects)."""
+        """
+        允许直接访问字典键作为属性。
+        关键改进：不再尝试递归包装嵌套字典为 CachedDictObject，
+        而是让序列化器通过 SerializerMethodField 直接处理这些嵌套字典。
+        """
         if name in self._data:
-            value = self._data[name]
+            return self._data[name]
+        elif name == 'pk':  # Defensive check, though self.pk is set in init
+            return self._data.get('id')
+        elif name == '_meta' and self._model_class:  # DRF有时会访问_meta
+            return self._model_class._meta
 
-            # Recursively wrap nested dictionaries for related fields if they are also expected as objects
-            if isinstance(value, dict) and name in ['space_type', 'managed_by', 'parent_space']:
-                # For nested dicts representing related objects, wrap them as CachedDictObject.
-                # Do NOT pass self._model_class to nested objects, as it's specific to the top-level object.
-                return CachedDictObject(value, model_class=None)
+        # 对于关系字段，如果 Service 返回的是 None，直接返回 None
+        # 如果 Service 返回空字典，返回 None，避免 AttributeError
+        if name in ['user', 'space', 'bookable_amenity', 'related_space', 'reviewed_by']:
+            return None
 
-            # CRITICAL FIX: Handle list of primary keys for ManyToMany relationships (e.g., 'permitted_groups')
-            # DRF's ManyRelatedField expects an iterable of objects, each with a .pk or .id attribute.
-            # If our to_dict() outputs a list of PKs for M2M, we must wrap them.
-            if name == 'permitted_groups' and isinstance(value, list) and all(isinstance(v, (int, str)) for v in value):
-                # Wrap each integer/string PK into a 'dummy' CachedDictObject that has a 'pk' attribute.
-                return [CachedDictObject({'id': pk}) for pk in value]
+        # 如果是 ImageField，DRF可能会尝试访问 ImageField.url
+        if name in ['check_in_image', 'check_in_qrcode']:
+            # 假设你的 to_dict 已经把 URL 放在了 'check_in_image_url'/'check_in_qrcode_url'
+            # 或者 ImageField 字段名本身就是 url，则直接返回 None 或者模拟 ImageFile
+            # 这里的简单做法是直接返回对应属性的 URL 或 None
+            url_name = f"{name}_url"
+            return self._data.get(url_name)  # 返回 URL 字符串
 
-            return value
-        elif name == 'pk' and 'id' in self._data:  # For 'instance.pk' lookup in DRF
-            return self._data['id']
-
-        # For non-existent attributes, raise AttributeError
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+    # NEW: 添加 __dir__ 方法，帮助 inspect 和 hasattr 更好地工作
+    def __dir__(self):
+        return list(super().__dir__()) + list(self._data.keys()) + ['pk', '_model_class']
 
     # Required for some DRF validation/lookup to work with instance context
     def __eq__(self, other):
@@ -111,7 +128,21 @@ class CachedDictObject:
         return NotImplemented
 
     def __hash__(self):
-        return hash(self.pk)
+        return hash(self.pk) if self.pk is not None else hash(id(self))  # Make hashable
+
+    def to_dict(self, include_related: bool = True) -> dict:
+        """
+        返回原始字典数据，这与模型实例的 to_dict 方法保持一致。
+        """
+        # 可以根据需要进行深拷贝，但通常直接返回引用即可
+        if include_related:
+            return self._data
+        else:
+            # 如果不包含相关联对象，需要创建一个新的字典并排除相关字段
+            filtered_data = {k: v for k, v in self._data.items() if k not in [
+                'user', 'space', 'bookable_amenity', 'related_space', 'reviewed_by', 'check_in_image', 'check_in_qrcode'
+            ]}
+            return filtered_data
 
 
 class CacheService:
@@ -127,28 +158,28 @@ class CacheService:
         'app_data_generic': DEFAULT_TIMEOUT_FROM_SETTINGS,
 
         'spaces:spacetype:detail': 3600 * 24,
-        'spaces:spacetype:list_all': 3600*2,
+        'spaces:spacetype:list_all': 3600 * 2,
 
-        'spaces:amenity:detail': 3600*24,
-        'spaces:amenity:list_all': 3600*2,
+        'spaces:amenity:detail': 3600 * 24,
+        'spaces:amenity:list_all': 3600 * 2,
 
         'spaces:bookable_amenity:detail': 300,
         'spaces:bookable_amenity:list_by_space': 120,
 
-        'spaces:space:detail': 3600*24,
-        'spaces:space:list_all': 3600*12,  # List key will be like spaces:space:list_all:hash_xxxx
-        'spaces:space:list_by_parent': 3600*6,
-        'spaces:space:list_filtered': 3600*12,
+        'spaces:space:detail': 3600 * 24,
+        'spaces:space:list_all': 3600 * 12,  # List key will be like spaces:space:list_all:hash_xxxx
+        'spaces:space:list_by_parent': 3600 * 6,
+        'spaces:space:list_filtered': 3600 * 12,
 
         'bookings:booking:detail': 60,
-        'bookings:booking:list_by_user':3600*2,
+        'bookings:booking:list_by_user': 3600 * 2,
         'bookings:booking:list_active': 3600,
         'bookings:violation:detail': 300,
         'bookings:violation:list_by_user': 120,
         'bookings:user_penalty_points:detail': 120,
         'bookings:ban_policy:list_all': 3600,
-        'bookings:user_ban:detail': 3600*2,
-        'bookings:user_ban:list_by_user': 3600*2,
+        'bookings:user_ban:detail': 3600 * 2,
+        'bookings:user_ban:list_by_user': 3600 * 2,
         'bookings:daily_limit:detail': 3600,
 
         'bookings:daily_limit:effective_by_group_spacetype': 3600,  # 新增 DailyBookingLimitService 的缓存
