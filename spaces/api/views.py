@@ -42,12 +42,19 @@ class SpaceListCreateAPIView(ListCreateAPIView):
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
+            # 创建时使用更详细的序列化器
             return SpaceCreateUpdateSerializer
+            # GET 请求使用列表序列化器
         return SpaceListSerializer
 
     def get_queryset(self):
+        """
+        根据用户角色获取可用的空间 QuerySet。
+        Service 层 (SpaceService.get_all_spaces) 必须实现此权限逻辑。
+        """
         user = self.request.user
         space_service = SpaceService()
+        # SpaceService().get_all_spaces 内部会根据 user 自动过滤权限
         service_result = space_service.get_all_spaces(user)
         if service_result.success:
             return service_result.data
@@ -55,29 +62,56 @@ class SpaceListCreateAPIView(ListCreateAPIView):
             raise service_result.to_exception()
 
     def list(self, request, *args, **kwargs):
+        """
+        列出所有可见空间，并根据用户角色进行缓存隔离。
+        普通用户：is_basic_infrastructure 为 True 或 用户组在 permitted_groups 中的空间。
+        系统/空间管理员：所有空间。
+        """
         try:
             user = request.user
             space_service = SpaceService()
-            cache_key_prefix = 'spaces:space'
+            cache_key_prefix = 'spaces:space'  # 基础缓存前缀
 
+            # 1. 动态生成 user_specific_postfix 用于缓存隔离
+            # 这个后缀包含了用户的角色信息，确保不同权限等级/不同用户的缓存互不干扰
+            user_specific_postfix = ''
+            if not user.is_authenticated:  # 理论上 IsAuthenticated 会阻止匿名用户，但作为防御性编程
+                user_specific_postfix = 'anonymous'
+            elif user.is_system_admin:
+                user_specific_postfix = 'system_admin'
+            elif user.is_space_manager:
+                # 空间管理员可以看所有空间，如果不同空间管理员看到的结果相同，可以用 'space_manager'
+                # 如果不同空间管理员看到的结果可能不同（例如基于他们管理的特定空间），需要加上 user.pk
+                # 根据您提供的权限要求 "空间管理员也可以看到所有空间信息"，这里统一用 'space_manager'。
+                # 如果 SpaceService.get_all_spaces 实际上会因空间管理员不同而返回不同结果，则改为 f'space_manager:{user.pk}'
+                user_specific_postfix = 'space_manager'
+            else:
+                # 普通用户，其可见空间可能受限于其所属用户组，因此需要用户ID来隔离
+                user_specific_postfix = f'normal_user:{user.pk}'
+
+            # 结合基础列表类型和用户特定后缀
+            final_custom_postfix = f"list_all_visible_by_user:{user_specific_postfix}"
+
+            # 2. 生成查询参数的哈希作为缓存的一部分
             dynamic_cache_kwargs = space_service.get_dynamic_list_cache_key_parts(request.query_params)
-            fixed_custom_postfix = 'list_all'
 
+            # 3. 尝试从缓存获取数据
             cached_full_response_data = CacheService.get_list_cache(
                 key_prefix=cache_key_prefix,
-                custom_postfix=fixed_custom_postfix,
+                custom_postfix=final_custom_postfix,  # 使用包含用户角色的自定义后缀
                 **dynamic_cache_kwargs
             )
 
             if cached_full_response_data is not None:
                 logger.debug(
-                    f"View 层缓存命中空间列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
+                    f"View 层缓存命中空间列表数据 (User: {user.username}, Postfix: {final_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
                 return success_response(
                     message=MSG_SUCCESS,
                     data=cached_full_response_data,
                     status_code=HTTP_200_OK
                 )
 
+            # 4. 缓存未命中，从数据库获取数据并序列化
             queryset_unpaginated_filtered = self.filter_queryset(self.get_queryset())
 
             total_count = queryset_unpaginated_filtered.count()
@@ -90,7 +124,8 @@ class SpaceListCreateAPIView(ListCreateAPIView):
             else:
                 page_data = list(queryset_unpaginated_filtered)
 
-            serializer = self.get_serializer(page_data, many=True)
+            serializer = self.get_serializer(page_data, many=True,
+                                             context={'request': request})  # 传递 request 到 serializer context
             final_serialised_results = serializer.data
 
             final_response_data_for_cache = None
@@ -104,16 +139,18 @@ class SpaceListCreateAPIView(ListCreateAPIView):
                     "results": final_serialised_results
                 }
 
-            timeout = CacheService.get_timeout_for_key_prefix('spaces:space:list_all')
+            # 5. 设置缓存
+            # 获取超时时间：使用基础列表类型 'spaces:space:list_all' 来查找 TIMEOUTS_MAP
+            timeout = CacheService.get_timeout_for_key_prefix(f"{cache_key_prefix}:list_all")
             CacheService.set_list_cache(
                 key_prefix=cache_key_prefix,
-                custom_postfix=fixed_custom_postfix,
+                custom_postfix=final_custom_postfix,  # 使用包含用户角色的自定义后缀
                 value=final_response_data_for_cache,
                 timeout=timeout,
                 **dynamic_cache_kwargs
             )
             logger.debug(
-                f"View 层缓存空间列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
+                f"View 层缓存空间列表数据 (User: {user.username}, Postfix: {final_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
 
             return success_response(
                 message=MSG_SUCCESS,
@@ -129,12 +166,16 @@ class SpaceListCreateAPIView(ListCreateAPIView):
 
     @is_admin_or_space_manager_required  # 需要管理员或空间管理员权限来创建
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        # ... (create 方法保持不变) ...
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         try:
             instance = serializer.save()
-            response_data = SpaceBaseSerializer(instance).data
+            # 在创建成功后，清除所有相关列表缓存，确保不同用户都能刷新到最新数据
+            CacheService.invalidate_all_related_cache('spaces:space')
+
+            response_data = SpaceBaseSerializer(instance, context={'request': request}).data
             return success_response(
                 message=MSG_CREATED,
                 data=response_data,
@@ -154,25 +195,38 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
     def get_serializer_class(self):
         if self.request.method in ['PUT', 'PATCH']:
+            # 更新时使用更详细的序列化器
             return SpaceCreateUpdateSerializer
+        # GET 请求使用基础序列化器
         return SpaceBaseSerializer
 
-    # --- 修正点：新增此装饰器，对 admin/manager 检查权限以获取单个空间详情 ---
-    @is_admin_or_space_manager_for_qs_obj
     def get_object(self):
+        """
+        根据用户角色获取单个空间对象。
+        Service 层 (SpaceService.get_space_by_id) 必须实现此权限逻辑。
+        """
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        # SpaceService().get_space_by_id 内部已经包含了权限过滤
-        service_result = SpaceService().get_space_by_id(user, pk)
+        space_service = SpaceService()
+
+        # SpaceService().get_space_by_id 内部已通过 @CacheService.cache_method 实现了用户隔离的缓存
+        service_result = space_service.get_space_by_id(user, pk)
         if service_result.success:
+            # CachedDictObject 包装了字典数据，使其行为像一个模型实例
             return CachedDictObject(service_result.data, model_class=Space)
         else:
+            # 如果 ServiceResult 是失败的，通常是 NotFoundException 或 ForbiddenException
             raise service_result.to_exception()
 
     def retrieve(self, request, *args, **kwargs):
+        """
+        获取单个空间的详情。
+        权限和缓存已在 get_object 和 Service 层处理。
+        """
         try:
-            instance = self.get_object()  # get_object() 上的装饰器会处理权限
-            serializer = self.get_serializer(instance)
+            instance = self.get_object()  # get_object() 已处理权限和缓存
+            # 序列化实例，并传递 request context 以便 ImageField 生成完整的 URL
+            serializer = self.get_serializer(instance, context={'request': request})
             return success_response(
                 message=MSG_SUCCESS,
                 data=serializer.data,
@@ -188,6 +242,7 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
     @is_admin_or_space_manager_required  # 需要管理员或空间管理员权限来更新
     def update(self, request, *args, **kwargs):
+        # ... (update 方法保持不变) ...
         # get_object() 上的装饰器已确保当前用户有权操作该空间
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
@@ -204,7 +259,11 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
         try:
             instance = serializer.save()
-            response_data = SpaceBaseSerializer(instance).data
+            # 更新成功后，清除该空间的详情缓存和所有相关列表缓存
+            CacheService.invalidate_object_cache('spaces:space', instance.pk)
+            CacheService.invalidate_all_related_cache('spaces:space')
+
+            response_data = SpaceBaseSerializer(instance, context={'request': request}).data
             return success_response(
                 message="空间更新成功。",
                 data=response_data,
@@ -220,6 +279,7 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
     @is_admin_or_space_manager_required  # 需要管理员或空间管理员权限来删除
     def destroy(self, request, *args, **kwargs):
+        # ... (destroy 方法保持不变) ...
         # get_object() 上的装饰器已确保当前用户有权操作该空间
         _instance_for_pk = self.get_object()
         pk_from_url = _instance_for_pk.pk
@@ -229,6 +289,9 @@ class SpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
             service_result = SpaceService().delete_space(user, pk_from_url)
 
             if service_result.success:
+                # 删除成功后，清除所有相关列表缓存和该空间的详情缓存
+                CacheService.invalidate_all_related_cache('spaces:space')
+
                 return success_response(
                     message="空间删除成功。",
                     data=None,
@@ -255,15 +318,14 @@ class ManagedSpaceListCreateAPIView(ListCreateAPIView):
     filterset_class = SpaceFilter
 
     def get_serializer_class(self):
-        # 此视图的 POST 已经被移除，所以通常这个方法不会被调用，
-        # 但为了避免潜在错误，可以返回 SpaceListSerializer 或 SpaceBaseSerializer
         return SpaceListSerializer
 
     @is_admin_or_space_manager_for_qs_obj
     def get_queryset(self):
         user = self.request.user
         space_service = SpaceService()
-        service_result = space_service.get_managed_spaces(user)  # 调用 Service 中获取管理空间的方法
+        # 调用 Service 中获取管理空间的方法，DAO 层会根据用户角色过滤
+        service_result = space_service.get_managed_spaces(user)
         if service_result.success:
             return service_result.data
         else:
@@ -272,7 +334,7 @@ class ManagedSpaceListCreateAPIView(ListCreateAPIView):
     @is_admin_or_space_manager_required  # 验证是管理员或空间管理器
     def list(self, request, *args, **kwargs):
         """
-        列出当前用户管理的空间，或（对系统管理员）所有被管理的空间。
+        列出当前用户管理的空间，或（对系统管理员）所有被管理的空间，并进行缓存隔离。
         """
         try:
             user = request.user
@@ -282,21 +344,22 @@ class ManagedSpaceListCreateAPIView(ListCreateAPIView):
             dynamic_cache_kwargs = space_service.get_dynamic_list_cache_key_parts(request.query_params)
 
             # 为管理空间列表生成特定于用户的缓存后缀
+            # 这里的 fixed_custom_postfix 已经包含了用户身份信息，这是正确的
             user_specific_postfix = f"list_managed_by_user:{user.pk}"
             if user.is_system_admin:
                 user_specific_postfix = "list_all_managed_by_admin"
 
-            fixed_custom_postfix = user_specific_postfix
+            final_custom_postfix = user_specific_postfix  # 直接使用这个作为 custom_postfix
 
             cached_full_response_data = CacheService.get_list_cache(
                 key_prefix=cache_key_prefix,
-                custom_postfix=fixed_custom_postfix,
+                custom_postfix=final_custom_postfix,
                 **dynamic_cache_kwargs
             )
 
             if cached_full_response_data is not None:
                 logger.debug(
-                    f"View 层缓存命中管理空间列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
+                    f"View 层缓存命中管理空间列表数据 (User: {user.username}, Postfix: {final_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
                 return success_response(
                     message=MSG_SUCCESS,
                     data=cached_full_response_data,
@@ -316,7 +379,7 @@ class ManagedSpaceListCreateAPIView(ListCreateAPIView):
             else:
                 page_data = list(queryset_unpaginated_filtered)
 
-            serializer = self.get_serializer(page_data, many=True)
+            serializer = self.get_serializer(page_data, many=True, context={'request': request})
             final_serialised_results = serializer.data
 
             final_response_data_for_cache = None
@@ -330,16 +393,19 @@ class ManagedSpaceListCreateAPIView(ListCreateAPIView):
                     "results": final_serialised_results
                 }
 
-            timeout = CacheService.get_timeout_for_key_prefix('spaces:space:list_all')
+            # 获取超时时间：即使 custom_postfix 包含了 user.pk，我们查找超时时依然使用 'list_all'
+            # 这样可以在 TIMEOUTS_MAP 中有一个统一的列表超时配置
+            timeout = CacheService.get_timeout_for_key_prefix(f"{cache_key_prefix}:list_all")
+
             CacheService.set_list_cache(
                 key_prefix=cache_key_prefix,
-                custom_postfix=fixed_custom_postfix,
+                custom_postfix=final_custom_postfix,
                 value=final_response_data_for_cache,
                 timeout=timeout,
                 **dynamic_cache_kwargs
             )
             logger.debug(
-                f"View 层缓存管理空间列表数据 (User: {user.username}, Postfix: {fixed_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
+                f"View 层缓存管理空间列表数据 (User: {user.username}, Postfix: {final_custom_postfix}, QPHash: {dynamic_cache_kwargs.get('query_params_hash', 'N/A')}).")
 
             return success_response(
                 message=MSG_SUCCESS,
@@ -363,15 +429,15 @@ class ManagedSpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
     lookup_field = 'pk'
 
     def get_serializer_class(self):
-        # 此视图的 PUT/PATCH/DELETE 已经被移除，所以通常这个方法不会被调用，
-        # 仅为 retrieve 返回 SpaceBaseSerializer 即可
         return SpaceBaseSerializer
 
     @is_admin_or_space_manager_for_qs_obj
     def get_object(self):
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        service_result = SpaceService().get_space_by_id(user, pk)
+        space_service = SpaceService()
+        # SpaceService().get_space_by_id 内部已通过 @CacheService.cache_method 实现了用户隔离的缓存
+        service_result = space_service.get_space_by_id(user, pk)
         if service_result.success:
             space_data = service_result.data
             # 额外验证：确保是非系统管理员的空间管理员只能操作自己管理的空间
@@ -383,11 +449,24 @@ class ManagedSpaceRetrieveUpdateDestroyAPIView(RetrieveUpdateDestroyAPIView):
 
     @is_admin_or_space_manager_required  # 验证是管理员或空间管理器
     def retrieve(self, request, *args, **kwargs):
-        """获取单个管理空间详情。权限已在 get_object 中处理。"""
-        # 父类的 retrieve 方法会调用 get_object()
-        return super().retrieve(request, *args, **kwargs)
+        """获取单个管理空间详情。权限已在 get_object 和 Service 层处理。"""
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, context={'request': request})
+            return success_response(
+                message=MSG_SUCCESS,
+                data=serializer.data,
+                status_code=HTTP_200_OK
+            )
+        except CustomAPIException as e:
+            logger.warning(
+                f"Known API Exception caught in ManagedSpaceRetrieveUpdateDestroyAPIView (retrieve): {type(e).__name__} - {e}")
+            raise e
+        except Exception as e:
+            logger.exception(f"获取管理空间详情失败 (ID: {self.kwargs[self.lookup_field]})。")
+            raise InternalServerError(detail="服务器内部错误。")
 
-    # --- update 和 destroy 方法已删除。更新和删除 Space 统一使用 /spaces/<pk>/ 接口 ---
+    # TBD: update 和 destroy 方法已删除。更新和删除 Space 统一使用 /spaces/<pk>/ 接口
     def update(self, request, *args, **kwargs):
         raise InternalServerError(detail="此接口仅支持 GET 操作。请使用 /spaces/{id}/ 接口更新空间。")
 
@@ -441,7 +520,7 @@ class SpaceTypeListView(ListCreateAPIView):
                 )
 
             queryset_filtered = self.filter_queryset(self.get_queryset())
-            serializer = self.get_serializer(queryset_filtered, many=True)
+            serializer = self.get_serializer(queryset_filtered, many=True, context={'request': request})
             response_data = serializer.data
             total_count = queryset_filtered.count()
 
@@ -475,12 +554,15 @@ class SpaceTypeListView(ListCreateAPIView):
 
     @is_system_admin_required
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         try:
             instance = serializer.save()
-            response_data = SpaceTypeBaseSerializer(instance).data
+            # 创建成功后清除相关缓存
+            CacheService.invalidate_all_related_cache('spaces:spacetype')
+
+            response_data = SpaceTypeBaseSerializer(instance, context={'request': request}).data
             return success_response(
                 message=MSG_CREATED,
                 data=response_data,
@@ -506,7 +588,9 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     def get_object(self):
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        service_result = SpaceTypeService().get_space_type_by_id(user, pk)
+        space_type_service = SpaceTypeService()
+        # 这里 SpaceTypeService().get_space_type_by_id 也应加上用户参数以支持将来可能的权限控制
+        service_result = space_type_service.get_space_type_by_id(user, pk)
         if service_result.success:
             return CachedDictObject(service_result.data, model_class=SpaceType)
         else:
@@ -515,7 +599,7 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     def retrieve(self, request, *args, **kwargs):
         try:
             instance = self.get_object()
-            serializer = self.get_serializer(instance)
+            serializer = self.get_serializer(instance, context={'request': request})
             return success_response(
                 message=MSG_SUCCESS,
                 data=serializer.data,
@@ -543,12 +627,17 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise NotFoundException(detail="空间类型未找到。")
 
         partial = kwargs.get('partial', False)
-        serializer = self.get_serializer(real_instance, data=request.data, partial=partial)
+        serializer = self.get_serializer(real_instance, data=request.data, partial=partial,
+                                         context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         try:
             instance = serializer.save()
-            response_data = SpaceTypeBaseSerializer(instance).data
+            # 更新成功后清除缓存
+            CacheService.invalidate_object_cache('spaces:spacetype', instance.pk)
+            CacheService.invalidate_all_related_cache('spaces:spacetype')
+
+            response_data = SpaceTypeBaseSerializer(instance, context={'request': request}).data
             return success_response(
                 message="空间类型更新成功。",
                 data=response_data,
@@ -573,6 +662,8 @@ class SpaceTypeDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             service_result = SpaceTypeService().delete_space_type(user, pk_from_url)
 
             if service_result.success:
+                # 删除成功后清除缓存
+                CacheService.invalidate_all_related_cache('spaces:spacetype')
                 return success_response(
                     message="空间类型删除成功。",
                     data=None,
@@ -604,6 +695,7 @@ class AmenityListView(ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         amenity_service = AmenityService()
+        # 这里 AmenityService().get_all_amenities 也应加上用户参数以支持将来可能的权限控制
         service_result = amenity_service.get_all_amenities(user)
         if service_result.success:
             return service_result.data
@@ -636,7 +728,7 @@ class AmenityListView(ListCreateAPIView):
                 )
 
             queryset_filtered = self.filter_queryset(self.get_queryset())
-            serializer = self.get_serializer(queryset_filtered, many=True)
+            serializer = self.get_serializer(queryset_filtered, many=True, context={'request': request})
             response_data = serializer.data
             total_count = queryset_filtered.count()
 
@@ -670,12 +762,13 @@ class AmenityListView(ListCreateAPIView):
 
     @is_system_admin_required
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         try:
             instance = serializer.save()
-            response_data = AmenityBaseSerializer(instance).data
+            CacheService.invalidate_all_related_cache('spaces:amenity')
+            response_data = AmenityBaseSerializer(instance, context={'request': request}).data
             return success_response(
                 message=MSG_CREATED,
                 data=response_data,
@@ -701,7 +794,9 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     def get_object(self):
         user = self.request.user
         pk = self.kwargs[self.lookup_field]
-        service_result = AmenityService().get_amenity_by_id(user, pk)
+        amenity_service = AmenityService()
+        # 这里 AmenityService().get_amenity_by_id 也应加上用户参数以支持将来可能的权限控制
+        service_result = amenity_service.get_amenity_by_id(user, pk)
         if service_result.success:
             return CachedDictObject(service_result.data, model_class=Amenity)
         else:
@@ -710,7 +805,7 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
     def retrieve(self, request, *args, **kwargs):
         try:
             instance = self.get_object()
-            serializer = self.get_serializer(instance)
+            serializer = self.get_serializer(instance, context={'request': request})
             return success_response(
                 message=MSG_SUCCESS,
                 data=serializer.data,
@@ -738,12 +833,15 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             raise NotFoundException(detail="设施类型未找到。")
 
         partial = kwargs.get('partial', False)
-        serializer = self.get_serializer(real_instance, data=request.data, partial=partial)
+        serializer = self.get_serializer(real_instance, data=request.data, partial=partial,
+                                         context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         try:
             instance = serializer.save()
-            response_data = AmenityBaseSerializer(instance).data
+            CacheService.invalidate_object_cache('spaces:amenity', instance.pk)
+            CacheService.invalidate_all_related_cache('spaces:amenity')
+            response_data = AmenityBaseSerializer(instance, context={'request': request}).data
             return success_response(
                 message="设施类型更新成功。",
                 data=response_data,
@@ -768,6 +866,7 @@ class AmenityDetailUpdateDestroyView(RetrieveUpdateDestroyAPIView):
             service_result = AmenityService().delete_amenity(user, pk_from_url)
 
             if service_result.success:
+                CacheService.invalidate_all_related_cache('spaces:amenity')
                 return success_response(
                     message="设施类型删除成功。",
                     data=None,

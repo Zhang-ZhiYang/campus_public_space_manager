@@ -72,7 +72,7 @@ class SpaceService(BaseService):
 
     # --- 新增的方法 END ---
 
-    @CacheService.cache_method(key_prefix='spaces:space')
+    @CacheService.cache_method(key_prefix='spaces:space', identifier_arg='pk', user_arg_name='user')
     def get_space_by_id(self, user: CustomUser, pk: int) -> ServiceResult[Dict[str, Any]]:
         try:
             space = self._space_dao.get_space_by_id(  # _space_dao 的 get_space_by_id 已经包含了权限过滤
