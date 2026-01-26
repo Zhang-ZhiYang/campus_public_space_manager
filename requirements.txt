@@ -20,3 +20,5 @@ python-decouple
 mysqlclient
 
 drf-spectacular
+qrcode
+pillow

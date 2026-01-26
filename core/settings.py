@@ -1,3 +1,4 @@
+# settings.py
 """
 Django settings for core project.
 Enhanced for SpaceRes Analysis System.
@@ -42,14 +43,16 @@ INSTALLED_APPS = [
     'corsheaders',                 # 跨域处理
     'django_filters',              # 高级过滤
     'django_celery_beat',          # 定时任务调度
-    'drf_spectacular',
-    'guardian',  # <-- 确保这一行在这里
+    'drf_spectacular',             # Swagger/OpenAPI 文档
+    'guardian',                    # 对象级权限
+
     # --- 自定义业务模块 ---
     'core',
     'users.apps.UsersConfig',
     'spaces.apps.SpacesConfig',
     'bookings.apps.BookingsConfig',
     'notifications.apps.NotificationsConfig',
+    'check_in.apps.CheckInConfig',   # <-- NEW: 注册 check_in 应用
 ]
 
 MIDDLEWARE = [
@@ -136,7 +139,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # ==============================================================================
 
 LANGUAGE_CODE = 'zh-hans'
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Shanghai' # <-- 建议改为本地时区，例如 'Asia/Shanghai' 或 'Asia/Chongqing'
 USE_I18N = True
 USE_TZ = True
 
@@ -148,8 +151,8 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [ BASE_DIR / 'static' ]
 
-MEDIA_URL = 'media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media' # <-- NEW: 明确定义 MEDIA_ROOT
 
 # ==============================================================================
 # 7. Django REST Framework 配置 (DRF)
@@ -231,9 +234,11 @@ CACHES = {
                 'max_connections': config('REDIS_MAX_CONNECTIONS', default=100, cast=int),
                 'retry_on_timeout': True,
             },
+            # NEW: 增加一个超时设置，使 cache.set 中的 timeout 生效
+            'TIMEOUT': config('CACHE_TIMEOUT', default=300, cast=int),
         },
         'KEY_PREFIX': config('CACHE_KEY_PREFIX', default='campus_public_space_manager_cache'), # 你项目的独特前缀
-        'TIMEOUT': config('CACHE_TIMEOUT', default=300, cast=int),
+        'TIMEOUT': config('CACHE_TIMEOUT', default=300, cast=int), # 这个是缓存本身的默认超时
     }
 }
 
@@ -250,6 +255,9 @@ CELERY_TIMEZONE = TIME_ZONE
 # ==============================================================================
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# NEW: 用于二维码生成的基础URL, 必须是外部可访问的完整URL
+BASE_URL = config('BASE_URL', default='http://127.0.0.1:8000') # 默认值，请在 .env 中设置你的生产环境URL
 
 # ==============================================================================
 # 12. DRF Spectacular (OpenAPI/Swagger) 配置
@@ -280,9 +288,11 @@ SPECTACULAR_SETTINGS = {
 # 13. 日志配置 (Logging)
 # ==============================================================================
 
+# 由于你提供了 Logging 配置为注释掉的代码，这里先保持注释。
+# 如果你需要激活日志功能，请取消注释并在 BASE_DIR 下创建 'logs' 目录。
 # LOGGING = {
 #     'version': 1,
-#     'disable_existing_loggers': False,  # 不要禁用现有的 logger，以便可以修改 Django 的默认 logger
+#     'disable_existing_loggers': False,
 #     'formatters': {
 #         'verbose': {
 #             'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
@@ -292,114 +302,107 @@ SPECTACULAR_SETTINGS = {
 #             'format': '{levelname} {message}',
 #             'style': '{',
 #         },
-#         'django.server': {  # 专门用于 Django runserver 的输出格式
+#         'django.server': {
 #             'format': '[{asctime}] {message}',
 #             'style': '{',
 #         },
 #     },
 #     'handlers': {
-#         'console': {  # 控制台输出
-#             'level': 'DEBUG' if DEBUG else 'INFO',  # DEBUG模式显示DEBUG，生产显示INFO
+#         'console': {
+#             'level': 'DEBUG' if DEBUG else 'INFO',
 #             'class': 'logging.StreamHandler',
-#             'formatter': 'verbose' if DEBUG else 'simple',  # DEBUG模式用详细格式，生产用简洁格式
+#             'formatter': 'verbose' if DEBUG else 'simple',
 #         },
-#         'file_debug': {  # 调试日志文件：记录所有详细信息
+#         'file_debug': {
 #             'level': 'DEBUG',
 #             'class': 'logging.FileHandler',
 #             'filename': BASE_DIR / 'logs/debug.log',
 #             'formatter': 'verbose',
 #         },
-#         'file_error': {  # 错误日志文件：只记录 ERROR 和 CRITICAL
+#         'file_error': {
 #             'level': 'ERROR',
 #             'class': 'logging.FileHandler',
 #             'filename': BASE_DIR / 'logs/error.log',
 #             'formatter': 'verbose',
 #         },
-#         'django.server': {  # 为 Django 的开发服务器提供专门处理程序
+#         'django.server': {
 #             'level': 'INFO',
 #             'class': 'logging.StreamHandler',
 #             'formatter': 'django.server',
 #         },
-#
-#         # 可以根据需要添加其他更细粒度的文件 handler，例如
-#         # 'cache_file': {
-#         #     'level': 'DEBUG',
-#         #     'class': 'logging.FileHandler',
-#         #     'filename': BASE_DIR / 'logs/cache.log',
-#         #     'formatter': 'verbose',
-#         # },
 #     },
 #     'loggers': {
-#         'django': {  # Django 框架自身的日志
+#         'django': {
 #             'handlers': ['console', 'file_debug', 'file_error'],
-#             'level': 'INFO',  # 默认 INFO，但如果 DEBUG=True，文件输出会是 DEBUG
-#             'propagate': False,  # 不将日志消息传递给父级或根 logger
-#         },
-#         'django.request': {  # HTTP 请求和响应日志
-#             'handlers': ['file_debug', 'file_error'],  # 通常在生产环境记录 WARNING 或 ERROR
-#             'level': 'WARNING' if DEBUG else 'INFO',  # DEBUG模式可设为INFO，生产模式设为WARNING
+#             'level': 'INFO',
 #             'propagate': False,
 #         },
-#         'django.server': {  # Django 开发服务器的日志 (如 runserver)
+#         'django.request': {
+#             'handlers': ['file_debug', 'file_error'],
+#             'level': 'WARNING' if DEBUG else 'INFO',
+#             'propagate': False,
+#         },
+#         'django.server': {
 #             'handlers': ['django.server'],
 #             'level': 'INFO',
 #             'propagate': False,
 #         },
-#         'django.db.backends': {  # 数据库查询日志 - 仅在 DEBUG 模式下激活 DEBUG 级别
-#             'handlers': ['file_debug'],  # SQL 查询很详细，通常只记录到 debug.log
-#             'level': 'DEBUG' if DEBUG else 'INFO',  # 设为 DEBUG 会打印所有 SQL 查询
+#         'django.db.backends': {
+#             'handlers': ['file_debug'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',
 #             'propagate': False,
 #         },
-#         'celery': {  # Celery 相关的日志
-#             'handlers': ['console', 'file_debug', 'file_error'],
-#             'level': 'INFO',  # Celery worker 自己的日志级别，与 Celery worker 命令的 -l 参数协同
-#             'propagate': False,
-#         },
-#
-#         # --- 自定义应用 logger ---
-#         'core': {  # 你的核心通用逻辑
-#             'handlers': ['console', 'file_debug', 'file_error'],
-#             'level': 'DEBUG' if DEBUG else 'INFO',  # 核心部分在开发环境可设为 DEBUG
-#             'propagate': False,
-#         },
-#         'core.cache': {  # 专门用于 CacheService 的日志
-#             'handlers': ['console', 'file_debug', 'file_error'],
-#             'level': 'DEBUG' if DEBUG else 'INFO',  # 缓存操作可设为 DEBUG 以观察命中与失效
-#             'propagate': False,
-#         },
-#         'users': {  # 用户应用
+#         'celery': {
 #             'handlers': ['console', 'file_debug', 'file_error'],
 #             'level': 'INFO',
 #             'propagate': False,
 #         },
-#         'spaces': {  # 空间管理应用
+#         'core': {
 #             'handlers': ['console', 'file_debug', 'file_error'],
-#             'level': 'DEBUG' if DEBUG else 'INFO',  # 空间逻辑可能较复杂，开发时设为 DEBUG
+#             'level': 'DEBUG' if DEBUG else 'INFO',
 #             'propagate': False,
 #         },
-#         'bookings': {  # 预订管理应用
+#         'core.cache': {
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',
+#             'propagate': False,
+#         },
+#         'users': {
 #             'handlers': ['console', 'file_debug', 'file_error'],
 #             'level': 'INFO',
 #             'propagate': False,
 #         },
-#         'notifications': {  # 通知应用
+#         'spaces': {
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',
+#             'propagate': False,
+#         },
+#         'bookings': {
 #             'handlers': ['console', 'file_debug', 'file_error'],
 #             'level': 'INFO',
 #             'propagate': False,
 #         },
-#
-#         '': {  # 根 logger，捕获所有未被其他 logger 处理的消息
+#         'notifications': {
 #             'handlers': ['console', 'file_debug', 'file_error'],
-#             'level': 'WARNING',  # 默认只处理 WARNING 及以上级别，避免过多垃圾信息
+#             'level': 'INFO',
+#             'propagate': False,
+#         },
+#         'check_in': { # NEW: Add check_in app logger
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'DEBUG' if DEBUG else 'INFO',
+#             'propagate': False,
+#         },
+#         '': {
+#             'handlers': ['console', 'file_debug', 'file_error'],
+#             'level': 'WARNING',
 #             'propagate': False,
 #         },
 #     },
 # }
-#
-# # 确保日志目录存在
+# # Ensure log directory exists if logging is active
 # LOG_DIR = BASE_DIR / 'logs'
 # if not LOG_DIR.exists():
-#     LOG_DIR.mkdir()
+#     LOG_DIR.mkdir(parents=True, exist_ok=True) # 使用 parents=True, exist_ok=True
 
 EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
 

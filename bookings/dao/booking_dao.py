@@ -1,3 +1,4 @@
+# bookings/dao/booking_dao.py
 import logging
 from datetime import datetime, date
 from typing import Optional, List, Union, Any, Dict
@@ -13,11 +14,12 @@ from users.models import CustomUser
 
 logger = logging.getLogger(__name__)
 
+
 class BookingDAO(BaseDAO):
     """
     数据访问对象，用于对 Booking 模型进行CRUD操作。
     此版本中的状态更新方法（update_booking_status, update_booking_processing_status）
-    已优化为使用 QuerySet.update() 以提高性能和避免模型 save() 方法中的自定义逻辑副作用。
+    已优化为使用模型实例的 save() 方法来触发如二维码生成等自定义逻辑。
     DAO 层不处理业务异常。
     """
     model = Booking
@@ -57,10 +59,10 @@ class BookingDAO(BaseDAO):
     def create_booking(self, **kwargs) -> Booking:
         """
         创建新的 Booking 实例。
-        确保调用实例的 save()，它会触发模型中自定义的 full_clean()。
+        确保调用实例的 save()，它会触发模型中自定义的 full_clean() 和其他 save() 逻辑。
         """
         instance = self.model(**kwargs)
-        instance.save()  # 模型中的save方法会调用full_clean()
+        instance.save()  # 调用模型的 save() 方法，会触发 _generate_check_in_qrcode 逻辑
         logger.info(
             f"Booking {instance.pk} created for user {instance.user.pk} with processing_status {instance.processing_status}.")
         return instance
@@ -69,92 +71,94 @@ class BookingDAO(BaseDAO):
         """
         更新现有的 Booking 实例的非状态类字段。
         此方法通常由 Service 层调用，用于更新除 processing_status/status 以外的字段。
-        确保调用实例的 save()，它会触发模型中自定义的 full_clean()。
+        确保调用实例的 save()，它会触发模型中自定义的 full_clean() 和其他 save() 逻辑。
         """
         for attr, value in kwargs.items():
             setattr(booking_instance, attr, value)
-        booking_instance.save()  # 模型中的save方法会调用full_clean()
+        booking_instance.save()  # 调用模型的 save() 方法
         logger.info(f"Booking {booking_instance.pk} updated.")
         return booking_instance
 
-    def update_booking_status(self, booking_id: int, new_status: str,
+    def update_booking_status(self, booking_pk: int, new_status: str,
                               admin_user: Optional[CustomUser] = None, admin_notes: Optional[str] = None) -> Optional[
         Booking]:
         """
         专门用于更新预订业务状态的方法，会自动设置 reviewed_by 和 reviewed_at 字段。
-        此方法直接使用 QuerySet.update()，避免了模型实例 save() 方法的副作用和开销。
+        此方法改为获取实例后更新再保存，以确保模型实例的 `save()` 方法被调用，从而触发
+        模型中定义的自定义逻辑（如签到二维码生成）。
 
-        :param booking_id: 要更新的预订的ID。
+        :param booking_pk: 要更新的预订的ID。
         :param new_status: 新的预订状态。
         :param admin_user: 可选，执行审核的管理员用户实例。
         :param admin_notes: 可选，管理员对本次预订的备注。
         :return: 更新后的 Booking 实例，如果预订不存在则返回 None。
         """
-        update_fields = {
-            'status': new_status,
-            'updated_at': timezone.now()
-        }
-        if admin_user:
-            update_fields['reviewed_by'] = admin_user
-            update_fields['reviewed_at'] = timezone.now()
-        if admin_notes is not None:
-            update_fields['admin_notes'] = admin_notes
+        booking_instance = self.get_booking_by_id(booking_pk)
+        if not booking_instance:
+            logger.warning(f"Booking ID {booking_pk} not found for status update to {new_status}.")
+            return None
 
-        # 执行数据库更新
-        rows_affected = self.model.objects.filter(pk=booking_id).update(**update_fields)
+        # 拼接备注信息
+        current_admin_notes = booking_instance.admin_notes or ""
+        new_note_entry = f"[{timezone.now().strftime('%Y-%m-%d %H:%M')}] 由 {admin_user.username if admin_user else '系统'} 更新状态为 {new_status}。"
+        if admin_notes:
+            new_note_entry += f" 备注: {admin_notes}"
+        booking_instance.admin_notes = (current_admin_notes + "\n" + new_note_entry).strip()
 
-        # 无论 rows_affected 是否为0，都尝试重新获取更新后的实例。
-        # 如果 booking_id 不存在，get_booking_by_id() 将返回 None。
-        updated_booking = self.get_booking_by_id(booking_id)
+        booking_instance.status = new_status
+        booking_instance.reviewed_by = admin_user
+        booking_instance.reviewed_at = timezone.now()
 
-        # 记录日志，让 Service 层判断 rows_affected 的业务含义
-        if rows_affected > 0:
-            logger.info(
-                f"Booking {booking_id} status updated to {new_status} by {admin_user.username if admin_user else 'System'} using QuerySet.update().")
-        else:
-            logger.warning(
-                f"Booking ID {booking_id} update via QuerySet.update() affected 0 rows. (Maybe ID not found or no change applied.)")
+        # 调用其 save() 方法，这会触发模型定义的二维码生成逻辑（如果状态变为 APPROVED）
+        # 仅更新指定字段，避免触发不必要的字段更新，但确保触发 save() 的副作用
+        booking_instance.save(
+            update_fields=['status', 'admin_notes', 'reviewed_by', 'reviewed_at', 'updated_at', 'check_in_qrcode'])
 
-        return updated_booking
+        logger.info(
+            f"Booking {booking_pk} status updated to {new_status} by {admin_user.username if admin_user else 'System'} using model instance save().")
+        return booking_instance
 
-    def update_booking_processing_status(self, booking_id: int, new_processing_status: str,
+    def update_booking_processing_status(self, booking_pk: int, new_processing_status: str,
                                          admin_notes: Optional[str] = None,
                                          new_booking_status: Optional[str] = None) -> Optional[Booking]:
         """
         专门用于更新预订的处理状态和可选的业务状态。
-        此方法直接使用 QuerySet.update()，避免了模型实例 save() 方法的副作用和开销。
+        此方法改为获取实例后更新再保存，以确保模型实例的 `save()` 方法被调用，从而触发
+        模型中定义的自定义逻辑。
 
-        :param booking_id: 要更新的预订的ID。
+        :param booking_pk: 要更新的预订的ID。
         :param new_processing_status: 新的处理状态。
         :param admin_notes: 可选，管理员对本次预订的备注。
         :param new_booking_status: 可选，如果同时需要更新业务状态，则传入新的业务状态。
         :return: 更新后的 Booking 实例，如果预订不存在则返回 None。
         """
-        update_fields = {
-            'processing_status': new_processing_status,
-            'updated_at': timezone.now()
-        }
-        if new_booking_status:
-            update_fields['status'] = new_booking_status
-        if admin_notes is not None:
-            update_fields['admin_notes'] = admin_notes
-
-        # 执行数据库更新
-        rows_affected = self.model.objects.filter(pk=booking_id).update(**update_fields)
-
-        # 无论 rows_affected 是否为0，都尝试重新获取更新后的实例。
-        # 如果 booking_id 不存在，get_booking_by_id() 将返回 None。
-        updated_booking = self.get_booking_by_id(booking_id)
-
-        # 记录日志，让 Service 层判断 rows_affected 的业务含义
-        if rows_affected > 0:
-            logger.info(
-                f"Booking {booking_id} processing status updated to {new_processing_status} using QuerySet.update().")
-        else:
+        booking_instance = self.get_booking_by_id(booking_pk)
+        if not booking_instance:
             logger.warning(
-                f"Booking ID {booking_id} processing status update via QuerySet.update() affected 0 rows. (Maybe ID not found or no change applied.)")
+                f"Booking ID {booking_pk} not found for processing status update to {new_processing_status}.")
+            return None
 
-        return updated_booking
+        current_admin_notes = booking_instance.admin_notes or ""
+        new_note_entry = f"[{timezone.now().strftime('%Y-%m-%d %H:%M')}] 更新处理状态为 {new_processing_status}。"
+        if admin_notes:
+            new_note_entry += f" 备注: {admin_notes}"
+        booking_instance.admin_notes = (current_admin_notes + "\n" + new_note_entry).strip()
+
+        booking_instance.processing_status = new_processing_status
+        if new_booking_status:
+            booking_instance.status = new_booking_status
+
+        # 仅更新指定字段，确保触发 save() 的副作用
+        update_fields = ['processing_status', 'admin_notes', 'updated_at']
+        if new_booking_status:
+            update_fields.append('status')
+            update_fields.append('check_in_qrcode')  # 如果状态改变可能影响二维码
+
+        booking_instance.save(update_fields=update_fields)
+
+        logger.info(
+            f"Booking {booking_pk} processing status updated to {new_processing_status} (and status to {new_booking_status if new_booking_status else 'unchanged'}) using model instance save().")
+        return booking_instance
 
     def delete_booking(self, booking_instance: Booking) -> None:
         """
@@ -179,13 +183,12 @@ class BookingDAO(BaseDAO):
         可选择排除某个特定的预订ID。
         """
         start_of_day = timezone.make_aware(datetime.combine(target_date, datetime.min.time()))
-        # 确保 end_of_day 精确到秒，避免微秒差异导致的问题
         end_of_day = timezone.make_aware(datetime.combine(target_date, datetime.max.time().replace(microsecond=0)))
 
         filters = Q(
             user=user,
             start_time__gte=start_of_day,
-            start_time__lte=end_of_day, # 查找预订开始时间在这一天内的记录
+            start_time__lte=end_of_day,  # 查找预订开始时间在这一天内的记录
             status__in=status_in
         )
 
@@ -193,7 +196,7 @@ class BookingDAO(BaseDAO):
             filters &= Q(related_space__space_type=space_type)
 
         if exclude_booking_id:
-            filters &= ~Q(pk=exclude_booking_id) # 增加排除当前预订的条件
+            filters &= ~Q(pk=exclude_booking_id)  # 增加排除当前预订的条件
 
         count = self.get_queryset().filter(filters).count()
         logger.debug(f"User {user.pk} has {count} bookings on {target_date.isoformat()} with status in {status_in} "
@@ -240,24 +243,26 @@ class BookingDAO(BaseDAO):
             # 1. 直接预订此 Space 的记录 (space=target_entity)
             # 2. 预订此 Space 下任何 BookableAmenity 的记录 (bookable_amenity__space=target_entity)
             q_target = (
-                Q(space=target_entity, bookable_amenity__isnull=True) |
-                Q(bookable_amenity__space=target_entity)
+                    Q(space=target_entity, bookable_amenity__isnull=True) |
+                    Q(bookable_amenity__space=target_entity)
             )
-            logger.debug(f"Target entity is Space {target_entity.pk}. Querying for direct space bookings AND its amenities bookings.")
+            logger.debug(
+                f"Target entity is Space {target_entity.pk}. Querying for direct space bookings AND its amenities bookings.")
         elif isinstance(target_entity, BookableAmenity):
             # 如果目标是 BookableAmenity，需要检查：
             # 1. 直接预订此 BookableAmenity 的记录 (bookable_amenity=target_entity)
             # 2. 预订此 BookableAmenity 的父 Space 的记录 (space=target_entity.space)
             q_target = (
-                Q(bookable_amenity=target_entity) |
-                Q(space=target_entity.space, bookable_amenity__isnull=True) # Ensure it's a direct space booking
+                    Q(bookable_amenity=target_entity) |
+                    Q(space=target_entity.space, bookable_amenity__isnull=True)  # Ensure it's a direct space booking
             )
-            logger.debug(f"Target entity is BookableAmenity {target_entity.pk}. Querying for direct amenity bookings AND its parent space bookings.")
+            logger.debug(
+                f"Target entity is BookableAmenity {target_entity.pk}. Querying for direct amenity bookings AND its parent space bookings.")
         else:
             logger.error(f"Invalid target_entity type: {type(target_entity)}. Expected Space or BookableAmenity.")
             raise ValueError("Target entity must be a Space or BookableAmenity instance for conflict checks.")
 
-        if not q_target: # If target_entity is invalid and q_target is empty
+        if not q_target:  # If target_entity is invalid and q_target is empty
             return self.get_queryset().none()
 
         active_booking_for_conflict_check_statuses = [
@@ -286,7 +291,7 @@ class BookingDAO(BaseDAO):
         return queryset
 
     def get_user_total_bookings_count_for_date(self, user: CustomUser, target_date: date, status_in: List[str],
-                                              exclude_booking_id: Optional[int] = None) -> int:
+                                               exclude_booking_id: Optional[int] = None) -> int:
         """
         获取用户在指定日期内，处于指定状态的预订总数量（不分空间类型）。
         可选择排除某个特定的预订ID。
@@ -302,7 +307,7 @@ class BookingDAO(BaseDAO):
         )
 
         if exclude_booking_id:
-            filters &= ~Q(pk=exclude_booking_id) # 增加排除当前预订的条件
+            filters &= ~Q(pk=exclude_booking_id)  # 增加排除当前预订的条件
 
         count = self.get_queryset().filter(filters).count()
         logger.debug(

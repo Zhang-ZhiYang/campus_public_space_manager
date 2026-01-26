@@ -1,5 +1,10 @@
 # bookings/models.py
+from io import BytesIO
+
+import qrcode
+from django.conf import settings
 from django.contrib.auth.models import Group  # 导入 Group 模型
+from django.core.files.base import ContentFile
 from django.db import models
 from django.db.models import Manager, Index  # 导入 Manager, Index
 # 修正 datetime 导入：从标准库中导入 datetime 和 timedelta
@@ -181,7 +186,13 @@ class Booking(models.Model):
         blank=True,
         verbose_name="审核时间"
     )
-
+    check_in_qrcode = models.ImageField(
+        upload_to='booking_qrcodes/',
+        blank=True,
+        null=True,
+        verbose_name="签到二维码图片",
+        help_text="用于员工扫描签到的二维码图片路径"
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -262,8 +273,48 @@ class Booking(models.Model):
 
     def save(self, *args, **kwargs):
         self.full_clean()
-        super().save(*args, **kwargs)
 
+        is_new = self.pk is None
+        super().save(*args, **kwargs)  # 保存以确保 self.pk 存在
+
+        if is_new or (self.check_in_qrcode is None and self.status == Booking.BOOKING_STATUS_APPROVED):
+            if self.related_space and self.related_space.effective_check_in_method == 'STAFF':  # 仅当签到方式为 STAFF 时自动生成
+                self._generate_check_in_qrcode()
+
+    def _generate_check_in_qrcode(self):
+        """
+        生成一个包含预订ID的二维码，并将其保存到 ImageField。
+        二维码的内容可以是 `settings.BASE_URL/checkin/{booking_id}`
+        """
+        if not self.pk:
+            return  # 只有当预订有 PK 后才能生成二维码
+
+        # 定义二维码内容，例如一个指向签到接口的URL
+        # 假设你的前端或签到接口是 `BASE_URL/check_in/{booking_id}`
+        # 注意：你需要确保 settings.BASE_URL 存在
+        base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')  # 替换为你的服务器基础URL
+        qrcode_data = f"{base_url}/api/v1/checkin/staff-scan/{self.pk}/"  # 员工扫描的签到接口
+
+        # 生成二维码图片
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qrcode_data)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        # 将图片保存到 BytesIO 对象中
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        file_name = f'booking_qr_{self.pk}.png'
+
+        # 将 BytesIO 对象包装成 Django 的 ContentFile 并保存到 ImageField
+        self.check_in_qrcode.save(file_name, ContentFile(buffer.getvalue()), save=False)
+        self.save(update_fields=['check_in_qrcode'])  # 仅更新二维码字段，避免递归 save
     def _get_related_object_dict(self, obj):
         if hasattr(obj, 'to_dict') and callable(obj.to_dict):
             return obj.to_dict(include_related=False)
