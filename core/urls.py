@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/v1/spaces/', include('spaces.api.urls')),
     path('api/v1/bookings/', include('bookings.api.urls', namespace='bookings_api')),
     # path('api/v1/notifications/', include('notifications.urls')),
+    path('api/v1/checkin/', include('check_in.api.urls', namespace='check_in_api')),
 
     # --- JWT 认证路由 (使用自定义视图) ---
     path('api/v1/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),

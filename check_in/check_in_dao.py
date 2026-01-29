@@ -1,5 +1,7 @@
 # check_in/dao/check_in_dao.py
 from typing import Optional, List, Dict, Any
+
+from django.db import models
 from django.db.models import QuerySet
 from core.dao import BaseDAO
 from check_in.models import CheckInRecord

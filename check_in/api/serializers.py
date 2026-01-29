@@ -1,4 +1,5 @@
 # check_in/api/serializers.py
+
 from typing import Optional
 
 from rest_framework import serializers
@@ -12,10 +13,7 @@ from users.models import CustomUser  # 导入 CustomUser 模型
 from spaces.models import Space  # 导入 Space 模型
 
 
-# 辅助序列化器（如果 `users.api.serializers` 中没有，则需要在此处定义）
 class CustomUserMinimalSerializer(serializers.ModelSerializer):
-    """用于序列化 CustomUser 模型的最小信息"""
-
     class Meta:
         model = CustomUser
         fields = ['id', 'username', 'get_full_name']
@@ -24,18 +22,19 @@ class CustomUserMinimalSerializer(serializers.ModelSerializer):
 class BaseCheckInSerializer(serializers.Serializer):
     """
     签到请求的基类序列化器，包含通用字段。
-    经纬度使用字符串类型，因为 DecimalField 在请求数据中可能遇到格式问题，
-    在 Service 层进行 Decimal 转换和验证更安全。
+    请注意：`photo` 字段在这里是可选的，强制性验证将在 Service 层根据签到方式进行。
     """
     latitude = serializers.CharField(required=False, allow_null=True, allow_blank=True, help_text="签到时的地理纬度")
     longitude = serializers.CharField(required=False, allow_null=True, allow_blank=True, help_text="签到时的地理经度")
-    photo = serializers.ImageField(required=False, allow_null=True, help_text="签到时上传的照片")
+    photo = serializers.ImageField(required=False, allow_null=True,
+                                   help_text="签到时上传的照片")  # <--- 确保这里是 False 和 True
     notes = serializers.CharField(max_length=500, required=False, allow_blank=True, help_text="签到备注")
 
-    # 统一进行经纬度类型转换和范围验证
     def validate(self, data):
         latitude_str = data.get('latitude')
         longitude_str = data.get('longitude')
+
+        # ... (经纬度验证逻辑保持不变)
 
         if latitude_str is not None and latitude_str != '':
             try:
@@ -59,15 +58,16 @@ class BaseCheckInSerializer(serializers.Serializer):
 class QRCheckInSerializer(BaseCheckInSerializer):
     """
     扫码签到序列化器 (booking_pk 从 URL 路径获取)。
+    继承 BaseCheckInSerializer，`photo` 字段在这里也是可选的。
     """
-    # 无需额外字段，继承 BaseCheckInSerializer
     pass
 
 
 class ManualCheckInSerializer(BaseCheckInSerializer):
     """
     手动签到序列化器 (booking_pk 从 URL 路径获取)。
-    手动签到通常强制要求定位信息。
+    为了灵活性，这里的 `latitude` 和 `longitude` 保持 `required=True` 以符合“手动签到通常强制要求定位信息”的语义。
+    `photo` 字段在这里会默认继承 BaseCheckInSerializer 的 `required=False`，由 Service 层统一判断。
     """
     latitude = serializers.CharField(required=True, allow_blank=False, help_text="签到时的地理纬度")
     longitude = serializers.CharField(required=True, allow_blank=False, help_text="签到时的地理经度")
@@ -76,6 +76,7 @@ class ManualCheckInSerializer(BaseCheckInSerializer):
 class StaffCheckInPayloadSerializer(BaseCheckInSerializer):
     """
     工作人员批量签到请求体序列化器。
+    `photo` 字段在这里也是可选的。
     """
     booking_pks = serializers.ListField(
         child=serializers.IntegerField(min_value=1),
@@ -88,22 +89,17 @@ class StaffCheckInPayloadSerializer(BaseCheckInSerializer):
 
 
 class CheckInRecordSerializer(serializers.ModelSerializer):
-    """
-    CheckInRecord 响应序列化器，用于返回签到详情。
-    """
-    # 嵌套显示关联对象
+    # ... (此序列化器保持不变)
     user = CustomUserMinimalSerializer(read_only=True)
     checked_in_by = CustomUserMinimalSerializer(read_only=True)
     booking_id = serializers.IntegerField(source='booking.id', read_only=True)
-
-    # 签到图片 URL，方便前端直接使用
     check_in_image_url = serializers.SerializerMethodField(read_only=True, allow_null=True)
 
     class Meta:
         model = CheckInRecord
         fields = [
             'id', 'booking_id', 'user', 'checked_in_by', 'check_in_time',
-            'latitude', 'longitude',  # <--- 新增
+            'latitude', 'longitude',
             'check_in_method', 'is_valid', 'notes', 'check_in_image_url', 'created_at', 'updated_at'
         ]
         read_only_fields = fields
