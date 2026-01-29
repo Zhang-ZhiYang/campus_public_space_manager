@@ -1,27 +1,33 @@
-# core/management/commands/import_test_data.py (修正版本)
+# core/management/commands/import_test_data.py (更新版)
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
+from django.contrib.contenttypes.models import ContentType  # <-- 新增导入 ContentType for assign_perm
 from guardian.shortcuts import assign_perm
 
 import random
-from datetime import timedelta, time
+from datetime import timedelta, time, datetime
 
 # Try to import necessary models.
 try:
-    from spaces.models import Space, SpaceType, Amenity, BookableAmenity
+    from spaces.models import Space, SpaceType, Amenity, BookableAmenity, CHECK_IN_METHOD_SELF, CHECK_IN_METHOD_STAFF, \
+        CHECK_IN_METHOD_LOCATION
 except ImportError:
     Space = None
     SpaceType = None
     Amenity = None
     BookableAmenity = None
+    CHECK_IN_METHOD_SELF = 'SELF'
+    CHECK_IN_METHOD_STAFF = 'STAFF'
+    CHECK_IN_METHOD_LOCATION = 'LOCATION'
     print("Warning: 'spaces' app models not available. Data import for spaces and amenities will be skipped.")
 
 try:
     from bookings.models import (
+        Booking, Violation,  # <-- 新增导入 Booking 和 Violation
         SpaceTypeBanPolicy,
         UserPenaltyPointsPerSpaceType,
         UserSpaceTypeBan,
@@ -29,12 +35,20 @@ try:
         DailyBookingLimit
     )
 except ImportError:
+    Booking = None
+    Violation = None
     SpaceTypeBanPolicy = None
     UserPenaltyPointsPerSpaceType = None
     UserSpaceTypeBan = None
     UserSpaceTypeExemption = None
     DailyBookingLimit = None
     print("Warning: 'bookings' app models not available. Data import for booking policies will be skipped.")
+
+try:
+    from check_in.models import CheckInRecord  # <-- 新增导入 CheckInRecord
+except ImportError:
+    CheckInRecord = None
+    print("Warning: 'check_in' app models not available. Data import for check-in records will be skipped.")
 
 CustomUser = get_user_model()
 
@@ -64,8 +78,8 @@ class Command(BaseCommand):
 
         if not defaults.get('phone_number'): defaults['phone_number'] = None
         if not defaults.get('work_id'): defaults['work_id'] = None
-        if not defaults.get('email'): defaults['email'] = None
-        if not defaults.get('name'): defaults['name'] = username
+        if not defaults.get('email'): defaults['email'] = f"{username}@example.com" if not email else email
+        if not defaults.get('name'): defaults['name'] = full_name if full_name else username
 
         user, created = CustomUser.objects.get_or_create(
             username=username,
@@ -80,7 +94,7 @@ class Command(BaseCommand):
         else:
             updated = False
             for field in ['email', 'name', 'phone_number', 'work_id', 'major', 'student_class', 'gender']:
-                if hasattr(user, field) and getattr(user, field) != defaults[field]:
+                if hasattr(user, field) and field in defaults and getattr(user, field) != defaults[field]:
                     setattr(user, field, defaults[field])
                     updated = True
 
@@ -129,6 +143,12 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING("  Group '空间管理员' already exists."))
 
+        check_in_staff_group, created = Group.objects.get_or_create(name='签到员')  # <-- 新增签到员组
+        if created:
+            self.stdout.write(self.style.SUCCESS("  Created group: '签到员'"))
+        else:
+            self.stdout.write(self.style.WARNING("  Group '签到员' already exists."))
+
         teacher_group, created = Group.objects.get_or_create(name='教师')
         if created:
             self.stdout.write(self.style.SUCCESS("  Created group: '教师'"))
@@ -168,6 +188,10 @@ class Command(BaseCommand):
             'spaceman3', 'spaceman345', 'spaceman3@example.com',
             is_staff=True, full_name='空间经理三', work_id='SM003', phone_number='13000000003'
         )
+        checkin_staff1 = self._create_user_with_roles(  # <-- 新增签到员
+            'checkinstaff1', 'checkin123', 'checkin1@example.com',
+            is_staff=True, full_name='签到员一', work_id='CI001', phone_number='13112345678'
+        )
         regular_user1 = self._create_user_with_roles(
             'user1', 'user123', 'user1@example.com',
             full_name='普通用户一', phone_number='13812345678'
@@ -202,6 +226,7 @@ class Command(BaseCommand):
         add_user_to_group_and_save(sysadmin, system_admin_group)
         for sm in [space_manager1, space_manager2, space_manager3]:
             add_user_to_group_and_save(sm, space_manager_group)
+        add_user_to_group_and_save(checkin_staff1, check_in_staff_group)  # <-- 添加签到员到组
         add_user_to_group_and_save(student_user, student_group)
         add_user_to_group_and_save(teacher_user, teacher_group)
         for u in [regular_user1, regular_user2, banned_user]:
@@ -212,20 +237,25 @@ class Command(BaseCommand):
             superuser.save()
 
         # --- 2. 创建 SpaceTypes, Amenities, Spaces & BookableAmenities ---
+        space_types = {}
+        amenities = {}
+        spaces_dict = {}  # 用于存储创建的 Space 实例，方便后续引用
+        parent_spaces = {}  # 存储父空间
+
         if Space and SpaceType and Amenity and BookableAmenity:
             self.stdout.write(self.style.HTTP_INFO('\n2. Creating SpaceTypes, Amenities, Spaces, BookableAmenities...'))
 
             space_types_data = [
                 {'name': 'Lecture Hall', 'default_is_bookable': True},
-                {'name': 'Meeting Room', 'default_is_bookable': True},
-                {'name': 'Lab', 'default_is_bookable': True,
-                 'default_requires_approval': True},
-                {'name': 'Study Zone', 'default_is_bookable': True},
+                {'name': 'Meeting Room', 'default_is_bookable': True, 'default_check_in_method': CHECK_IN_METHOD_SELF},
+                # 自行签到
+                {'name': 'Lab', 'default_is_bookable': True, 'default_requires_approval': True,
+                 'default_check_in_method': CHECK_IN_METHOD_STAFF},  # 工作人员签到
+                {'name': 'Study Zone', 'default_is_bookable': True,
+                 'default_check_in_method': CHECK_IN_METHOD_LOCATION},  # 定位签到
                 {'name': 'Sports Field', 'default_is_bookable': True},
-                {'name': 'Office', 'is_basic_infrastructure': True,
-                 'default_is_bookable': False},
+                {'name': 'Office', 'is_basic_infrastructure': True, 'default_is_bookable': False},
             ]
-            space_types = {}
             for data in space_types_data:
                 defaults_with_time = {
                     'description': '',
@@ -248,11 +278,10 @@ class Command(BaseCommand):
                 {'name': 'Projector', 'description': '高清投影仪'},
                 {'name': 'Whiteboard', 'description': '交互式白板'},
                 {'name': 'Video Conferencing', 'description': '视频会议设备'},
-                {'name': 'Water Dispenser', 'description': '饮水机', 'is_bookable_individually': True},
+                {'name': 'Water Dispenser', 'description': '饮水机', 'is_bookable_individually': False},  # 假设饮水机不可单独预订
                 {'name': 'Internet Access', 'description': '高速网络接入'},
                 {'name': 'Sports Equipment', 'description': '各类运动器材'},
             ]
-            amenities = {}
             for data in amenities_data:
                 am, created = Amenity.objects.get_or_create(
                     name=data['name'],
@@ -261,68 +290,56 @@ class Command(BaseCommand):
                 amenities[am.name] = am
                 self.stdout.write(self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Amenity: {am.name}"))
 
-            parent_space1, created = Space.objects.get_or_create(
-                name='Main Building - Floor 1',
-                defaults={'location': 'Central Campus', 'is_container': True, 'space_type': space_types['Office'],
-                          'managed_by': space_manager1, 'is_bookable': False}
-            )
-            self.stdout.write(
-                self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Parent Space: {parent_space1.name}"))
-
-            parent_space2, created = Space.objects.get_or_create(
-                name='Innovation Hub',
-                defaults={'location': 'East Campus', 'is_container': True, 'space_type': space_types['Office'],
-                          'managed_by': space_manager2, 'is_bookable': False}
-            )
-            self.stdout.write(
-                self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Parent Space: {parent_space2.name}"))
-
-            parent_space3, created = Space.objects.get_or_create(
-                name='Outdoor Facilities',
-                defaults={'location': 'West Campus', 'is_container': True, 'space_type': space_types['Office'],
-                          'managed_by': space_manager3, 'is_bookable': False}
-            )
-            self.stdout.write(
-                self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Parent Space: {parent_space3.name}"))
+            parent_space_data = [
+                {'name': 'Main Building - Floor 1', 'location': 'Central Campus', 'space_type': space_types['Office'],
+                 'managed_by': space_manager1, 'is_container': True, 'is_bookable': False},
+                {'name': 'Innovation Hub', 'location': 'East Campus', 'space_type': space_types['Office'],
+                 'managed_by': space_manager2, 'is_container': True, 'is_bookable': False},
+                {'name': 'Outdoor Facilities', 'location': 'West Campus', 'space_type': space_types['Office'],
+                 'managed_by': space_manager3, 'is_container': True, 'is_bookable': False},
+            ]
+            for data in parent_space_data:
+                parent_space, created = Space.objects.get_or_create(
+                    name=data['name'],
+                    defaults={k: v for k, v in data.items() if k != 'name'}
+                )
+                parent_spaces[parent_space.name] = parent_space
+                self.stdout.write(
+                    self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Parent Space: {parent_space.name}"))
 
             spaces_data = [
-                {'name': 'Room 101', 'location': 'Floor 1', 'space_type': space_types['Meeting Room'],
-                 'parent_space': parent_space1, 'capacity': 10, 'is_bookable': True, 'requires_approval': False,
-                 'managed_by': space_manager1, 'amenities': [('Projector', 1), ('Whiteboard', 1)]},
-                {'name': 'Lecture Hall A', 'location': 'Floor 1', 'space_type': space_types['Lecture Hall'],
-                 'parent_space': parent_space1, 'capacity': 100, 'is_bookable': True, 'requires_approval': True,
-                 'managed_by': space_manager1, 'amenities': [('Projector', 1), ('Video Conferencing', 1)]},
-                {'name': 'Lab 3B', 'location': 'Research Wing', 'space_type': space_types['Lab'],
-                 'parent_space': parent_space2, 'capacity': 20, 'is_bookable': True, 'requires_approval': True,
-                 'managed_by': space_manager2, 'amenities': [('Water Dispenser', 1, True), ('Internet Access', 1)]},
-                {'name': 'Meeting Pod 5', 'location': 'Collaborative Zone', 'space_type': space_types['Study Zone'],
-                 'parent_space': parent_space2, 'capacity': 4, 'is_bookable': True, 'requires_approval': False,
-                 'managed_by': space_manager2, 'amenities': []},
+                {'name': 'Room 101 (SELF CheckIn)', 'location': 'Floor 1', 'space_type': space_types['Meeting Room'],
+                 'parent_space': parent_spaces['Main Building - Floor 1'], 'capacity': 10, 'is_bookable': True,
+                 'requires_approval': False,
+                 'managed_by': space_manager1, 'amenities': [('Projector', 1), ('Whiteboard', 1)],
+                 'check_in_method': CHECK_IN_METHOD_SELF},
+                {'name': 'Lecture Hall A (STAFF CheckIn)', 'location': 'Floor 1', 'space_type': space_types['Lab'],
+                 # 使用Lab的类型，但这里设置为Lecture Hall名称
+                 'parent_space': parent_spaces['Main Building - Floor 1'], 'capacity': 100, 'is_bookable': True,
+                 'requires_approval': True,
+                 'managed_by': space_manager1, 'amenities': [('Projector', 1), ('Video Conferencing', 1)],
+                 'check_in_method': CHECK_IN_METHOD_STAFF},
+                {'name': 'Study Nook (LOCATION CheckIn)', 'location': 'Research Wing Geo',
+                 'space_type': space_types['Study Zone'],
+                 'parent_space': parent_spaces['Innovation Hub'], 'capacity': 4, 'is_bookable': True,
+                 'requires_approval': False,
+                 'managed_by': space_manager2, 'latitude': '34.052235', 'longitude': '-118.243683', 'amenities': [],
+                 'check_in_method': CHECK_IN_METHOD_LOCATION},
                 {'name': 'Soccer Field 1', 'location': 'Sports Complex', 'space_type': space_types['Sports Field'],
-                 'parent_space': parent_space3, 'capacity': 30, 'is_bookable': True, 'requires_approval': False,
+                 'parent_space': parent_spaces['Outdoor Facilities'], 'capacity': 30, 'is_bookable': True,
+                 'requires_approval': False,
                  'managed_by': space_manager3, 'amenities': [('Sports Equipment', 10)]},
-                {'name': 'Training Room', 'location': 'Ground Floor', 'space_type': space_types['Meeting Room'],
-                 'parent_space': parent_space1, 'capacity': 25, 'is_bookable': True, 'requires_approval': False,
-                 'managed_by': space_manager1, 'amenities': [('Projector', 1), ('Whiteboard', 1)]},
-                {'name': 'Group Study Room', 'location': 'Quiet Zone', 'space_type': space_types['Study Zone'],
-                 'parent_space': parent_space2, 'capacity': 6, 'is_bookable': True, 'requires_approval': False,
-                 'managed_by': space_manager2, 'amenities': [('Internet Access', 1)]},
             ]
 
             for s_data in spaces_data:
                 s_amenities_list = s_data.pop('amenities')
-
-                if 'available_start_time' in s_data and isinstance(s_data['available_start_time'], str):
-                    h, m = map(int, s_data['available_start_time'].split(':'))
-                    s_data['available_start_time'] = time(h, m)
-                if 'available_end_time' in s_data and isinstance(s_data['available_end_time'], str):
-                    h, m = map(int, s_data['available_end_time'].split(':'))
-                    s_data['available_end_time'] = time(h, m)
+                defaults = {k: v for k, v in s_data.items() if k not in ['name', 'amenities']}
 
                 space, created = Space.objects.get_or_create(
                     name=s_data['name'],
-                    defaults={k: v for k, v in s_data.items() if k != 'name'}
+                    defaults=defaults
                 )
+                spaces_dict[space.name] = space  # 存储空间实例
                 self.stdout.write(
                     self.style.SUCCESS(f"  {'Created' if created else 'Existing'} Bookable Space: {space.name}"))
 
@@ -354,8 +371,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 "\nSkipping creation of SpaceTypes, Amenities, Spaces, BookableAmenities due to missing models."))
 
-        # --- 3. 创建 Booking Policies & User Ban/Penalty Data ---
-        if SpaceTypeBanPolicy and UserPenaltyPointsPerSpaceType and UserSpaceTypeBan and UserSpaceTypeExemption:
+        # --- 3. 创建 Booking Policies & User Ban/Penalty Data (保持不变) ---
+        if SpaceTypeBanPolicy and UserPenaltyPointsPerSpaceType and UserSpaceTypeBan and UserSpaceTypeExemption and space_types:
             self.stdout.write(self.style.HTTP_INFO('\n3. Creating Booking Policies & User Ban/Penalty Data...'))
 
             policy1, created = SpaceTypeBanPolicy.objects.get_or_create(
@@ -448,87 +465,69 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 "\nSkipping creation of Booking Policies and User Ban/Penalty Data due to missing models."))
 
-        # --- 4. 创建 Daily Booking Limits (重点修改部分) ---
-        if DailyBookingLimit:
+        # --- 4. 创建 Daily Booking Limits (保持不变) ---
+        if DailyBookingLimit and general_user_group and student_group and teacher_group and system_admin_group and space_manager_group and space_types:
             self.stdout.write(self.style.HTTP_INFO('\n4. Creating Daily Booking Limits...'))
 
             # --- 全局每日预订限制 ---
-            # 普通用户组：全局每日预订3次，优先级较低
             DailyBookingLimit.objects.get_or_create(
-                group=general_user_group,
-                space_type=None,  # 全局限制
+                group=general_user_group, space_type=None,
                 defaults={'max_bookings': 3, 'priority': 10, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
                 f"  Daily Booking Limit for '{general_user_group.name}' (Global): 3 bookings/day (Priority:10)"))
 
-            # 学生组：全局每日预订5次，优先级适中
             DailyBookingLimit.objects.get_or_create(
-                group=student_group,
-                space_type=None,  # 全局限制
-                defaults={'max_bookings': 5, 'priority': 20, 'is_active': True}
+                group=student_group, space_type=None, defaults={'max_bookings': 5, 'priority': 20, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
                 f"  Daily Booking Limit for '{student_group.name}' (Global): 5 bookings/day (Priority:20)"))
 
-            # 教师组：全局每日预订10次，优先级较高
             DailyBookingLimit.objects.get_or_create(
-                group=teacher_group,
-                space_type=None,  # 全局限制
-                defaults={'max_bookings': 10, 'priority': 30, 'is_active': True}
+                group=teacher_group, space_type=None, defaults={'max_bookings': 10, 'priority': 30, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
                 f"  Daily Booking Limit for '{teacher_group.name}' (Global): 10 bookings/day (Priority:30)"))
 
-            # 系统管理员和空间管理员：全局没有每日预订次数限制 (max_bookings=0 表示无限制)
             DailyBookingLimit.objects.get_or_create(
-                group=system_admin_group,
-                space_type=None,  # 全局限制
-                defaults={'max_bookings': 0, 'priority': 100, 'is_active': True}  # 最高优先级
+                group=system_admin_group, space_type=None,
+                defaults={'max_bookings': 0, 'priority': 100, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
                 f"  Daily Booking Limit for '{system_admin_group.name}' (Global): 无限制 (Priority:100)"))
 
             DailyBookingLimit.objects.get_or_create(
-                group=space_manager_group,
-                space_type=None,  # 全局限制
-                defaults={'max_bookings': 0, 'priority': 90, 'is_active': True}  # 较高优先级
+                group=space_manager_group, space_type=None,
+                defaults={'max_bookings': 0, 'priority': 90, 'is_active': True}
             )
             self.stdout.write(self.style.SUCCESS(
                 f"  Daily Booking Limit for '{space_manager_group.name}' (Global): 无限制 (Priority:90)"))
 
-            # --- 特定空间类型的每日预订限制 (需要 space_types 字典填充完毕) ---
-            if space_types:
-                # 为 '普通用户' 组在 'Meeting Room' 空间类型下设置更严格的限制
-                # 优先级高于其全局限制 (10 > 5)
-                DailyBookingLimit.objects.get_or_create(
-                    group=general_user_group,
-                    space_type=space_types['Meeting Room'],
-                    defaults={'max_bookings': 1, 'priority': 15, 'is_active': True}  # 特定类型规则优先于全局规则
-                )
-                self.stdout.write(self.style.SUCCESS(
-                    f"  Daily Booking Limit for '{general_user_group.name}' ({space_types['Meeting Room'].name}): 1 booking/day (Priority:15)"))
+            # --- 特定空间类型的每日预订限制 ---
+            DailyBookingLimit.objects.get_or_create(
+                group=general_user_group, space_type=space_types['Meeting Room'],
+                defaults={'max_bookings': 1, 'priority': 15, 'is_active': True}
+            )
+            self.stdout.write(self.style.SUCCESS(
+                f"  Daily Booking Limit for '{general_user_group.name}' ({space_types['Meeting Room'].name}): 1 booking/day (Priority:15)"))
 
-                # 为 '学生' 组在 'Lab' 空间类型下设置更宽松的限制，例如实验室可能需要更多访问
-                DailyBookingLimit.objects.get_or_create(
-                    group=student_group,
-                    space_type=space_types['Lab'],
-                    defaults={'max_bookings': 7, 'priority': 25, 'is_active': True}  # 优先级高于其全局的学生限制
-                )
-                self.stdout.write(self.style.SUCCESS(
-                    f"  Daily Booking Limit for '{student_group.name}' ({space_types['Lab'].name}): 7 bookings/day (Priority:25)"))
+            DailyBookingLimit.objects.get_or_create(
+                group=student_group, space_type=space_types['Lab'],
+                defaults={'max_bookings': 7, 'priority': 25, 'is_active': True}
+            )
+            self.stdout.write(self.style.SUCCESS(
+                f"  Daily Booking Limit for '{student_group.name}' ({space_types['Lab'].name}): 7 bookings/day (Priority:25)"))
 
-                # 针对 '教师' 组在 'Lecture Hall' 类型的空间做另一个限制，例如可以预订更多次
-                DailyBookingLimit.objects.get_or_create(
-                    group=teacher_group,
-                    space_type=space_types['Lecture Hall'],
-                    defaults={'max_bookings': 20, 'priority': 35, 'is_active': True}  # 优先级高于其全局的教师限制
-                )
-                self.stdout.write(self.style.SUCCESS(
-                    f"  Daily Booking Limit for '{teacher_group.name}' ({space_types['Lecture Hall'].name}): 20 bookings/day (Priority:35)"))
-
+            DailyBookingLimit.objects.get_or_create(
+                group=teacher_group, space_type=space_types['Lecture Hall'],
+                defaults={'max_bookings': 20, 'priority': 35, 'is_active': True}
+            )
+            self.stdout.write(self.style.SUCCESS(
+                f"  Daily Booking Limit for '{teacher_group.name}' ({space_types['Lecture Hall'].name}): 20 bookings/day (Priority:35)"))
         else:
             self.stdout.write(self.style.WARNING(
-                "\nSkipping creation of Daily Booking Limits due to missing 'DailyBookingLimit' model."))
+                "\nSkipping creation of Daily Booking Limits due to missing 'DailyBookingLimit' model or related group/spaceType data."))
+
+
 
         self.stdout.write(self.style.HTTP_INFO('\nTest data import complete!'))

@@ -59,16 +59,16 @@ class CheckInRecord(models.Model):
     )
     # NEW: 添加签到时的地理坐标，以便记录和验证
     latitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
+        max_digits=12,
+        decimal_places=10,
         null=True,
         blank=True,
         verbose_name="签到纬度",
         help_text="签到时的地理纬度"
     )
     longitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
+        max_digits=13,
+        decimal_places=10,
         null=True,
         blank=True,
         verbose_name="签到经度",
@@ -98,11 +98,12 @@ class CheckInRecord(models.Model):
         verbose_name = '签到记录'
         verbose_name_plural = verbose_name
         ordering = ['-check_in_time']
-        permissions = (
-            ("can_view_checkin_records", "Can view any check-in record"),
-            ("can_check_in_any_booking", "Can perform check-in for any booking"), # 用于工作人员全局签到
-            ("can_manage_checkin_records", "Can create, edit, delete check-in records"), # 用于管理签到记录本身 (编辑通常指更改 is_valid 或 notes)
-        )
+        permissions = [
+            ("can_view_checkinrecord", "Can view check-in records"),
+            ("can_add_checkinrecord", "Can add check-in records"),
+            ("can_change_checkinrecord", "Can change check-in records"),
+            ("can_delete_checkinrecord", "Can delete check-in records"),
+        ]
         indexes = [
             Index(fields=['booking']),
             Index(fields=['user']),

@@ -160,14 +160,17 @@ class CustomUser(AbstractUser):
     def is_student(self):
         """是否是学生（通过属于'学生'组判断）"""
         return self.groups.filter(name='学生').exists()
-
+    @property
+    def is_check_in_staff(self):
+        """是否是学生（通过属于'学生'组判断）"""
+        return self.groups.filter(name='签到员').exists()
     @property
     def is_staff_member(self):
         """
         通用的“员工”或“内部人员”标识，可以用于所有管理类角色的基准。
         例如，is_system_admin 或 is_space_manager 都属于 staff_member。
         """
-        return self.is_system_admin or self.is_space_manager
+        return self.is_system_admin or self.is_space_manager or self.is_check_in_staff
 
     def get_all_group_permissions(self):
         """
@@ -219,7 +222,8 @@ class CustomUser(AbstractUser):
 
             should_be_staff = self.is_superuser or \
                               self.groups.filter(name='系统管理员').exists() or \
-                              self.groups.filter(name='空间管理员').exists()
+                              self.groups.filter(name='空间管理员').exists() or \
+                              self.groups.filter(name='签到员').exists()
 
             if current_is_staff_status != should_be_staff:
                 self.is_staff = should_be_staff
