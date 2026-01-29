@@ -131,6 +131,8 @@ class SpaceFilter(django_filters.FilterSet):
             'requires_approval', # 布尔值：是否需要审批
             'is_container',      # 布尔值：是否为容器空间
             'parent_space',      # 外键：父级空间的ID
+            'latitude',
+            'longitude',
         ]
 
     def filter_search(self, queryset, name, value):

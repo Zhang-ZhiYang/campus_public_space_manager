@@ -86,14 +86,15 @@ class BookableAmenityInline(admin.TabularInline):
 @admin.register(Space)
 class SpaceAdmin(GuardedModelAdmin):
     list_display = (
-        'name', 'location', 'space_type_name', 'parent_space_name', 'capacity',
+        'name', 'location', 'latitude', 'longitude', # <--- NEW: 添加经纬度到列表显示
+        'space_type_name', 'parent_space_name', 'capacity',
         'is_bookable', 'is_active', 'is_container', 'requires_approval',
-        'check_in_method', # <--- 新增
+        'check_in_method',
         'display_permitted_groups', 'managed_by_display'
     )
     list_filter = (
         'is_bookable', 'is_active', 'is_container', 'requires_approval',
-        'check_in_method', # <--- 新增
+        'check_in_method',
         'space_type',
         ('parent_space', admin.RelatedOnlyFieldListFilter),
         'permitted_groups',
@@ -111,8 +112,9 @@ class SpaceAdmin(GuardedModelAdmin):
         fieldsets = [
             (None, {'fields': ('name', 'location', 'description', 'image',)}),
             ('层级与类型', {'fields': ('space_type', 'parent_space', 'is_container',)}),
-            ('行为设置', { # <--- 更改为更通用的名称
-                'fields': ('capacity', 'is_bookable', 'is_active', 'requires_approval', 'check_in_method')} # <--- 新增 check_in_method
+            ('地图坐标', {'fields': ('latitude', 'longitude'), 'description': '设置空间的地理坐标，用于定位签到等功能。'}), # <--- NEW: 新增经纬度字段组
+            ('行为设置', {
+                'fields': ('capacity', 'is_bookable', 'is_active', 'requires_approval', 'check_in_method')}
             ),
             ('可预订用户组 (白名单)', {'fields': ('permitted_groups',),
                                        'description': '如果空间非基础型基础设施，则只有选择的用户组可以预订此空间。若为空，则除管理员、空间经理和基础型之外，该空间对非管理员用户不可访问。',
@@ -122,17 +124,21 @@ class SpaceAdmin(GuardedModelAdmin):
               'description': '指定负责管理此空间的主要人员。该人员将获得此空间的管理权限。', }),
             ('时间与时长规则', {
                 'fields': ('available_start_time', 'available_end_time', 'min_booking_duration', 'max_booking_duration',
-                           'buffer_time_minutes'), 'classes': ('collapse',)}),
+                           'buffer_time_minutes'), 'classes': ('collapse', 'wide')}), # 'wide' 可以让字段占满一行
             ('时间戳', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse', 'readonly')})
         ]
 
         if not (request.user.is_superuser or getattr(request.user, 'is_system_admin', False)):
             modified_fieldsets = []
             for fs_name, fs_options in fieldsets:
+                # 空间管理员不能修改 managed_by 字段
                 if fs_name == '管理人员':
+                    # 如果是新建空间，空间管理员可以设置自己为 manager，否则只读
                     if obj is None and getattr(request.user, 'is_space_manager', False):
-                        continue
-                    else:
+                        modified_fieldsets.append((fs_name, fs_options))
+                    elif obj is not None:
+                        # 对于已有空间，如果用户是空间管理员，则不显示 managed_by 字段，或者设置为只读
+                        # 这里通过 get_readonly_fields 方法处理为只读更合适
                         modified_fieldsets.append((fs_name, fs_options))
                 else:
                     modified_fieldsets.append((fs_name, fs_options))
@@ -170,13 +176,26 @@ class SpaceAdmin(GuardedModelAdmin):
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     def save_model(self, request, obj, form, change):
+        # 如果是新建且 managed_by 为空，则自动设置为当前用户 (如果当前用户是管理员或空间管理员)
         if not change and not obj.managed_by:
             if getattr(request.user, 'is_space_manager', False) or \
                     request.user.is_superuser or \
                     getattr(request.user, 'is_system_admin', False):
                 obj.managed_by = request.user
 
-        super().save_model(request, obj, form, change)
+        super().save_model(request, obj, form, change) # 调用父类的 save_model 来保存对象
+
+        # 保存后，确保为 managed_by 的用户分配必要的对象级权限
+        # 这段逻辑通常在 save_model 中执行，但也可以放在 Admin 的 post_save 信号或 Service 层
+        if obj.managed_by:
+            # 分配所有 SPACE_MANAGEMENT_PERMISSIONS (自定义权限)
+            for perm_codename in SPACE_MANAGEMENT_PERMISSIONS:
+                assign_perm(perm_codename, obj.managed_by, obj)
+            # 分配 bookable_amenity 的管理权限给空间管理员
+            for ba_perm_codename in BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS:
+                for ba in obj.bookable_amenities.all():
+                    assign_perm(ba_perm_codename, obj.managed_by, ba)
+            logger.info(f"为空间 '{obj.name}' (ID: {obj.pk}) 的管理人员 '{obj.managed_by.username}' 分配了管理权限。")
 
     @admin.display(description='管理人员')
     def managed_by_display(self, obj: Space):
@@ -199,6 +218,8 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: return qs.none()
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return qs
 
+        # 对于非超级管理员/系统管理员，默认只能看到有 `can_view_space` 或 `can_edit_space_info` 权限的空间
+        # 这确保了空间管理员能看到他们管理或有权限查看的所有空间
         return get_objects_for_user(request.user, ['spaces.can_view_space', 'spaces.can_edit_space_info'],
                                     klass=qs).distinct()
 
@@ -218,8 +239,10 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None: return self.has_module_permission(request)
+        if obj is None: # 表示查看列表页
+            return self.has_module_permission(request)
 
+        # 表示查看单个对象
         return request.user.has_perm('spaces.can_view_space', obj)
 
     def has_add_permission(self, request):
@@ -233,12 +256,14 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:
+        if obj is None: # 表示能否修改任何对象（例如通过列表页的批量操作）
+            # 对于空间管理员，只要有权限修改任何一个空间，就允许进入 change list 页面
             return get_objects_for_user(request.user,
                                         ['spaces.can_edit_space_info', 'spaces.can_change_space_status',
                                          'spaces.can_configure_booking_rules', 'spaces.can_manage_permitted_groups'],
                                         klass=Space).exists()
 
+        # 表示能否修改特定对象
         return request.user.has_perm('spaces.can_edit_space_info', obj) or \
             request.user.has_perm('spaces.can_change_space_status', obj) or \
             request.user.has_perm('spaces.can_configure_booking_rules', obj) or \
@@ -248,9 +273,10 @@ class SpaceAdmin(GuardedModelAdmin):
         if not request.user.is_authenticated: return False
         if request.user.is_superuser or getattr(request.user, 'is_system_admin', False): return True
 
-        if obj is None:
+        if obj is None: # 表示能否删除任何对象（例如通过列表页的批量操作）
             return get_objects_for_user(request.user, 'spaces.can_delete_space', klass=Space).exists()
 
+        # 表示能否删除特定对象
         return request.user.has_perm('spaces.can_delete_space', obj)
 
     actions = [
@@ -274,8 +300,9 @@ class SpaceAdmin(GuardedModelAdmin):
             'require_approval_for_spaces', 'dont_require_approval_for_spaces',
         ]
 
+        # 对于非超级管理员/系统管理员，移除默认的 delete_selected 以及不允许的自定义操作
         actions.pop('delete_selected', None)
-        actions.pop('safer_delete_selected', None)
+        actions.pop('safer_delete_selected', None) # 空间管理员不应看到安全删除操作
 
         current_action_names = list(actions.keys())
         for action_name in current_action_names:

@@ -113,6 +113,7 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
         model = Space
         fields = [
             'id', 'name', 'location', 'description', 'capacity', 'image',
+            'latitude', 'longitude',
             'is_active', 'is_bookable', 'is_container', 'requires_approval',
             'check_in_method',  # 空间自身设置的签到方式 (直接从模型/字典获取)
             'available_start_time', 'available_end_time',  # 空间自身设置的可用时间
@@ -364,6 +365,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         model = Space
         fields = [
             'id', 'name', 'location', 'description', 'capacity',
+            'latitude', 'longitude',
             'is_bookable', 'is_active', 'is_container', 'requires_approval', 'image',
             'available_start_time', 'available_end_time',
             'min_booking_duration', 'max_booking_duration', 'buffer_time_minutes',
@@ -377,7 +379,9 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             'max_booking_duration': {'allow_null': True},
             'buffer_time_minutes': {'allow_null': True},
             'image': {'required': False, 'allow_null': True},
-            'check_in_method': {'required': False, 'allow_null': True, 'allow_blank': True}  # 允许为空和空字符串
+            'check_in_method': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'latitude': {'required': False, 'allow_null': True},  # <--- 新增
+            'longitude': {'required': False, 'allow_null': True},  # <--- 新增
         }
 
     def validate(self, data):
