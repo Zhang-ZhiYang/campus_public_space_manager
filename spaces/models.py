@@ -43,19 +43,20 @@ BOOKABLE_AMENITY_MANAGEMENT_PERMISSIONS = [
     'can_change_bookable_amenity_status',
 ]
 
-# 签到方法选择项 <--- NEW: 增加了 NO_CHECK_IN 选项
+# 签到方法选择项 <--- NEW: 增加了 LOCATION 选项
 CHECK_IN_METHOD_CHOICES = (
-    ('NONE', '不需要签到'),  # <--- 新增
+    ('NONE', '不需要签到'),
     ('SELF', '用户自行签到'),
     ('STAFF', '仅限签到员签到'),
     ('HYBRID', '用户和签到员均可签到'),
+    ('LOCATION', '仅限定位签到'), # <--- 新增
 )
 
-CHECK_IN_METHOD_NONE = 'NONE'  # <--- 新增常量
+CHECK_IN_METHOD_NONE = 'NONE'
 CHECK_IN_METHOD_SELF = 'SELF'
 CHECK_IN_METHOD_STAFF = 'STAFF'
 CHECK_IN_METHOD_HYBRID = 'HYBRID'
-
+CHECK_IN_METHOD_LOCATION = 'LOCATION' # <--- 新增常量
 
 # ====================================================================
 # 辅助函数：获取空间的所有后代 (子孙) 空间
@@ -96,7 +97,6 @@ def get_all_descendant_spaces(space_instance):
 
     return descendants
 
-
 # ====================================================================
 # SpaceType Model (空间类型)
 # ====================================================================
@@ -123,11 +123,11 @@ class SpaceType(models.Model):
         verbose_name="默认是否需要审批",
         help_text="新创建的空间默认是否需要管理员审核批准"
     )
-    # 新增：默认签到方式，包含 NONE 选项
+    # 新增：默认签到方式，包含 LOCATION 选项
     default_check_in_method = models.CharField(
         max_length=10,
         choices=CHECK_IN_METHOD_CHOICES,
-        default=CHECK_IN_METHOD_HYBRID,  # 默认允许用户和签到员均可签到，除非明确设置为 'NONE' 或 'STAFF'
+        default=CHECK_IN_METHOD_HYBRID,
         verbose_name="默认签到方式",
         help_text="该类型空间默认的签到方式，可被具体空间覆盖。"
     )
@@ -197,7 +197,6 @@ class SpaceType(models.Model):
             'default_buffer_time_minutes': self.default_buffer_time_minutes,
         }
 
-
 # ====================================================================
 # Amenity Model (设施 - 定义设施的种类)
 # ====================================================================
@@ -244,7 +243,6 @@ class Amenity(models.Model):
             'description': self.description,
             'is_bookable_individually': self.is_bookable_individually,
         }
-
 
 # ====================================================================
 # BookableAmenity Model (可预订设施实例 - Space 下的设施具体数量)
@@ -344,7 +342,6 @@ class BookableAmenity(models.Model):
             'is_active': self.is_active,
         }
 
-
 class Space(models.Model):
     """
     可预订空间模型，定义了每个空间的属性和预订规则。
@@ -382,6 +379,24 @@ class Space(models.Model):
     is_bookable = models.BooleanField(default=True, verbose_name="是否可预订", help_text="空间是否对外开放预订")
     is_active = models.BooleanField(default=True, verbose_name="是否启用", help_text="空间是否处于启用状态")
     image = models.ImageField(upload_to='space_images/', blank=True, null=True, verbose_name="空间图片")
+
+    # NEW: 添加地理坐标字段
+    latitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name="纬度",
+        help_text="空间地理坐标的纬度，例如：30.287"
+    )
+    longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name="经度",
+        help_text="空间地理坐标的经度，例如：120.124"
+    )
 
     requires_approval = models.BooleanField(
         default=False,
@@ -483,7 +498,8 @@ class Space(models.Model):
             Index(fields=['requires_approval']),
             Index(fields=['managed_by']),
             Index(fields=['created_at']),
-            Index(fields=['check_in_method']),  # <--- 新增索引
+            Index(fields=['check_in_method']),
+            Index(fields=['latitude', 'longitude']), # <-- 新增索引
         ]
 
     def clean(self):
@@ -564,7 +580,7 @@ class Space(models.Model):
     def to_dict(self, include_related=True):
         """
         将 Space 实例转换为字典，准备用于缓存。
-        DurationField 不再转换为字符串，而是保持 timedelta 类型。
+        **新增 latitude, longitude 字段，并确保 DurationField 保持 timedelta 类型。**
         """
         data = {
             'id': self.pk,
@@ -578,8 +594,10 @@ class Space(models.Model):
             'is_bookable': self.is_bookable,
             'is_active': self.is_active,
             'image': self.image.url if self.image else None,
+            'latitude': float(self.latitude) if self.latitude is not None else None, # <--- 包含新字段
+            'longitude': float(self.longitude) if self.longitude is not None else None, # <--- 包含新字段
             'requires_approval': self.requires_approval,  # 模型字段值
-            'check_in_method': self.check_in_method,  # <--- 包含新字段
+            'check_in_method': self.check_in_method,
             'available_start_time': self.available_start_time.strftime(
                 '%H:%M:%S') if self.available_start_time else None,
             'available_end_time': self.available_end_time.strftime('%H:%M:%S') if self.available_end_time else None,
@@ -621,10 +639,9 @@ class Space(models.Model):
                 [group.name for group in self.permitted_groups.all()]) if self.permitted_groups.exists() else (
                 "所有人" if self.space_type and self.space_type.is_basic_infrastructure else "无特定限制 (需权限)")
 
-            # 计算并添加有效的签到方式 <--- 新增
+            # 计算并添加有效的签到方式
             data['effective_check_in_method'] = self.check_in_method if self.check_in_method is not None else (
                 self.space_type.default_check_in_method if self.space_type else CHECK_IN_METHOD_HYBRID
-            # 如果都没有设置，默认 HYBRID
             )
             # 添加签到方式的显示名称，方便前端展示
             data['effective_check_in_method_display'] = dict(CHECK_IN_METHOD_CHOICES).get(

@@ -7,12 +7,13 @@ from django.utils import timezone
 from users.models import CustomUser
 from bookings.models import Booking
 from spaces.models import ( # 从 spaces.models 导入签到方式常量和 CHOICES
-    Space, # 确保 Space 也被导入，尽管这里不直接使用，但为了 related_space.name 访问
+    Space,
     CHECK_IN_METHOD_CHOICES,
     CHECK_IN_METHOD_NONE,
     CHECK_IN_METHOD_SELF,
     CHECK_IN_METHOD_STAFF,
-    CHECK_IN_METHOD_HYBRID
+    CHECK_IN_METHOD_HYBRID,
+    CHECK_IN_METHOD_LOCATION # <--- 新增
 )
 
 class CheckInRecord(models.Model):
@@ -29,7 +30,6 @@ class CheckInRecord(models.Model):
         verbose_name="关联预订",
         help_text="此签到记录关联的唯一预订"
     )
-    # user 字段明确指向实际签到或被签到的用户，通常是 booking.user
     user = models.ForeignKey(
         CustomUser,
         on_delete=models.CASCADE,
@@ -37,7 +37,6 @@ class CheckInRecord(models.Model):
         verbose_name="签到用户",
         help_text="本次签到记录的主体用户，通常是预订发起人"
     )
-    # checked_in_by 字段记录执行签到操作的人员
     checked_in_by = models.ForeignKey(
         CustomUser,
         on_delete=models.SET_NULL,
@@ -51,7 +50,6 @@ class CheckInRecord(models.Model):
         verbose_name="签到时间",
         help_text="实际签到发生的时间"
     )
-    # NEW: 添加签到图片字段
     check_in_image = models.ImageField(
         upload_to='check_in_images/',
         blank=True,
@@ -59,12 +57,29 @@ class CheckInRecord(models.Model):
         verbose_name="签到图片",
         help_text="用户或签到员在签到时上传的图片（例如：环境照片、自拍照）"
     )
+    # NEW: 添加签到时的地理坐标，以便记录和验证
+    latitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name="签到纬度",
+        help_text="签到时的地理纬度"
+    )
+    longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name="签到经度",
+        help_text="签到时的地理经度"
+    )
     check_in_method = models.CharField(
         max_length=10,
         choices=CHECK_IN_METHOD_CHOICES,
         default=CHECK_IN_METHOD_HYBRID, # 记录实际使用的签到方式，可表示“用户自行”、“工作人员代签”等
         verbose_name="签到方式",
-        help_text="实际执行签到时使用的方法（如：SELF, STAFF, HYBRID）。注意：此字段记录实际操作，而非空间配置。"
+        help_text="实际执行签到时使用的方法（如：SELF, STAFF, HYBRID, LOCATION）。注意：此字段记录实际操作，而非空间配置。"
     )
     is_valid = models.BooleanField(
         default=True,
@@ -94,6 +109,7 @@ class CheckInRecord(models.Model):
             Index(fields=['checked_in_by']),
             Index(fields=['check_in_time']),
             Index(fields=['is_valid']),
+            Index(fields=['latitude', 'longitude']), # <--- 新增索引
         ]
 
     def __str__(self):
@@ -105,7 +121,6 @@ class CheckInRecord(models.Model):
 
     def clean(self):
         super().clean()
-        # 签到记录的用户必须与关联预订的用户一致
         if self.booking and self.booking.user != self.user:
             raise ValidationError({'user': '签到记录的用户必须与关联预订的用户一致。'})
 
@@ -113,16 +128,15 @@ class CheckInRecord(models.Model):
         self.full_clean()
         super().save(*args, **kwargs)
 
-    # 修复 _get_related_object_dict 的缩进
     def _get_related_object_dict(self, obj, include_related=False):
         # 辅助方法，用于将关联对象转换为字典，避免无限循环
-        if obj is None:  # 修复 None 对象没有 pk 的问题
+        if obj is None:
             return None
         if hasattr(obj, 'to_dict') and callable(obj.to_dict):
             return obj.to_dict(include_related=include_related)
         elif hasattr(obj, 'pk') and hasattr(obj, '__str__'):
             return {'id': obj.pk, 'name': str(obj)}
-        return None # 这里的 return None 应该和 if 对齐
+        return None
 
     def to_dict(self, include_related: bool = True) -> dict:
         data = {
@@ -133,11 +147,12 @@ class CheckInRecord(models.Model):
             'notes': self.notes,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
+            'latitude': float(self.latitude) if self.latitude is not None else None, # <--- 包含新字段
+            'longitude': float(self.longitude) if self.longitude is not None else None, # <--- 包含新字段
         }
         if self.check_in_image:
             data['check_in_image_url'] = self.check_in_image.url
         if include_related:
-            # 关联对象通常只需要其ID和名称，避免深层递归
             data['booking'] = self._get_related_object_dict(self.booking, include_related=False)
             data['user'] = self._get_related_object_dict(self.user, include_related=False)
             data['checked_in_by'] = self._get_related_object_dict(self.checked_in_by, include_related=False)
