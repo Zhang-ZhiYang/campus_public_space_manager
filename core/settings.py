@@ -218,13 +218,40 @@ SIMPLE_JWT = {
 # 9. 跨域资源共享 (CORS)
 # ==============================================================================
 
+# settings.py 中添加或修改 CORS 配置
 CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
 
-if not CORS_ALLOW_ALL_ORIGINS:
-    CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000', cast=Csv())
+# 如果你想更安全，可以指定具体的前端地址
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",  # Taro H5 开发服务器
+    "http://127.0.0.1:3000",
+    "http://localhost:10086",  # Taro 默认端口
+    "http://127.0.0.1:10086",
+]
 
 CORS_ALLOW_CREDENTIALS = True
+# 允许的请求头
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
 
+# 允许的HTTP方法
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
 # ==============================================================================
 # 10. Celery & Redis 配置 (缺失部分已补全)
 # ==============================================================================

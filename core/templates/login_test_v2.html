@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录测试 V2</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f0f0f0;
+        }
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            background: #007bff;
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], input[type="password"] {
+            width: calc(100% - 22px);
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        button:hover { background-color: #218838; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .info { background: #cce5ff; color: #004085; border: 1px solid #b8daff; }
+        .debug {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 登录测试 V2 - 调试版本</h1>
+
+        <div id="script-status" class="status info">
+            ⏳ 正在加载脚本...
+        </div>
+
+        <form id="loginForm">
+            <label for="username">用户名:</label>
+            <input type="text" id="username" name="username" required value="testuser_apipost">
+
+            <label for="password">密码:</label>
+            <input type="password" id="password" name="password" required value="StrongPassword123">
+
+            <button type="submit">🚀 登录并发送Token</button>
+        </form>
+
+        <button onclick="testPostMessage()" style="background: #ffc107; color: #212529;">
+            🧪 测试 PostMessage 功能
+        </button>
+
+        <button onclick="checkTaroConnection()" style="background: #17a2b8;">
+            🔍 检查 Taro 连接
+        </button>
+
+        <div id="status-container"></div>
+        <div id="debug-log" class="debug"></div>
+    </div>
+
+    <script>
+        // 立即执行的调试代码
+        (function() {
+            console.log('🎯 脚本开始执行 - 时间戳:', new Date().toISOString());
+
+            // 更新状态显示
+            const statusEl = document.getElementById('script-status');
+            if (statusEl) {
+                statusEl.textContent = '✅ 脚本已加载完成';
+                statusEl.className = 'status success';
+            }
+
+            // 调试日志函数
+            window.debugLog = function(message, data = null) {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEl = document.getElementById('debug-log');
+                const logEntry = `[${timestamp}] ${message}${data ? '\n' + JSON.stringify(data, null, 2) : ''}`;
+
+                console.log('🔧 DEBUG:', message, data);
+
+                if (logEl) {
+                    logEl.innerHTML += logEntry + '\n---\n';
+                    logEl.scrollTop = logEl.scrollHeight;
+                }
+            };
+
+            // 状态更新函数
+            window.updateStatus = function(message, type = 'info') {
+                const container = document.getElementById('status-container');
+                if (container) {
+                    container.innerHTML = `<div class="status ${type}">${message}</div>`;
+                }
+                debugLog(`状态更新: ${message} (类型: ${type})`);
+            };
+
+            debugLog('调试系统初始化完成');
+        })();
+
+        // 测试 PostMessage 功能
+        function testPostMessage() {
+            debugLog('开始测试 PostMessage 功能');
+            updateStatus('🧪 正在测试 PostMessage...', 'info');
+
+            const testData = {
+                type: 'TEST_MESSAGE',
+                message: 'Hello from login page!',
+                timestamp: Date.now()
+            };
+
+            try {
+                // 测试各种发送方式
+                window.postMessage(testData, '*');
+                debugLog('✅ window.postMessage 发送成功', testData);
+
+                if (window.parent && window.parent !== window) {
+                    window.parent.postMessage(testData, '*');
+                    debugLog('✅ parent.postMessage 发送成功');
+                } else {
+                    debugLog('⚠️ 没有父窗口');
+                }
+
+                if (window.opener) {
+                    window.opener.postMessage(testData, '*');
+                    debugLog('✅ opener.postMessage 发送成功');
+                } else {
+                    debugLog('⚠️ 没有打开者窗口');
+                }
+
+                updateStatus('✅ PostMessage 测试完成，请查看控制台日志', 'success');
+            } catch (error) {
+                debugLog('❌ PostMessage 测试失败', error);
+                updateStatus('❌ PostMessage 测试失败: ' + error.message, 'error');
+            }
+        }
+
+        // 检查 Taro 连接
+        function checkTaroConnection() {
+            debugLog('开始检查 Taro 连接');
+            updateStatus('🔍 正在检查 Taro 连接...', 'info');
+
+            const taroUrls = [
+                'http://localhost:10086',
+                'http://127.0.0.1:10086',
+                'http://localhost:3000',
+                'http://127.0.0.1:3000'
+            ];
+
+            let checkResults = [];
+
+            taroUrls.forEach(url => {
+                try {
+                    // 尝试创建一个测试请求
+                    fetch(url + '/favicon.ico', {
+                        method: 'HEAD',
+                        mode: 'no-cors',
+                        timeout: 2000
+                    })
+                    .then(() => {
+                        checkResults.push(`✅ ${url} - 可能在运行`);
+                        debugLog(`连接检查: ${url} 响应正常`);
+                    })
+                    .catch(() => {
+                        checkResults.push(`❌ ${url} - 无法连接`);
+                        debugLog(`连接检查: ${url} 无法连接`);
+                    });
+                } catch (error) {
+                    checkResults.push(`❌ ${url} - 错误: ${error.message}`);
+                    debugLog(`连接检查错误: ${url}`, error);
+                }
+            });
+
+            setTimeout(() => {
+                updateStatus('🔍 连接检查完成，结果:\n' + checkResults.join('\n'), 'info');
+                debugLog('Taro 连接检查完成', checkResults);
+            }, 3000);
+        }
+
+        // 发送 Token 到 Taro
+        function sendTokenToTaro(tokenData) {
+            debugLog('开始发送 Token 到 Taro', tokenData);
+            updateStatus('🚀 正在发送 Token 到 Taro...', 'info');
+
+            const postMessageData = {
+                type: 'AUTH_TOKEN_FROM_LOGIN',
+                accessToken: tokenData.access,
+                refreshToken: tokenData.refresh,
+                userId: tokenData.user_id,
+                username: tokenData.username,
+                name: tokenData.name || '',
+                timestamp: Date.now()
+            };
+
+            let successCount = 0;
+            const attempts = [];
+
+            try {
+                // 方式1: 广播到当前窗口
+                window.postMessage(postMessageData, '*');
+                attempts.push('✅ 当前窗口广播');
+                successCount++;
+                debugLog('✅ 当前窗口广播成功');
+            } catch (e) {
+                attempts.push('❌ 当前窗口广播失败: ' + e.message);
+                debugLog('❌ 当前窗口广播失败', e);
+            }
+
+            try {
+                // 方式2: 发送到父窗口
+                if (window.parent && window.parent !== window) {
+                    window.parent.postMessage(postMessageData, '*');
+                    attempts.push('✅ 父窗口发送');
+                    successCount++;
+                    debugLog('✅ 父窗口发送成功');
+                } else {
+                    attempts.push('⚠️ 没有父窗口');
+                }
+            } catch (e) {
+                attempts.push('❌ 父窗口发送失败: ' + e.message);
+                debugLog('❌ 父窗口发送失败', e);
+            }
+
+            try {
+                // 方式3: 发送到打开者窗口
+                if (window.opener) {
+                    window.opener.postMessage(postMessageData, '*');
+                    attempts.push('✅ 打开者窗口发送');
+                    successCount++;
+                    debugLog('✅ 打开者窗口发送成功');
+                } else {
+                    attempts.push('⚠️ 没有打开者窗口');
+                }
+            } catch (e) {
+                attempts.push('❌ 打开者窗口发送失败: ' + e.message);
+                debugLog('❌ 打开者窗口发送失败', e);
+            }
+
+            const resultMessage = `🚀 Token 发送完成!\n成功: ${successCount} 次\n详情:\n${attempts.join('\n')}`;
+            updateStatus(resultMessage, successCount > 0 ? 'success' : 'error');
+            debugLog('Token 发送完成', { successCount, attempts });
+
+            return successCount > 0;
+        }
+
+        // 登录表单处理
+        document.getElementById('loginForm').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            debugLog('登录表单提交');
+            updateStatus('📝 正在登录...', 'info');
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                debugLog('发送登录请求', { username });
+
+                const response = await fetch('/api/v1/token/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+                debugLog('登录响应', { status: response.status, data });
+
+                if (response.ok && data.success) {
+                    debugLog('✅ 登录成功');
+                    updateStatus('✅ 登录成功！正在发送 Token...', 'success');
+
+                    // 存储到 localStorage
+                    localStorage.setItem('access_token', data.data.access);
+                    localStorage.setItem('refresh_token', data.data.refresh);
+                    localStorage.setItem('user_id', data.data.user_id);
+                    localStorage.setItem('username', data.data.username);
+                    localStorage.setItem('name', data.data.name || '');
+
+                    // 立即发送 Token
+                    const sendResult = sendTokenToTaro(data.data);
+
+                    if (sendResult) {
+                        updateStatus('🎉 登录成功并且 Token 已发送！', 'success');
+                    } else {
+                        updateStatus('⚠️ 登录成功但 Token 发送可能失败', 'error');
+                    }
+
+                } else {
+                    debugLog('❌ 登录失败', data);
+                    updateStatus('❌ 登录失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (error) {
+                debugLog('❌ 登录请求异常', error);
+                updateStatus('❌ 网络错误: ' + error.message, 'error');
+            }
+        });
+
+        // 页面加载完成
+        window.addEventListener('load', function() {
+            debugLog('页面加载完成');
+            updateStatus('✅ 页面已加载，可以开始测试', 'success');
+        });
+
+        debugLog('所有脚本初始化完成');
+    </script>
+</body>
+</html>

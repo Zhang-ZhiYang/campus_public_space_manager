@@ -18,7 +18,7 @@ from users.models import CustomUser
 logger = logging.getLogger(__name__)
 
 # 配置：定位签到的有效半径（公里）
-LOCATION_CHECK_IN_RADIUS_KM = 0.05  # 50米
+LOCATION_CHECK_IN_RADIUS_KM = 0.2  # 50米
 # 配置：允许签到的提前或滞后时间窗口（分钟）
 # 例如，如果预订 10:00 开始，窗口 15 分钟，则 09:45 可签到
 CHECK_IN_WINDOW_MINUTES = 15

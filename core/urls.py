@@ -33,7 +33,8 @@ urlpatterns = [
     path('api/v1/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/v1/token/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     path('api/v1/token/blacklist/', CustomTokenBlacklistView.as_view(), name='token_blacklist'),
-
+# 在现有的 urlpatterns 中添加
+    path('login-test-v2/', TemplateView.as_view(template_name='login_test_v2.html'), name='login_test_v2'),
     path('register-test/', TemplateView.as_view(template_name='register_test.html'), name='register_test'),  # <-- 新增
     path('profile-page/', TemplateView.as_view(template_name='profile_page.html'), name='profile_page'),  # <-- 新增这一行
     path('login-test/', TemplateView.as_view(template_name='login_test.html'), name='login_test'),  # <-- 新增
