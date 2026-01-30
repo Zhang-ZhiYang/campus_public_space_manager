@@ -25,7 +25,6 @@ CHECK_IN_WINDOW_MINUTES = 15
 # 配置：签到后预订状态更新的缓冲时间。例如预订结束后多久还可以处理签到
 CHECK_IN_GRACE_PERIOD_MINUTES = 0
 
-
 class CheckInService(BaseService):
     _dao_map = {
         'check_in_record_dao': 'check_in_record',
@@ -173,12 +172,12 @@ class CheckInService(BaseService):
 
     @transaction.atomic
     def perform_check_in(self, user: CustomUser, booking_pk: int,
-                         client_request_method: str,  # 客户端传来的请求方式标识 (例如 'PHOTO', 'QR', 'LOCATION', 'MANUAL')
+                         # client_request_method: str,  # NEW: 客户端不再直接发送 client_request_method, 而是通过 endpoint 区分
                          latitude: Optional[float] = None,
                          longitude: Optional[float] = None,
                          photo: Optional[Any] = None,  # File object
                          notes: Optional[str] = None,
-                         staff_override: bool = False  # 标识是否为工作人员代签操作
+                         is_staff_manual_check_in: bool = False # NEW: 增加一个明确的参数，指示是否为工作人员手动/代签，将用于 Service 内部的权限/逻辑判断
                          ) -> ServiceResult[Dict[str, Any]]:
         """
         执行单个预订的签到操作。
@@ -186,13 +185,13 @@ class CheckInService(BaseService):
 
         :param user: 当前请求的用户。
         :param booking_pk: 预订的 ID。
-        :param client_request_method: 客户端尝试进行的签到方式 (例如 'PHOTO', 'QR', 'LOCATION', 'SELF_MANUAL')。
-                                      此参数用于记录实际签到方式及在 Service 内部进行辅助判断。
+        # :param client_request_method: 客户端尝试进行的签到方式 (例如 'PHOTO', 'QR', 'LOCATION', 'SELF_MANUAL')。
+        #                               此参数用于记录实际签到方式及在 Service 内部进行辅助判断。
         :param latitude: 签到时的纬度。
         :param longitude: 签到时的经度。
         :param photo: 签到时上传的图片文件。
         :param notes: 签到备注。
-        :param staff_override: 布尔值，如果为 True，表示工作人员正在对非本人的预订进行签到。
+        :param is_staff_manual_check_in: 布尔值，如果为 True，表示工作人员正在对非本人的预订进行签到。
         """
         try:
             # 1. 获取预订和空间信息
@@ -205,7 +204,7 @@ class CheckInService(BaseService):
 
             # 2. 权限验证 (谁可以签到)
             effective_check_in_method = space.effective_check_in_method
-            checked_in_by_user = user  # 默认签到人是当前用户
+            checked_in_by_user = user  # 默认签到人是当前操作用户
 
             if effective_check_in_method == CHECK_IN_METHOD_NONE:
                 return ServiceResult.error_result(
@@ -215,35 +214,60 @@ class CheckInService(BaseService):
                 )
 
             # --- 权限和签到执行人确定 ---
-            is_staff_action = user.is_system_admin or user.is_space_manager
-            is_user_self_checking_in = (user == booking.user)  # <--- 新增判断：当前操作用户是否是预订人本人
+            # 判断当前用户是否是预订人本人
+            is_user_self_checking_in = (user == booking.user)
 
-            if not is_user_self_checking_in:  # 如果当前操作用户不是预订人 (尝试代签)
-                if not is_staff_action:
+            # 签到员 (包括系统管理员和空间管理员)
+            can_staff_check_in = user.is_system_admin or user.is_space_manager or \
+                                (user.is_check_in_staff and user.has_perm('spaces.can_check_in_real_space', space))
+
+            if is_staff_manual_check_in: # 如果是明确的工作人员手动签到接口调用
+                if not can_staff_check_in:
                     return ServiceResult.error_result(
-                        message="您不是预订人，且没有工作人员权限，无法代签。",
-                        error_code="not_authorized_for_other_user_check_in",
+                        message="您没有权限作为工作人员为该预订进行签到。",
+                        error_code="staff_check_in_permission_denied",
                         status_code=403
                     )
-                # 工作人员代签，签到执行人是当前工作人员
+                # 工作人员代签或手动签到，checked_in_by 记录为当前工作人员
                 checked_in_by_user = user
 
                 # 验证空间配置是否允许工作人员签到
                 if effective_check_in_method not in [CHECK_IN_METHOD_STAFF, CHECK_IN_METHOD_HYBRID]:
                     return ServiceResult.error_result(
-                        message=f"空间 {space.name} 不允许工作人员代签。",
-                        error_code="staff_check_in_not_allowed",
+                        message=f"空间 {space.name} 当前签到方式 ({space.get_check_in_method_display()}) 不允许工作人员手动签到。",
+                        error_code="staff_manual_check_in_not_allowed_by_space_config",
                         status_code=400
                     )
-            else:  # 当前用户是预订人 (自行签到)
+                # Note: 工作人员手动签到时，通常不强制上传照片或定位，由工作人员自行判断。
+                # 如果要求，可以在这里添加 `if not photo: return error`
+                # 定位的话，可以记录，但不强制验证是否在范围内 (因为工作人员可能在后台操作或巡检签到)
+                # 如果是扫码签到，则客户端应确保传 QR 码数据或 ID。这里假设签到员直接输入 booking_pk。
+            elif is_user_self_checking_in: # 预订人本人自行签到
                 # 验证空间配置是否允许用户自行签到
                 if effective_check_in_method not in [CHECK_IN_METHOD_SELF, CHECK_IN_METHOD_HYBRID,
                                                      CHECK_IN_METHOD_LOCATION]:
                     return ServiceResult.error_result(
-                        message=f"空间 {space.name} 不允许用户自行签到。",
-                        error_code="self_check_in_not_allowed",
+                        message=f"空间 {space.name} 当前签到方式 ({space.get_check_in_method_display()}) 不允许您自行签到。",
+                        error_code="self_check_in_not_allowed_by_space_config",
                         status_code=400
                     )
+                # 强制要求照片和定位 (如果需要)
+                if effective_check_in_method in [CHECK_IN_METHOD_SELF, CHECK_IN_METHOD_HYBRID] and not photo:
+                    return ServiceResult.error_result(
+                        message=f"空间 {space.name} 的自行签到方式需要提供照片作为凭证。",
+                        error_code="photo_required_for_self_check_in",
+                        status_code=400
+                    )
+                if effective_check_in_method == CHECK_IN_METHOD_LOCATION:
+                    location_validation_result = self._validate_location_check_in(space, latitude, longitude)
+                    if not location_validation_result.success:
+                        return location_validation_result
+            else: # 既不是预订人本人，也不是明确的工作人员手动签到，且没有工作人员权限
+                return ServiceResult.error_result(
+                    message="您没有权限为他人签到，或该空间不允许自行签到。", # NEW: 优化措辞
+                    error_code="unauthorized_check_in_attempt",
+                    status_code=403
+                )
             # --- 权限和签到执行人确定 END ---
 
             # 3. 签到时间窗口验证
@@ -251,30 +275,7 @@ class CheckInService(BaseService):
             if not check_in_time_result.success:
                 return check_in_time_result
 
-            # 4. 根据签到方式 (effective_check_in_method) 强制验证数据
-            if effective_check_in_method == CHECK_IN_METHOD_LOCATION:
-                # 定位签到，必须有经纬度，并验证距离
-                location_validation_result = self._validate_location_check_in(space, latitude, longitude)
-                if not location_validation_result.success:
-                    return location_validation_result
-                # 如果是纯定位签到，不强制要求照片。用户可以上传，但不是必须。
-
-            elif effective_check_in_method in [CHECK_IN_METHOD_SELF, CHECK_IN_METHOD_HYBRID]:
-                # 只有当是用户本人操作（自行签到模式或混合模式下的自行签到），才强制要求照片。
-                # 扫码签到 (通常也属于 SELF 的一种变体) 在此逻辑下也会被要求照片，如果不需要，需在这里进一步区分client_request_method。
-                if is_user_self_checking_in:  # 预订人本人操作
-                    if not photo:
-                        return ServiceResult.error_result(
-                            message=f"空间 {space.name} 的自行签到（或混合模式下的自行签到）需要提供照片。",
-                            error_code="photo_required_for_self_check_in",
-                            status_code=400
-                        )
-                # 如果是工作人员在这种模式下签到 (HYBRID 且 not is_user_self_checking_in), 则不强制要求照片。
-
-            # CHECK_IN_METHOD_STAFF (纯工作人员签到) 不强制照片
-            # CHECK_IN_METHOD_NONE (无需签到) 在前面已直接返回，不需照片
-
-            # 5. 确保没有重复签到
+            # 4. 确保没有重复签到
             if self._check_in_record_dao.get_record_by_booking_id(booking_pk):
                 return ServiceResult.error_result(
                     message="该预订已签到，请勿重复操作。",
@@ -282,34 +283,36 @@ class CheckInService(BaseService):
                     status_code=409
                 )
 
-            # 6. 创建签到记录
+            # 5. 创建签到记录 (check_in_method 记录实际的空间配置方法)
             check_in_record = self._check_in_record_dao.create(
                 booking=booking,
                 user=booking.user,  # 签到记录的主体用户始终是预订人
                 checked_in_by=checked_in_by_user,  # 执行签到操作的用户
                 check_in_time=timezone.now(),
-                # 记录“实际执行的签到方式”。这里直接用空间的有效签到方式作为记录。
-                check_in_method=effective_check_in_method,
+                check_in_method=effective_check_in_method, # NEW: 记录空间的有效签到方式
                 latitude=latitude,
                 longitude=longitude,
-                check_in_image=photo,  # (File object will be handled by ImageField)
+                 # photo 字段只有当 client_request_method 是 'PHOTO' 或 (SELF, HYBRID 模式下) 被强制要求时才会有值
+                check_in_image=photo,
                 notes=notes
             )
 
-            # 7. 更新预订状态为已签到
+            # 6. 更新预订状态为已签到
+            # `update` 方法会自动调用 Booking 模型的 save()，并处理二维码等逻辑
             updated_booking = self._booking_dao.update(
                 booking,
                 status=Booking.BOOKING_STATUS_CHECKED_IN,
+                # 记录实际签到时间
                 actual_check_in_time=timezone.now()
             )
 
-            # 8. 清除缓存 (未来可以通过信号处理)
+            # 7. 清除缓存 (未来可以通过信号处理)
             # 签到成功意味着预订状态变化，也可能影响预订列表
             # CacheService.invalidate_object_cache('bookings:booking', booking_pk)
             # CacheService.invalidate_all_related_cache('bookings:booking')
 
             return ServiceResult.success_result(
-                data=check_in_record.to_dict(),
+                data=updated_booking.to_dict(), # 返回更新后的 booking 字典，包含 check_in_qrcode_url
                 message="签到成功。",
                 status_code=201
             )
@@ -343,7 +346,12 @@ class CheckInService(BaseService):
                 )
 
             # 权限：只有预订人或工作人员可以查看其签到记录
-            if user != booking.user and not (user.is_system_admin or user.is_space_manager):
+            can_view = user == booking.user or \
+                       user.is_system_admin or \
+                       user.is_space_manager or \
+                       (user.is_check_in_staff and user.has_perm('spaces.can_check_in_real_space', booking.related_space)) # NEW: 签到员可以查看其能签到的空间预订的签到记录
+
+            if not can_view:
                 return ServiceResult.error_result(
                     message="您没有权限查看此预订的签到记录。",
                     error_code="not_authorized_to_view_check_in",

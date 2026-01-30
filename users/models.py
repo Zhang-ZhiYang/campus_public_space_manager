@@ -162,7 +162,7 @@ class CustomUser(AbstractUser):
         return self.groups.filter(name='学生').exists()
     @property
     def is_check_in_staff(self):
-        """是否是学生（通过属于'学生'组判断）"""
+        """是否是签到员（通过属于'签到员'组判断）""" # NEW: Docstring更新
         return self.groups.filter(name='签到员').exists()
     @property
     def is_staff_member(self):
@@ -223,11 +223,8 @@ class CustomUser(AbstractUser):
             should_be_staff = self.is_superuser or \
                               self.groups.filter(name='系统管理员').exists() or \
                               self.groups.filter(name='空间管理员').exists() or \
-                              self.groups.filter(name='签到员').exists()
+                              self.groups.filter(name='签到员').exists() # NEW: 包含签到员组
 
             if current_is_staff_status != should_be_staff:
                 self.is_staff = should_be_staff
                 super().save(update_fields=['is_staff'])
-
-    def __str__(self):
-        return self.get_full_name

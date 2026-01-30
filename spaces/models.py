@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.contrib.auth.models import Group
 from django.conf import settings
 import logging
+from guardian.shortcuts import assign_perm, remove_perm # NEW: 导入 assign_perm, remove_perm
 
 # 获取 CustomUser 模型
 CustomUser = get_user_model()
@@ -31,6 +32,7 @@ SPACE_MANAGEMENT_PERMISSIONS = [
     'can_cancel_space_bookings',
     'can_book_this_space',
     'can_book_amenities_in_space',
+    'can_check_in_real_space', # NEW: 添加签到权限
 ]
 
 # 空间管理员拥有的仅查看权限 (对父级空间)
@@ -87,7 +89,6 @@ def get_all_descendant_spaces(space_instance):
             for deeper_child in current_child.child_spaces.all():
                 if deeper_child.pk not in seen_pks:
                     seen_pks.add(deeper_child.pk)
-                    next_level.append(deeper_child)
                 else:
                     logger.warning(
                         f"Circular reference or duplicate child {deeper_child.name} (PK:{deeper_child.pk}) detected during descendant lookup from parent {current_child.name} (root: {space_instance.name}). Skipping.")
@@ -328,19 +329,21 @@ class BookableAmenity(models.Model):
         activity_status = "活跃" if self.is_active else "不活跃"
         return f"{self.space.name} 的 {self.amenity.name} (数量: {self.quantity}, 状态: {activity_status})"
 
-    def to_dict(self):
+    def to_dict(self, include_related=True):
         """
         将 BookableAmenity 实例转换为字典，准备用于缓存。
         会嵌套其关联的 Amenity。
         """
-        return {
+        data = {
             'id': self.id,
             'space_id': self.space_id,
-            'amenity': self.amenity.to_dict() if self.amenity else None,  # 嵌套 Amenity 详情
             'quantity': self.quantity,
             'is_bookable': self.is_bookable,
             'is_active': self.is_active,
         }
+        if include_related and self.amenity: # 根据 include_related 参数控制是否嵌套 amenity
+            data['amenity'] = self.amenity.to_dict() # Amenity.to_dict() 应该不需要 include_related
+        return data
 
 class Space(models.Model):
     """
@@ -411,6 +414,15 @@ class Space(models.Model):
         null=True, blank=True,  # 允许为空，表示继承 SpaceType 的默认值
         verbose_name="签到方式",
         help_text="该空间的签到方式。若为空，则继承空间类型的默认值。若为'不需要签到'，则无需用户或签到员操作。"
+    )
+
+    # NEW: 添加 check_in_by 字段
+    check_in_by = models.ManyToManyField(
+        CustomUser,
+        blank=True,
+        related_name='can_check_in_spaces',
+        verbose_name="可签到人员",
+        help_text="有权为该空间签到的用户列表，通常是'签到员'角色"
     )
 
     available_start_time = models.TimeField(
@@ -486,6 +498,7 @@ class Space(models.Model):
             ("can_cancel_space_bookings", "Can cancel bookings for this specific space"),
             ("can_book_this_space", "Can book this specific space"),
             ("can_book_amenities_in_space", "Can book amenities within this space"),
+            ("can_check_in_real_space", "Can check-in bookings for this specific space (real-time field)"), # NEW: 新增权限
         )
         indexes = [
             Index(fields=['name']),
@@ -541,6 +554,7 @@ class Space(models.Model):
                 current = current.parent_space
 
     def save(self, *args, **kwargs):
+
         if not self.is_active:
             self.is_bookable = False
 
@@ -561,18 +575,19 @@ class Space(models.Model):
                 self.max_booking_duration = self.space_type.default_max_booking_duration
             if self.buffer_time_minutes is None:
                 self.buffer_time_minutes = self.space_type.default_buffer_time_minutes
-            if self.check_in_method is None or self.check_in_method == '':  # <--- 继承签到方式
+            if self.check_in_method is None or self.check_in_method == '':
                 self.check_in_method = self.space_type.default_check_in_method
 
             # 如果空间类型默认不可预订，则此空间也不可预订
             if not self.space_type.default_is_bookable:
                 self.is_bookable = False
-        else:  # 如果没有 space_type，则默认为 HYBRID (或 NONE，根据实际情况选择更宽松或更严格的默认)
+        else:
             if self.check_in_method is None or self.check_in_method == '':
-                self.check_in_method = CHECK_IN_METHOD_HYBRID  # 默认 HYBRID 使得在无 SpaceType 时能够正常工作
+                self.check_in_method = CHECK_IN_METHOD_HYBRID
 
         self.full_clean()
         super().save(*args, **kwargs)
+
 
     def __str__(self):
         return f"{self.name} ({self.location})"
@@ -614,6 +629,8 @@ class Space(models.Model):
             data['managed_by'] = self.managed_by.to_dict_minimal() if self.managed_by else None
             data['bookable_amenities'] = [ba.to_dict() for ba in self.bookable_amenities.all()]
             data['permitted_groups'] = [group.pk for group in self.permitted_groups.all()]
+            # NEW: 添加 check_in_by 用户ID列表
+            data['check_in_by'] = [user.pk for user in self.check_in_by.all()]
 
             # 计算并添加有效的预订规则字段
             data['effective_requires_approval'] = self.requires_approval if self.requires_approval is not None else (

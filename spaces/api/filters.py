@@ -116,6 +116,15 @@ class SpaceFilter(django_filters.FilterSet):
         field_name='managed_by', lookup_expr='isnull', label="是否无主要管理人员"
     )
 
+    # NEW: 签到员过滤
+    check_in_by_ids = django_filters.ModelMultipleChoiceFilter(
+        queryset=get_user_model().objects.all(),
+        field_name='check_in_by',
+        to_field_name='id',
+        conjoined=False,
+        label="可签到人员 (ID)"
+    )
+
     # ====== 日期时间过滤 ======
     created_before = django_filters.DateTimeFilter(field_name='created_at', lookup_expr='lte', label="创建于之前")
     created_after = django_filters.DateTimeFilter(field_name='created_at', lookup_expr='gte', label="创建于之后")

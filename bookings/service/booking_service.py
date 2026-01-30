@@ -20,6 +20,7 @@ from core.utils.exceptions import NotFoundException, ForbiddenException, BadRequ
 from users.models import CustomUser
 from spaces.models import Space, BookableAmenity
 from bookings.models import Booking  # 直接导入 Booking 模型
+from guardian.shortcuts import get_objects_for_user # NEW: 导入 guardian 的 get_objects_for_user
 
 # 导入异步任务
 from bookings.tasks import booking_tasks
@@ -266,9 +267,19 @@ class BookingService(BaseService):
             if not booking:
                 raise NotFoundException(detail="预订记录未找到。")
 
-            if booking.user.pk != user.pk and \
-                    not user.is_system_admin and \
-                    not (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user):
+            # 权限检查：
+            # 1. 如果是预订用户本人
+            # 2. 如果是系统管理员
+            # 3. 如果是管理相关空间的空间管理员
+            # 4. NEW: 如果是相关空间的签到员
+            can_view = (
+                booking.user.pk == user.pk or
+                user.is_system_admin or
+                (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user) or
+                (user.is_check_in_staff and booking.related_space and user.has_perm('spaces.can_check_in_real_space', booking.related_space)) # NEW
+            )
+
+            if not can_view:
                 raise ForbiddenException(detail="您没有权限查看此预订记录。")
 
             # NEW: 将模型实例转换为字典，包括所有关联字段，以便缓存和服务层使用
@@ -286,9 +297,9 @@ class BookingService(BaseService):
         try:
             base_filters = Q(user=user)
 
-            is_admin_or_space_manager = user.is_system_admin or user.is_space_manager
+            is_admin_or_space_manager_or_staff = user.is_system_admin or user.is_space_manager or user.is_check_in_staff # NEW: 统一变量
 
-            if is_admin_or_space_manager:
+            if is_admin_or_space_manager_or_staff:
                 if user.is_system_admin:
                     base_filters = Q() # 系统管理员查看所有
                 elif user.is_space_manager:
@@ -296,6 +307,12 @@ class BookingService(BaseService):
                     managed_space_ids = user.managed_spaces.values_list('pk', flat=True)
                     # 组合查询条件：用户本人预订 或 管理的空间下的预订
                     base_filters |= Q(related_space__in=managed_space_ids)
+                elif user.is_check_in_staff: # NEW: 签到员可查看其有权限签到的空间预订
+                    # 签到员可以查看自己有权限签到的空间的预订，以及自己发起的预订
+                    # 获取用户拥有 'can_check_in_real_space' 权限的所有 Space 对象的 PK 列表
+                    check_in_permitted_space_ids = get_objects_for_user(user, 'spaces.can_check_in_real_space', klass=Space).values_list('pk', flat=True)
+                    # 组合查询条件：用户本人预订 或 可签到的空间下的预订
+                    base_filters |= Q(related_space__in=check_in_permitted_space_ids)
 
             queryset = self.booking_dao.get_all_bookings(
                 filter_conditions=base_filters,
@@ -324,6 +341,14 @@ class BookingService(BaseService):
                 can_cancel = True
             elif user.is_space_manager and booking.related_space and booking.related_space.managed_by == user:
                 can_cancel = True
+            elif user.is_check_in_staff and booking.related_space and user.has_perm('spaces.can_check_in_real_space', booking.related_space): # NEW: 签到员不能取消预订，除非有特殊的 can_cancel_space_bookings 权限
+                # 签到员不能随意取消预订，即使他们可以签到。
+                # 如果希望签到员也能取消，则需要单独授予 'spaces.can_cancel_space_bookings'
+                can_cancel = False
+                if user.has_perm('spaces.can_cancel_space_bookings', booking.related_space):
+                    can_cancel = True
+                else:
+                    raise ForbiddenException(detail="您是签到员但没有权限取消此预订。")
 
             if not can_cancel:
                 raise ForbiddenException(detail="您没有权限取消此预订。")
@@ -372,8 +397,14 @@ class BookingService(BaseService):
                 raise NotFoundException(detail="预订记录未找到。")
 
             # 只有系统管理员和管理相关空间的空间管理员才能通过此入口修改状态
-            if not user.is_system_admin and \
-                    not (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user):
+            # NEW: 签到员也可以修改状态（主要是签到/签出）
+            can_update_status = (
+                user.is_system_admin or
+                (user.is_space_manager and booking.related_space and booking.related_space.managed_by == user) or
+                (user.is_check_in_staff and booking.related_space and user.has_perm('spaces.can_check_in_real_space', booking.related_space)) # NEW
+            )
+
+            if not can_update_status:
                 raise ForbiddenException(detail="您没有权限修改此预订的状态。", code="unauthorized_status_update")
 
             current_status = booking.status

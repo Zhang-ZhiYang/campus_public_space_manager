@@ -5,19 +5,18 @@ import json
 from typing import List, Dict, Any, Optional
 from django.db.models import QuerySet, Q
 from django.db import transaction
-from guardian.shortcuts import assign_perm, remove_perm  # 确保导入这些
+from guardian.shortcuts import assign_perm, remove_perm # 确保导入这些
 
 from core.service import BaseService, ServiceResult
 from core.dao import DAOFactory
 from core.service.cache import CacheService
 from core.utils.exceptions import NotFoundException, BadRequestException, \
-    ForbiddenException, CustomAPIException, InternalServerError  # 确保 InternalServerError 被导入
-from spaces.models import Space, BookableAmenity, Amenity  # Amenity 也要导入以便 _update_space_amenities
+    ForbiddenException, CustomAPIException, InternalServerError # 确保 InternalServerError 被导入
+from spaces.models import Space, BookableAmenity, Amenity # Amenity 也要导入以便 _update_space_amenities
 from users.models import CustomUser
 from django.contrib.auth.models import Group
 
 logger = logging.getLogger(__name__)
-
 
 class SpaceService(BaseService):
     _dao_map = {
@@ -27,7 +26,7 @@ class SpaceService(BaseService):
         'space_type_dao': 'space_type'
     }
     _allowed_prefetch_related = ['space_type', 'managed_by', 'bookable_amenities__amenity', 'permitted_groups',
-                                 'parent_space']
+                                 'parent_space', 'check_in_by'] # NEW: 添加 check_in_by
     _allowed_select_related = ['space_type', 'managed_by', 'parent_space']
 
     def __init__(self):
@@ -84,7 +83,7 @@ class SpaceService(BaseService):
 
             if not space:
                 # 区分未找到和无权限，以便返回更准确的错误提示
-                if user.is_system_admin or user.is_space_manager:  # 管理员角色
+                if user.is_system_admin or user.is_space_manager or user.is_check_in_staff: # NEW: 签到员也可以查看他能签到的空间
                     # 尝试以非权限方式获取一次，如果存在但仍无法获取，则说明是权限问题
                     # 但在这里假设 DAO 已经做了最细粒度的权限过滤
                     # 如果 DAO.get_space_by_id 返回 None，那就是真的找不到或没权限
@@ -105,7 +104,8 @@ class SpaceService(BaseService):
     def create_space(self, user: CustomUser,
                      space_data: Dict[str, Any],
                      permitted_groups_data: Optional[List[Group]] = None,
-                     amenity_ids_data: Optional[List[int]] = None
+                     amenity_ids_data: Optional[List[int]] = None,
+                     check_in_by_data: Optional[List[CustomUser]] = None # NEW: 添加 check_in_by_data
                      ) -> ServiceResult[Dict[str, Any]]:
         # --- 权限校验 ---
         if not (user.is_system_admin or user.is_space_manager):
@@ -149,7 +149,12 @@ class SpaceService(BaseService):
                 new_space.permitted_groups.set(permitted_groups_data)
 
             if amenity_ids_data is not None:
-                self._update_space_amenities(new_space, amenity_ids_data, user)  # _update_space_amenities 内部有权限检查
+                self._update_space_amenities(new_space, amenity_ids_data, user) # _update_space_amenities 内部有权限检查
+
+            # NEW: 处理 check_in_by 字段及其权限
+            if check_in_by_data is not None:
+                new_space.check_in_by.set(check_in_by_data) # 直接设置 ManyToMany 关系
+                # Space.save() 方法中已包含对 check_in_by 权限的分配和组管理，无需在此处重复
 
             # 缓存失效将在信号处理中完成，避免在此处重复调用
             # CacheService.invalidate_all_related_cache('spaces:space')
@@ -170,10 +175,14 @@ class SpaceService(BaseService):
     def update_space(self, user: CustomUser, pk: int,
                      space_data: Dict[str, Any],
                      permitted_groups_data: Optional[List[Group]] = None,
-                     amenity_ids_data: Optional[List[int]] = None
+                     amenity_ids_data: Optional[List[int]] = None,
+                     check_in_by_data: Optional[List[CustomUser]] = None # NEW: 添加 check_in_by_data
                      ) -> ServiceResult[Dict[str, Any]]:
         try:
-            space = self._space_dao.get_by_id(pk)  # 获取原始 Space 实例
+            # 获取原始 Space 实例
+            # 这里我们使用 get_by_id 而不是 get_space_by_id，因为权限检查应该对更新能力进行，而不是仅查看能力。
+            # 实际的权限在下面的逻辑中进行检查。
+            space = self._space_dao.get_by_id(pk)
             if not space:
                 raise NotFoundException(detail="空间未找到。")
 
@@ -219,6 +228,13 @@ class SpaceService(BaseService):
                     group.pk for group in space.permitted_groups.all()):
                 if not (is_system_admin or user.has_perm('spaces.can_manage_permitted_groups', space)):
                     raise ForbiddenException("您没有权限修改空间的许可访问组。")
+
+            # NEW: 检查 check_in_by 字段的权限
+            if check_in_by_data is not None and set(u.pk for u in check_in_by_data) != set(
+                    user.pk for user in space.check_in_by.all()):
+                # 只有系统管理员或有 'can_assign_space_manager' 权限（这里复用此权限，或者定义新的如 can_manage_check_in_staff）才能修改
+                if not (is_system_admin or user.has_perm('spaces.can_assign_space_manager', space)):
+                    raise ForbiddenException("您没有权限修改空间的可签到人员。")
             # --- 权限校验 END ---
 
             updated_space = self._space_dao.update(space, **space_data)
@@ -227,7 +243,12 @@ class SpaceService(BaseService):
                 updated_space.permitted_groups.set(permitted_groups_data)
 
             if amenity_ids_data is not None:
-                self._update_space_amenities(updated_space, amenity_ids_data, user)  # _update_space_amenities 内部有权限检查
+                self._update_space_amenities(updated_space, amenity_ids_data, user) # _update_space_amenities 内部有权限检查
+
+            # NEW: 处理 check_in_by 字段
+            if check_in_by_data is not None:
+                updated_space.check_in_by.set(check_in_by_data) # 直接设置 ManyToMany 关系
+                # updated_space.save() 方法中已包含对 check_in_by 权限的分配和组管理，无需在此处重复
 
             # 缓存失效将在信号处理中完成，避免在此处重复调用
             return ServiceResult.success_result(
@@ -260,6 +281,14 @@ class SpaceService(BaseService):
             if not (is_system_admin or user.has_perm('spaces.can_delete_space', space)):
                 raise ForbiddenException(detail="您没有权限删除此空间。")
             # --- 权限校验 END ---
+
+            # NEW: 在删除空间前，需要先清理所有关联的 check_in_by 权限
+            # 否则，如果用户被删除但权限没有被清理，可能会导致一些不一致
+            if space.check_in_by.exists():
+                for staff_user in space.check_in_by.all():
+                    remove_perm('can_check_in_real_space', staff_user, space)
+                # 移除关联后，Django 会自动在 save() 或 set([]) 中处理 ManyToMany 字段，
+                # 但直接删除对象时，我们主动移除权限可以确保一致性。
 
             if space.child_spaces.exists():
                 raise BadRequestException(detail="存在子空间，无法删除此空间。请先删除或解除所有子空间与此空间的关联。")

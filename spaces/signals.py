@@ -1,6 +1,6 @@
 # spaces/signals.py (完整修订版，包含 Space is_active 级联更新和细化的缓存失效逻辑)
 import logging
-from django.db.models.signals import post_save, pre_save, post_delete
+from django.db.models.signals import post_save, pre_save, post_delete, m2m_changed
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group  # 确保导入 Group
@@ -419,3 +419,74 @@ def group_change_handler(sender, instance, **kwargs):
     logger.info(
         f"用户组 '{instance.name}' (PK:{instance.pk}) 已变更/删除。正在触发依赖空间缓存失效。")
     invalidate_all_spaces_dependent_on_group.delay(instance.pk)
+
+@receiver(m2m_changed, sender=Space.check_in_by.through)
+def space_check_in_by_changed_handler(sender, instance, action, reverse, model, pk_set, **kwargs):
+    """
+    当 Space 模型的 check_in_by ManyToMany 字段发生变化时，分配/移除对象级权限。
+    处理 'post_add', 'post_remove', 'post_clear' 动作。
+    """
+    if reverse:
+        return
+
+    logger.debug(f"m2m_changed signal for Space {instance.pk}, action: {action}, pk_set: {pk_set}")
+
+    if action == 'post_add':
+        # 当用户被添加到 check_in_by 字段时
+        for user_pk in pk_set:
+            try:
+                user_obj = CustomUser.objects.get(pk=user_pk)
+                assign_perm('can_check_in_real_space', user_obj, instance)
+                check_in_group, created = Group.objects.get_or_create(name='签到员')
+                if not user_obj.groups.filter(name='签到员').exists():
+                    user_obj.groups.add(check_in_group)
+                    # 确保用户的 is_staff 状态更新。
+                    # 调用 user_obj.save() (不带 update_fields) 将触发 CustomUser.save 方法中的 is_staff 逻辑。
+                    # 由于 groups.add() 已经保存了 M2M 关系，这里只需要触发用户自身的 save。
+                    user_obj.save()
+                    logger.info(f"User {user_obj.username} added to '签到员' group and CustomUser.save() triggered to update is_staff if needed.")
+                else:
+                    logger.debug(f"User {user_obj.username} already in '签到员' group.")
+
+                logger.info(f"Assigned 'can_check_in_real_space' perm for user {user_obj.username} to Space {instance.name} (PK:{instance.pk}) on post_add.")
+                # CacheService.invalidate_object_cache(key_prefix='users:customuser', pk=user_pk) # Invalidate user cache if user properties are heavily cached
+            except CustomUser.DoesNotExist:
+                logger.warning(f"User with PK {user_pk} does not exist, cannot assign check-in permission for Space {instance.pk}.")
+            except Exception as e:
+                logger.exception(f"Error assigning check-in perm to user {user_pk} for Space {instance.pk} on post_add: {e}")
+
+    elif action == 'post_remove':
+        # 当用户从 check_in_by 字段中移除时
+        for user_pk in pk_set:
+            try:
+                user_obj = CustomUser.objects.get(pk=user_pk)
+                remove_perm('can_check_in_real_space', user_obj, instance)
+                logger.info(f"Removed 'can_check_in_real_space' perm for user {user_obj.username} from Space {instance.name} (PK:{instance.pk}) on post_remove.")
+                # CacheService.invalidate_object_cache(key_prefix='users:customuser', pk=user_pk) # Invalidate user cache
+                # 注意：此处不应从“签到员”组中移除用户，因为他们可能在其他空间仍是签到员
+            except CustomUser.DoesNotExist:
+                logger.warning(f"User with PK {user_pk} does not exist, cannot remove check-in permission for Space {instance.pk}.")
+            except Exception as e:
+                logger.exception(f"Error removing check-in perm from user {user_pk} for Space {instance.pk} on post_remove: {e}")
+
+    elif action == 'post_clear':
+        # 当 check_in_by 字段被完全清空时
+        # pk_set 在 post_clear 动作下将包含被移除的所有用户的主键
+        # 这是为了处理从 admin 界面或其他代码调用 .clear() 方法的情况
+        logger.info(f"Handling 'post_clear' for Space {instance.name} (PK:{instance.pk}) check_in_by field. PKs cleared: {pk_set}")
+        # 在 post_clear 动作中，pk_set 包含了所有被清除的用户。我们需要移除所有这些用户的权限。
+        for user_pk in pk_set:
+            try:
+                user_obj = CustomUser.objects.get(pk=user_pk)
+                remove_perm('can_check_in_real_space', user_obj, instance)
+                logger.info(f"Removed 'can_check_in_real_space' perm for user {user_obj.username} from Space {instance.name} (PK:{instance.pk}) on post_clear.")
+                # CacheService.invalidate_object_cache(key_prefix='users:customuser', pk=user_pk) # Invalidate user cache
+            except CustomUser.DoesNotExist:
+                logger.warning(f"User with PK {user_pk} does not exist (during post_clear), cannot remove check-in permission.")
+            except Exception as e:
+                logger.exception(f"Error removing check-in perm from user {user_pk} for Space {instance.pk} on post_clear: {e}")
+
+    # Invalidate Space related list caches as check_in_by list for a space may change.
+    CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_all')
+    CacheService.delete_many_by_prefix(key_prefix_root='spaces:space:list_filtered')
+    logger.debug(f"Triggered global Space list cache invalidation due to change in Space {instance.pk}'s check_in_by field.")

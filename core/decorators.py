@@ -55,8 +55,13 @@ def require_roles_for_self_request_methods(*role_names):
 is_superuser_required = require_roles_decorator('is_superuser')
 is_system_admin_required = require_roles_decorator('is_system_admin')
 is_space_manager_required = require_roles_decorator('is_space_manager')
-is_admin_or_space_manager_required = require_roles_decorator('is_system_admin', 'is_space_manager')
+# NEW: 更新 is_admin_or_space_manager_required 为包含 is_check_in_staff
+is_admin_or_space_manager_required = require_roles_decorator('is_system_admin', 'is_space_manager', 'is_check_in_staff')
 
-# --- 新增的公共装饰器实例 ---
+# --- 新增的公共装饰器实例 (更名为 is_staff_can_operate_for_qs_obj) ---
 is_system_admin_for_qs_obj = require_roles_for_self_request_methods('is_system_admin')
-is_admin_or_space_manager_for_qs_obj = require_roles_for_self_request_methods('is_system_admin', 'is_space_manager')
+# NEW: 更新为包含 is_check_in_staff
+is_staff_can_operate_for_qs_obj = require_roles_for_self_request_methods('is_system_admin', 'is_space_manager', 'is_check_in_staff')
+
+# （此行保留，如果之前有代码在引用 `is_admin_or_space_manager_for_qs_obj`）
+is_admin_or_space_manager_for_qs_obj = is_staff_can_operate_for_qs_obj # 保持兼容性或直接替换所有引用

@@ -9,7 +9,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 class SpaceDAO(BaseDAO):
     """
     Space 数据的访问对象。
@@ -29,7 +28,8 @@ class SpaceDAO(BaseDAO):
         ).prefetch_related(
             'permitted_groups',
             'child_spaces',
-            'bookable_amenities__amenity'
+            'bookable_amenities__amenity',
+            'check_in_by' # NEW: 添加 check_in_by
         )
 
     def _apply_eager_loading(self, queryset: QuerySet[Space], prefetch_related: list = None,
@@ -50,23 +50,24 @@ class SpaceDAO(BaseDAO):
 
         if not user.is_superuser:  # 超级管理员可以查看所有，无需进一步过滤
             if user.is_authenticated:
-                # 检查用户是否是系统管理员或空间管理员（通过 CustomUser 的属性判断）
-                is_admin_or_manager = user.is_system_admin or user.is_space_manager
+                # 检查用户是否是系统管理员、空间管理员或签到员
+                is_admin_or_manager_or_staff = user.is_system_admin or user.is_space_manager or user.is_check_in_staff
 
-                if is_admin_or_manager:
-                    # 对于系统管理员和空间管理员，只要是活跃的空间就可见 (或其管理的，或明确授权的)
+                if is_admin_or_manager_or_staff:
+                    # 对于这些角色，只要是活跃的空间就可见 (或其管理的，或明确授权的，或其可签到的)
                     # 这里不过滤 is_active，因为管理员可能需要查看不活跃的空间
                     pass
                 else:  # 普通认证用户
                     explicitly_viewable_pks = get_objects_for_user(user, 'spaces.can_view_space',
                                                                    klass=Space).values_list('pk', flat=True)
 
-                    # 联合查询：基础型基础设施 | 加入组权限 | 自己管理的 | 明确授予查看权限
+                    # 联合查询：基础型基础设施 | 加入组权限 | 自己管理的 | 明确授予查看权限 | 可签到的空间
                     queryset = queryset.filter(
                         Q(space_type__is_basic_infrastructure=True) |
                         Q(permitted_groups__in=user.groups.all()) |
                         Q(managed_by=user) |
-                        Q(pk__in=explicitly_viewable_pks)
+                        Q(pk__in=explicitly_viewable_pks) |
+                        Q(check_in_by=user) # NEW: 签到员可查看其能签到的空间
                     ).distinct()
             else:  # 匿名用户
                 # 匿名用户只能查看活跃、可预订且是基础型基础设施的空间
@@ -116,10 +117,10 @@ class SpaceDAO(BaseDAO):
         base_qs_filtered_by_pk = self.get_base_queryset().filter(pk=pk)
 
         if not user.is_superuser:
-            is_admin_or_manager = user.is_system_admin or user.is_space_manager
+            is_admin_or_manager_or_staff = user.is_system_admin or user.is_space_manager or user.is_check_in_staff # NEW: 签到员可以查看其能签到的空间
 
-            if is_admin_or_manager:
-                pass  # 管理员角色可以查看所有（包括不活跃的），但仍然要检查是否是其管理的或者直接有权限的
+            if is_admin_or_manager_or_staff:
+                pass  # 管理员/签到员角色可以查看所有（包括不活跃的），但仍然要检查是否是其管理的或者直接有权限的
             else:  # 普通认证用户或匿名用户
                 explicitly_viewable_pks = get_objects_for_user(user, 'spaces.can_view_space', klass=Space).values_list(
                     'pk', flat=True)
@@ -127,11 +128,12 @@ class SpaceDAO(BaseDAO):
                     Q(space_type__is_basic_infrastructure=True) |
                     Q(permitted_groups__in=user.groups.all()) |
                     Q(managed_by=user) |
-                    Q(pk__in=explicitly_viewable_pks)
+                    Q(pk__in=explicitly_viewable_pks) |
+                    Q(check_in_by=user) # NEW: 签到员可查看其能签到的空间
                 ).distinct()
 
             # 对所有非系统管理员/超级管理员用户，默认只显示活跃的空间
-            if not user.is_system_admin and not user.is_superuser:
+            if not user.is_system_admin and not user.is_superuser and not user.is_check_in_staff: # NEW: 签到员也可以查看不活跃的空间
                 base_qs_filtered_by_pk = base_qs_filtered_by_pk.filter(is_active=True)
 
             # 匿名用户进一步过滤
@@ -195,7 +197,6 @@ class SpaceDAO(BaseDAO):
             status__in=['PENDING', 'APPROVED', 'CHECKED_IN']
         ).exists()
 
-
 class BookableAmenityDAO(BaseDAO):
     """
     BookableAmenity 数据的访问对象。
@@ -237,11 +238,11 @@ class BookableAmenityDAO(BaseDAO):
         """
         queryset = self.get_base_bookable_amenity_queryset().filter(space_id=space_pk).order_by('amenity__name')
 
-        # 对非系统管理员/超级管理员的用户，通常只显示活跃的 BookableAmenity
-        is_admin_or_manager = (
-                user.is_system_admin or user.is_space_manager
+        # 对非系统管理员/超级管理员/签到员的用户，通常只显示活跃的 BookableAmenity
+        is_admin_or_manager_or_staff = ( # NEW: 增加签到员
+                user.is_system_admin or user.is_space_manager or user.is_check_in_staff
         )
-        if not user.is_superuser and not is_admin_or_manager:
+        if not user.is_superuser and not is_admin_or_manager_or_staff:
             queryset = queryset.filter(is_active=True)
 
         return self._apply_eager_loading_ba(queryset, prefetch_related, select_related)

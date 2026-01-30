@@ -97,6 +97,9 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
     # 用于显示 `permitted_groups` 的友好字符串
     permitted_groups_display = serializers.SerializerMethodField()
 
+    # NEW: 添加 check_in_by 字段
+    check_in_by = serializers.SerializerMethodField()
+
     # 有效预订规则计算字段 (保留为 SerializerMethodField)
     effective_requires_approval = serializers.SerializerMethodField()
     effective_available_start_time = serializers.SerializerMethodField()
@@ -128,6 +131,7 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
             # 关键修改：这里引用的是 SerializerMethodField 的 permitted_groups
             'permitted_groups',
             'permitted_groups_display',
+            'check_in_by', # NEW: 添加 check_in_by 字段
 
             # 有效预订规则和签到方式 (通过 SerializerMethodField 计算或获取)
             'effective_requires_approval',
@@ -224,6 +228,22 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
 
         return "无特定限制 (需权限)"  # 默认值
 
+    # NEW: 增加 get_check_in_by 方法
+    def get_check_in_by(self, obj: Any) -> list[dict]:
+        """根据对象类型（模型实例或缓存字典）返回可签到用户的最小信息列表。"""
+        if self._is_cached_dict_object(obj):
+            # CachedDictObject 内部 of check_in_by 已经是 ID 列表
+            user_pks = obj._data.get('check_in_by', [])
+        else:
+            # Django 模型实例，需要从 ManyRelatedManager 中提取 PK
+            user_pks = list(obj.check_in_by.all().values_list('pk', flat=True))
+
+        if user_pks:
+            # 从数据库获取详细的用户信息
+            users = CustomUser.objects.filter(pk__in=user_pks)
+            return UserMinimalSerializer(users, many=True).data
+        return []
+
     # --- 辅助方法，统一从模型实例或 CachedDictObject 中获取有效字段值 ---
     def _get_effective_field_value(
             self, obj: Any, field_name: str, default_field_name: str, default_value_if_no_spacetype: Any = None
@@ -313,6 +333,7 @@ class SpaceListSerializer(SpaceBaseSerializer):
             # permitted_groups 现在通过 SerializerMethodField 处理
             'permitted_groups',
             'permitted_groups_display',  # 显示 Permitted Groups 的友好字符串
+            'check_in_by', # NEW: 添加 check_in_by 字段
 
             # 有效预订规则和签到方式
             'effective_requires_approval',
@@ -361,6 +382,13 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         help_text="可预订用户组的ID列表，例如: [1, 2]"
     )
 
+    # NEW: 添加 check_in_by 字段，接受用户ID列表
+    check_in_by = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.all(), many=True,
+        required=False,
+        help_text="可为该空间签到的用户ID列表，例如: [4, 5]"
+    )
+
     class Meta:
         model = Space
         fields = [
@@ -371,7 +399,8 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             'min_booking_duration', 'max_booking_duration', 'buffer_time_minutes',
             'check_in_method',  # 允许创建/更新时设置签到方式
             'space_type', 'parent_space', 'managed_by', 'permitted_groups',  # 直接是模型实例
-            'amenity_ids'  # 辅助字段
+            'amenity_ids',  # 辅助字段
+            'check_in_by', # NEW: 添加 check_in_by 字段
         ]
         read_only_fields = ('id',)
         extra_kwargs = {
@@ -460,6 +489,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         # 从 validated_data 中分离出非直接模型字段（由 Service 层额外处理的字段）
         amenity_ids = validated_data.pop('amenity_ids', [])
         permitted_groups_instances = validated_data.pop('permitted_groups', [])  # 这是 Group 实例的列表
+        check_in_by_instances = validated_data.pop('check_in_by', []) # NEW: 分离 check_in_by 用户实例
 
         # 调用 Service 层创建空间
         # validated_data 中现在只包含 Space 模型直接对应的字段值（FK 字段已是模型实例）
@@ -467,7 +497,8 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             user=user,
             space_data=validated_data,  # 包含所有 Space 模型的字段
             permitted_groups_data=permitted_groups_instances,  # Group 实例列表
-            amenity_ids_data=amenity_ids  # 设施 ID 列表
+            amenity_ids_data=amenity_ids,  # 设施 ID 列表
+            check_in_by_data=check_in_by_instances # NEW: 传递 check_in_by 用户实例列表
         )
 
         if service_result.success:
@@ -483,6 +514,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         # 从 validated_data 中分离出非直接模型字段
         amenity_ids = validated_data.pop('amenity_ids', None)  # None 表示未传入，不更新
         permitted_groups_instances = validated_data.pop('permitted_groups', None)  # None 表示未传入，不更新
+        check_in_by_instances = validated_data.pop('check_in_by', None) # NEW: 分离 check_in_by 用户实例
 
         # 调用 Service 层更新空间
         service_result = SpaceService().update_space(
@@ -490,7 +522,8 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
             pk=instance.pk,
             space_data=validated_data,  # 包含更新的 Space 模型字段
             permitted_groups_data=permitted_groups_instances,
-            amenity_ids_data=amenity_ids
+            amenity_ids_data=amenity_ids,
+            check_in_by_data=check_in_by_instances # NEW: 传递 check_in_by 用户实例列表
         )
 
         if service_result.success:
@@ -499,6 +532,7 @@ class SpaceCreateUpdateSerializer(serializers.ModelSerializer):
         else:
             raise service_result.to_exception()
 
+# (AmenityType Serializers 和 SpaceType Serializers 保持不变)
 # --------- Amenity Type Serializers (保持不变) ---------
 
 class AmenityBaseSerializer(serializers.ModelSerializer):
