@@ -27,23 +27,15 @@ class BookingFilter(django_filters.FilterSet):
     支持按用户、空间、设施、状态、时间范围、处理状态等进行筛选。
     """
     user = NumberFilter(field_name='user__pk', lookup_expr='exact', help_text="用户ID")
-    # 预订目标可以是 space 或 bookable_amenity。如果同时预订了这两种，这里需要更复杂的逻辑。
-    # 假设 'space' 字段用于直接预订space，'bookable_amenity' 字段用于直接预订amenity。
     space = NumberFilter(field_name='space__pk', lookup_expr='exact', help_text="直接预订的空间ID")
     bookable_amenity = NumberFilter(field_name='bookable_amenity__pk', lookup_expr='exact',
                                     help_text="直接预订的设施实例ID")
 
-    # 允许通过 related_space 过滤，方便查询所有与某个父空间相关的预订（包括其内部设施的预订）
-    # 注意：如果related_space是直接预订的根空间，则相关 Booking 的 space 字段会是它自己。
-    # 如果related_space是内部设施的父空间，则相关 Booking 的 bookable_amenity.space 字段会是它。
-    # Booking 模型中的 related_space 字段已经统一指向了父空间，所以直接用它做过滤更通用。
     related_space = NumberFilter(field_name='related_space__pk', lookup_expr='exact', help_text="关联父空间ID")
 
     status = CharFilter(field_name='status', lookup_expr='exact',
-                        # 使用全局导入的元组
                         help_text=f"预订状态 ({', '.join([c[0] for c in BOOKING_STATUS_CHOICES_TUPLE])})")
     processing_status = CharFilter(field_name='processing_status', lookup_expr='exact',
-                                   # 使用全局导入的元组
                                    help_text=f"处理状态 ({', '.join([c[0] for c in PROCESSING_STATUS_CHOICES_TUPLE])})")
     start_time_after = DateTimeFilter(field_name='start_time', lookup_expr='gte',
                                       help_text="预订开始时间晚于 (ISO 8601)")
@@ -56,13 +48,41 @@ class BookingFilter(django_filters.FilterSet):
     purpose_contains = CharFilter(field_name='purpose', lookup_expr='icontains', help_text="用途包含关键词")
     request_uuid = UUIDFilter(field_name='request_uuid', lookup_expr='exact', help_text="请求唯一标识 UUID")
 
+    # NEW: 添加 is_overdue_for_review 过滤器
+    is_overdue_for_review = django_filters.BooleanFilter(
+        method='filter_is_overdue_for_review',
+        help_text="是否是 '过时未处理/待审核' 的预订。True表示开始时间已过但仍处于待审核状态的预订。"
+    )
+
+    def filter_is_overdue_for_review(self, queryset, name, value):
+        """
+        过滤出开始时间已过，但状态仍为 PENDING、SUBMITTED 或 IN_PROGRESS 的预订。
+        """
+        if value:
+            # 预订的开始时间早于当前时间
+            # 并且状态是 PENDING (待审核)
+            # 并且处理状态是 SUBMITTED 或 IN_PROGRESS (尚未完成最终决策)
+            # 或者处理状态是 CREATED 但业务状态仍是 PENDING (等待人工审批但时间已过)
+            return queryset.filter(
+                Q(start_time__lt=timezone.now()), # 预订开始时间已过
+                Q(status=Booking.BOOKING_STATUS_PENDING), # 业务状态是待审核
+                Q(processing_status__in=[
+                    Booking.PROCESSING_STATUS_SUBMITTED,
+                    Booking.PROCESSING_STATUS_IN_PROGRESS,
+                    Booking.PROCESSING_STATUS_CREATED # 比如Created但是需要人工审批
+                ])
+            )
+        return queryset
+
     class Meta:
         model = Booking
         fields = [
             'user', 'space', 'bookable_amenity', 'related_space', 'status', 'processing_status',
             'start_time_after', 'start_time_before', 'end_time_after', 'end_time_before',
-            'created_at_after', 'created_at_before', 'purpose_contains', 'request_uuid'
+            'created_at_after', 'created_at_before', 'purpose_contains', 'request_uuid',
+            'is_overdue_for_review' # NEW: 添加到 Meta.fields
         ]
+
 
 
 class ViolationFilter(django_filters.FilterSet):

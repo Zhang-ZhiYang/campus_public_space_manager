@@ -58,3 +58,4 @@ class BookingsConfig(AppConfig):
         from celery.schedules import crontab
         from bookings.tasks.violation_tasks import recalculate_all_penalty_points_and_apply_bans_task
         from bookings.tasks.no_show_tasks import create_no_show_violation_for_single_booking,process_overdue_approved_bookings_for_no_show
+        from bookings.tasks.booking_tasks import reject_overdue_pending_bookings_task

@@ -266,9 +266,16 @@ class Booking(models.Model):
         if self.start_time >= self.end_time:
             raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
 
-        # 使用具名常量
-        if self.processing_status in [self.PROCESSING_STATUS_SUBMITTED,
-                                      self.PROCESSING_STATUS_IN_PROGRESS] and self.start_time < timezone.now():
+        # 【修改点】
+        # 此验证旨在防止创建或提交过去时间的预订。对于已批准、已完成或已签到的预订，
+        # 其 start_time 在过去是正常的。因此，只有当预订处于初始提交或处理阶段
+        # (SUBMITTED/IN_PROGRESS) 并且其业务状态仍是 PENDING 时，才应用此检查。
+        is_initial_processing_and_pending = (
+            self.processing_status in [self.PROCESSING_STATUS_SUBMITTED, self.PROCESSING_STATUS_IN_PROGRESS]
+            and self.status == Booking.BOOKING_STATUS_PENDING
+        )
+
+        if is_initial_processing_and_pending and self.start_time < timezone.now():
             raise ValidationError({'start_time': '不能预订过去的时间。'})
 
     def save(self, *args, **kwargs):
