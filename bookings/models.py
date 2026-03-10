@@ -236,6 +236,7 @@ class Booking(models.Model):
     def clean(self):
         super().clean()
 
+        # ... (其他验证逻辑，保持不变) ...
         if not ((self.space is not None) ^ (self.bookable_amenity is not None)):
             raise ValidationError('预订必须且只能指定一个目标：空间或设施实例。')
 
@@ -266,18 +267,29 @@ class Booking(models.Model):
         if self.start_time >= self.end_time:
             raise ValidationError({'end_time': '结束时间必须晚于开始时间。'})
 
-        # 【修改点】
-        # 此验证旨在防止创建或提交过去时间的预订。对于已批准、已完成或已签到的预订，
-        # 其 start_time 在过去是正常的。因此，只有当预订处于初始提交或处理阶段
-        # (SUBMITTED/IN_PROGRESS) 并且其业务状态仍是 PENDING 时，才应用此检查。
-        is_initial_processing_and_pending = (
-            self.processing_status in [self.PROCESSING_STATUS_SUBMITTED, self.PROCESSING_STATUS_IN_PROGRESS]
-            and self.status == Booking.BOOKING_STATUS_PENDING
+        # 【重点修改开始】调整“不能预订过去的时间”的验证逻辑
+        # 此验证仅适用于：
+        # 1. 新创建的预订 (self.pk is None)，防止创建过去时间的预订。
+        # 2. 处于“待审核” (PENDING) 状态且仍在等待最终自动化/人工审批的预订，防止审批者通过已过期的待审核预订。
+        # 对于已批准(APPROVED)、已签到(CHECKED_IN)、已完成(COMPLETED)、已取消(CANCELLED)、已拒绝(REJECTED)的预订，
+        # 其 start_time 在过去是其自然状态，不应触发此验证。
+
+        is_new_booking = self.pk is None  # 判断是否是新创建的实例 (还没有PK)
+
+        is_pending_and_in_review_process = (
+                self.status == Booking.BOOKING_STATUS_PENDING  # 业务状态是待审核
+                and self.processing_status in [  # 且处理状态仍在进行中或已创建但尚未最终决定
+                    Booking.PROCESSING_STATUS_SUBMITTED,
+                    Booking.PROCESSING_STATUS_IN_PROGRESS,
+                    Booking.PROCESSING_STATUS_CREATED  # Explicitly include created if it means "waiting for approval"
+                ]
         )
 
-        if is_initial_processing_and_pending and self.start_time < timezone.now():
+        # 组合条件：如果是新创建的预订，**或者** 是待审核且在处理流程中的预订，才进行“时间不能在过去”的校验。
+        # 此处更改的目的是确保当我们更新如 CHECKED_IN 到 COMPLETED，或 PENDING 到 REJECTED 的现有预订时，
+        # 即使其 start_time 已经过去，也不会因为这个验证而抛出错误。
+        if (is_new_booking or is_pending_and_in_review_process) and self.start_time < timezone.now():
             raise ValidationError({'start_time': '不能预订过去的时间。'})
-
     def save(self, *args, **kwargs):
         self.full_clean()
 

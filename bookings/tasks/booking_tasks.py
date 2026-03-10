@@ -1,6 +1,7 @@
 # bookings/tasks/booking_tasks.py
 import logging
 from celery import shared_task
+from django.contrib.auth.models import Group
 from django.utils import timezone
 from django.db import transaction  # 异步任务中也可能需要事务
 from typing import Optional, List, Union
@@ -9,6 +10,7 @@ from core.service.factory import ServiceFactory
 from core.service.cache import CacheService  # 从 core/service/cache.py 导入
 from bookings.models import Booking as BookingModel, Space as SpaceModel  # 导入 BookingModel 和 SpaceModel
 from bookings.dao.booking_dao import BookingDAO  # 直接导入 DAO 供任务内部使用
+from users.models import CustomUser
 
 logger = logging.getLogger(__name__)
 
@@ -152,3 +154,83 @@ def booking_cache_invalidation_task(self,
                     logger.warning(f"Failed to get parent_space for space {spk} during cache invalidation: {e}")
 
     logger.info(f"Booking Cache Invalidation Task (ID:{self.request.id}) completed for Booking PK={booking_pk}.")
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60 * 5)
+def reject_overdue_pending_bookings_task(self):
+    """
+    Celery 任务： 定期查找已过时但仍处于待审核状态的预订，并将其拒绝。
+    一个预订被认为是“过时未处理”：
+    1. 预订的开始时间 (`start_time`) 早于当前时间。
+    2. 预订的业务状态 (`status`) 仍为 'PENDING'。
+    3. 预订的处理状态 (`processing_status`) 并非已明确失败且已拒绝，即仍在等待处理或审批。
+    """
+    logger.info("Starting reject_overdue_pending_bookings_task...")
+    booking_dao = BookingDAO()
+    booking_service = ServiceFactory.get_service('BookingService')
+
+    try:
+        # 【修改点开始】获取一个系统用户来执行拒绝操作
+        # 遵循 'is_superuser 或 CustomUser 属于 "系统管理员" 用户组' 的逻辑
+        system_user: Optional[CustomUser] = None
+
+        # 尝试查找属于 "系统管理员" 组的用户
+        try:
+            admin_group = Group.objects.get(name="系统管理员")
+            system_user = CustomUser.objects.filter(groups=admin_group, is_active=True).first()
+        except Group.DoesNotExist:
+            logger.warning("Group '系统管理员' does not exist. Falling back to is_superuser check.")
+
+        # 如果没有找到 "系统管理员" 组的用户，尝试查找 is_superuser=True 的用户
+        if not system_user:
+            system_user = CustomUser.objects.filter(is_superuser=True, is_active=True).first()
+
+        if not system_user:
+            logger.error("No active system admin or superuser found to perform overdue booking rejections. Task aborted.")
+            return # 任务中止，因为缺少执行者
+        # 【修改点结束】
+
+        # 查找符合条件的预订：
+        overdue_bookings = booking_dao.get_queryset().filter(
+            start_time__lt=timezone.now(),
+            status=BookingModel.BOOKING_STATUS_PENDING,
+            processing_status__in=[
+                BookingModel.PROCESSING_STATUS_SUBMITTED,
+                BookingModel.PROCESSING_STATUS_IN_PROGRESS,
+                BookingModel.PROCESSING_STATUS_CREATED
+            ]
+        ).select_related('user', 'related_space')
+
+        if not overdue_bookings.exists():
+            logger.info("No overdue pending bookings found for rejection.")
+            return
+
+        rejected_count = 0
+        for booking in overdue_bookings:
+            try:
+                with transaction.atomic():
+                    reject_reason = f"预订开始时间已过，系统自动拒绝 (原状态: {booking.get_status_display()})"
+                    service_result = booking_service.update_booking_status(
+                        user=system_user,
+                        pk=booking.pk,
+                        new_status=BookingModel.BOOKING_STATUS_REJECTED,
+                        admin_notes=reject_reason
+                    )
+
+                    if service_result.success:
+                        rejected_count += 1
+                        logger.info(f"Successfully rejected overdue booking {booking.pk}. Reason: {reject_reason}")
+                    else:
+                        logger.warning(
+                            f"Failed to reject overdue booking {booking.pk}. Reason: {service_result.message}. Details: {service_result.errors}")
+
+            except Exception as e:
+                logger.error(
+                    f"Error processing overdue booking {booking.pk} for rejection in batch task: {e}",
+                    exc_info=True
+                )
+
+        logger.info(f"Finished reject_overdue_pending_bookings_task. Rejected {rejected_count} bookings.")
+
+    except Exception as e:
+        logger.exception("An unexpected error occurred in reject_overdue_pending_bookings_task. Retrying...")
+        self.retry(exc=e)
