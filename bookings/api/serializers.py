@@ -213,12 +213,15 @@ class BookingMinimalSerializer(serializers.ModelSerializer):
     user_info = CustomUserMinimalSerializer(source='user', read_only=True)
     entity_name = serializers.SerializerMethodField()
     entity_type = serializers.SerializerMethodField()
+    # 新增便捷字段，直接返回预订关联的空间名称（如果有）
+    space_name = serializers.SerializerMethodField()
 
     class Meta:
         model = BookingModel
         fields = [
             'id', 'request_uuid', 'user_info', 'entity_name', 'entity_type',
             'start_time', 'end_time', 'status', 'processing_status',
+            'space_name',
             'booked_quantity', 'created_at'
         ]
         read_only_fields = fields
@@ -235,6 +238,16 @@ class BookingMinimalSerializer(serializers.ModelSerializer):
             return 'Space'
         elif obj.bookable_amenity:
             return 'BookableAmenity'
+        return None
+
+    def get_space_name(self, obj: BookingModel) -> Optional[str]:
+        # 优先使用 related_space（标准化后的父空间），回退到直接 space 或 bookable_amenity 的父空间
+        if getattr(obj, 'related_space', None):
+            return obj.related_space.name
+        if getattr(obj, 'space', None):
+            return obj.space.name
+        if getattr(obj, 'bookable_amenity', None) and getattr(obj.bookable_amenity, 'space', None):
+            return obj.bookable_amenity.space.name
         return None
 
 

@@ -29,7 +29,8 @@ class UserBookingListAPIView(generics.ListAPIView):
     def get_queryset(self):
         user = self.request.user
         booking_service = BookingService()
-        service_result = booking_service.get_all_bookings(user, filters=self.request.query_params)  # 传入filters给service
+        # 不在 Service 层预先应用 request.query_params 的过滤，交由 DjangoFilterBackend（filterset_class）处理。
+        service_result = booking_service.get_all_bookings(user, filters=None)
         if service_result.success:
             return service_result.data.order_by('-created_at')  # 默认按创建时间倒序
         else:
@@ -60,7 +61,8 @@ class AllBookingsListAPIView(generics.ListAPIView):
         user = self.request.user # 此时 request.user 已经是认证用户
         booking_service = BookingService()
         # Service 层的 get_all_bookings 会根据用户的 isAdmin/isSpaceManager 角色返回合适的 QuerySet
-        service_result = booking_service.get_all_bookings(user, filters=self.request.query_params)
+        # 但不要传入 request.query_params，这样 DjangoFilterBackend 会使用 BookingFilter 对 queryset 进行筛选
+        service_result = booking_service.get_all_bookings(user, filters=None)
         if service_result.success:
             self.request.successful_response_status = status.HTTP_200_OK # 放到这里，因为 list 可能被 get_queryset 的异常中断
             return super().list(request, *args, **kwargs) # 调用父类的 list 方法，它会使用 get_queryset
@@ -73,7 +75,7 @@ class AllBookingsListAPIView(generics.ListAPIView):
     def get_queryset(self):
         user = self.request.user
         booking_service = BookingService()
-        service_result = booking_service.get_all_bookings(user, filters=self.request.query_params)
+        service_result = booking_service.get_all_bookings(user, filters=None)
         if service_result.success:
             return service_result.data.order_by('-created_at')
         else:

@@ -1,7 +1,7 @@
 # users/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views.user_views import UserProfileView, UserRegisterView, UserAdminViewSet  # 移除了 RoleListView
+from .views.user_views import UserProfileView, UserRegisterView, UserAdminViewSet, UserRoleView
 
 app_name = 'users'
 
@@ -21,6 +21,9 @@ urlpatterns = [
 
     # 也可以提供一个无PK的 'me' 接口，用于获取当前登录用户资料
     path('profile/me/', UserProfileView.as_view(), name='my-profile'),
+
+    # 根据 groups 返回角色信息（供前端按角色渲染菜单）
+    path('role/', UserRoleView.as_view(), name='user-role'),
 
     # --- 包含路由器生成的 URL 模式 (用于管理员用户管理) ---
     # 管理员接口现在通过 /admin/ 路径访问

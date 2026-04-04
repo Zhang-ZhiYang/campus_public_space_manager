@@ -11,6 +11,7 @@ from users.serializers import CustomUserSerializer, AdminUserUpdateSerializer, \
     UserRegistrationSerializer, UserProfileUpdateSerializer
 # 导入自定义权限装饰器
 from core.decorators import is_system_admin_required
+from rest_framework.views import APIView
 
 
 class UserRegisterView(generics.CreateAPIView):
@@ -181,3 +182,52 @@ class UserAdminViewSet(viewsets.ModelViewSet):
 
         self.perform_destroy(instance)
         return success_response(message=MSG_SUCCESS, data={}, status_code=HTTP_200_OK)
+
+
+class UserRoleView(APIView):
+    """
+    返回当前认证用户的角色信息（基于 groups 与 model 属性判断）。
+    GET /api/v1/users/role/  (需要认证)
+    返回示例：
+    {
+      "role": "space_manager",
+      "is_system_admin": false,
+      "is_space_manager": true,
+      "is_check_in_staff": false,
+      "groups": ["空间管理员"]
+    }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        try:
+            groups = list(user.groups.values_list('name', flat=True))
+        except Exception:
+            groups = []
+
+        # 决定角色优先级： system_admin > checkin_staff > space_manager > normal
+        role = 'normal'
+        if getattr(user, 'is_system_admin', False):
+            role = 'system_admin'
+        elif getattr(user, 'is_check_in_staff', False) or getattr(user, 'is_staff_member', False) and not user.is_space_manager:
+            # 若为签到员且非空间管理员，则判定为签到员
+            if user.is_check_in_staff:
+                role = 'checkin_staff'
+        elif getattr(user, 'is_space_manager', False):
+            role = 'space_manager'
+
+        data = {
+            'role': role,
+            'is_system_admin': getattr(user, 'is_system_admin', False),
+            'is_space_manager': getattr(user, 'is_space_manager', False),
+            'is_check_in_staff': getattr(user, 'is_check_in_staff', False),
+            'is_staff_member': getattr(user, 'is_staff_member', False),
+            'groups': groups,
+            'user': user.to_dict_minimal() if hasattr(user, 'to_dict_minimal') else {
+                'id': user.pk,
+                'username': user.username
+            }
+        }
+
+        return success_response(message=MSG_SUCCESS, data=data, status_code=HTTP_200_OK)

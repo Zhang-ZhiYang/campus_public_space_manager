@@ -131,7 +131,9 @@ class CustomUser(AbstractUser):
             'email': self.email,
             'phone_number': self.phone_number,
             'work_id': self.work_id,
-            # 可以根据需要添加其他少量重要字段
+            'major': self.major,
+            'student_class': self.student_class,
+            'gender': self.get_gender_display(),
         }
     # --- 方法结束 ---
 
