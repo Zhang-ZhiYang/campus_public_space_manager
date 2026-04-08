@@ -70,12 +70,12 @@ class CheckInService(BaseService):
                 )
 
             # 修正：将 Booking.BOOKING_STATUS_CONFIRMED 改为 Booking.BOOKING_STATUS_APPROVED
-            if booking.status != Booking.BOOKING_STATUS_APPROVED:
-                return ServiceResult.error_result(
-                    message="该预订尚未批准或已完成/取消，无法签到。",  # 消息也相应更新
-                    error_code="booking_not_approved",  # 错误码也建议更新，更精确表达
-                    status_code=400
-                )
+            # if booking.status != Booking.BOOKING_STATUS_APPROVED:
+            #     return ServiceResult.error_result(
+            #         message="该预订尚未批准或已完成/取消，无法签到。",  # 消息也相应更新
+            #         error_code="booking_not_approved",  # 错误码也建议更新，更精确表达
+            #         status_code=400
+            #     )
 
             # 获取关联的空间
             target_space = booking.related_space if booking.space else (
