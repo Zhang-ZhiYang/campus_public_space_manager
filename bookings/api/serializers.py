@@ -262,8 +262,6 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     processing_status_display = serializers.CharField(source='get_processing_status_display', read_only=True)
 
-    # NEW: 添加 check_in_qrcode_url 字段
-    check_in_qrcode_url = serializers.URLField(read_only=True, allow_null=True)
 
     class Meta:
         model = BookingModel
@@ -274,6 +272,23 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'reviewed_by', 'reviewed_at', 'admin_notes', 'status_display',
             'processing_status_display', 'related_space', 'check_in_qrcode_url'
         ]
+    def get_check_in_qrcode_url(self, obj) -> Optional[str]:
+        """
+        智能地获取二维码URL。
+        - 如果 obj 是模型实例, 直接从 .check_in_qrcode.url 获取。
+        - 如果 obj 是字典, 从 'check_in_qrcode_url' 键获取。
+        """
+        # 检查是否为 Django 模型实例
+        if isinstance(obj, BookingModel):
+            if obj.check_in_qrcode:
+                # 确保 context 中有 request 对象来构建完整URL
+                request = self.context.get('request')
+                return request.build_absolute_uri(obj.check_in_qrcode.url) if request else obj.check_in_qrcode.url
+            return None
+        # 否则，假定为字典 (来自 to_dict() 的输出)
+        elif isinstance(obj, dict):
+            return obj.get('check_in_qrcode_url')
+        return None
 
     # Helper methods to serialize the dict-based related objects or real model instances
     def _get_related_data_from_obj(self, obj, field_name: str, serializer_class: serializers.BaseSerializer):

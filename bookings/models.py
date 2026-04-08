@@ -352,6 +352,9 @@ class Booking(models.Model):
             'admin_notes': self.admin_notes,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
+
+            # 【新增代码】如果 check_in_qrcode 字段有值，则生成并添加它的 URL
+            'check_in_qrcode_url': self.check_in_qrcode if self.check_in_qrcode else None,
         }
         if include_related:
             data['user'] = self._get_related_object_dict(self.user)
