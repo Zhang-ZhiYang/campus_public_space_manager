@@ -152,7 +152,7 @@ class CacheService:
         'spaces:space:list_by_parent': 3600 * 6,
         'spaces:space:list_filtered': 3600 * 12,
 
-        'bookings:booking:detail': 60,
+        'bookings:booking:detail': 2,
         'bookings:booking:list_by_user': 3600 * 2,
         'bookings:booking:list_active': 3600,
         'bookings:violation:detail': 300,
