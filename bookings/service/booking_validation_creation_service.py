@@ -82,9 +82,8 @@ class BookingValidationCreationService(BaseService):
                     )
 
                 current_status_message = "预订请求正在进行深层校验。"
-                # 修复 Type Error：将 booking_instance 替换为 booking_id
                 self.booking_dao.update_booking_processing_status(
-                    booking_id, # <--- 修正：传递 booking_id
+                    booking_id,
                     Booking.PROCESSING_STATUS_IN_PROGRESS,
                     admin_notes=current_status_message
                 )
@@ -147,7 +146,7 @@ class BookingValidationCreationService(BaseService):
 
                     effective_booking_capacity = target_obj.quantity if target_obj.quantity is not None else 1
                     logger.debug(
-                        f"Target {target_obj.amenity.name} (BookableAmenity) has effective_booking_capacity: {effective_booking_capacity}")
+                        f"Target {target_obj.amenity.name} (BookableAmenity) has effective_booking_capacity: {effective_booking_capacity}.")
 
                     if booking_instance.booked_quantity <= 0:
                         raise BadRequestException(detail="预订数量必须大于0。", code="invalid_booking_quantity_locked")
@@ -206,16 +205,14 @@ class BookingValidationCreationService(BaseService):
                             code="exceeds_space_physical_capacity_locked")
                 logger.info(f"Booking {booking_id} passed expected attendees check (locked).")
 
-                # --- START OF MODIFICATION ---
                 # 在调用 DAO 之前，根据缓冲时间调整查询的开始和结束时间
                 query_start_time_with_buffer = booking_instance.start_time - timedelta(minutes=effective_buffer_time_minutes)
                 query_end_time_with_buffer = booking_instance.end_time + timedelta(minutes=effective_buffer_time_minutes)
 
                 overlapping_bookings_qs = self.booking_dao.get_overlapping_bookings(
                     target_entity=target_obj,
-                    # 注意：这里传递的是已经包含了缓冲的查询时间窗口
-                    start_time=query_start_time_with_buffer, # <--- 修改点
-                    end_time=query_end_time_with_buffer,     # <--- 修改点
+                    start_time=query_start_time_with_buffer,
+                    end_time=query_end_time_with_buffer,
                     exclude_booking_id=booking_instance.pk if booking_instance.pk else None
                 ).select_for_update()
 
@@ -223,38 +220,36 @@ class BookingValidationCreationService(BaseService):
                              f"Target: {target_obj} (PK:{getattr(target_obj, 'pk', 'N/A')}), "
                              f"Booking Quantity: {booking_instance.booked_quantity}, "
                              f"Effective Capacity: {effective_booking_capacity}. "
-                             f"DAO query range (with buffer): {query_start_time_with_buffer.isoformat()} - {query_end_time_with_buffer.isoformat()}. " # <--- 添加日志
+                             f"DAO query range (with buffer): {query_start_time_with_buffer.isoformat()} - {query_end_time_with_buffer.isoformat()}. "
                              f"Found {overlapping_bookings_qs.count()} overlapping (PENDING/APPROVED/CHECKED_IN) bookings.")
 
                 booked_slots = [
                     {'start_time': b.start_time, 'end_time': b.end_time, 'booked_quantity': b.booked_quantity}
                     for b in overlapping_bookings_qs
                 ]
+                logger.debug(f"Overlapping booked slots details: {booked_slots}")
 
                 is_available = CommonBookingHelpers.is_time_slot_available(
                     booked_slots=booked_slots,
-                    # 这里仍然传递原始的新预订时间，因为 common_helpers 内部会再次应用缓冲
-                    new_start=booking_instance.start_time, # <--- 保持原始时间
-                    new_end=booking_instance.end_time,     # <--- 保持原始时间
+                    new_start=booking_instance.start_time,
+                    new_end=booking_instance.end_time,
                     booked_quantity=booking_instance.booked_quantity,
                     total_capacity=effective_booking_capacity,
                     buffer_time_minutes=effective_buffer_time_minutes
                 )
-                # --- END OF MODIFICATION ---
 
-                # 修改点：更具体地返回冲突原因
                 if not is_available:
                     detailed_conflict_messages = []
                     for conf_booking in overlapping_bookings_qs:
                         entity_name = ""
                         entity_type = ""
-                        if conf_booking.space and not conf_booking.bookable_amenity:  # Direct space booking
+                        if conf_booking.space and not conf_booking.bookable_amenity:
                             entity_name = conf_booking.space.name
                             entity_type = "空间"
-                        elif conf_booking.bookable_amenity and conf_booking.bookable_amenity.amenity:  # Amenity booking
+                        elif conf_booking.bookable_amenity and conf_booking.bookable_amenity.amenity:
                             entity_name = conf_booking.bookable_amenity.amenity.name
                             entity_type = "设施"
-                        elif conf_booking.related_space:  # Fallback
+                        elif conf_booking.related_space:
                             entity_name = conf_booking.related_space.name
                             entity_type = "关联空间"
 
@@ -306,7 +301,6 @@ class BookingValidationCreationService(BaseService):
 
                 if effective_limit > 0:
                     today = booking_instance.start_time.date()
-                    # 修正：在深层验证中，排除当前正在处理的 booking_instance.pk，避免双重计数
                     current_bookings_count = self.booking_dao.get_user_bookings_count_for_date(
                         user=booking_instance.user,
                         target_date=today,
@@ -314,7 +308,7 @@ class BookingValidationCreationService(BaseService):
                                    Booking.BOOKING_STATUS_APPROVED,
                                    Booking.BOOKING_STATUS_CHECKED_IN],
                         space_type=target_space_type,
-                        exclude_booking_id=booking_instance.pk # <--- 关键修改点
+                        exclude_booking_id=booking_instance.pk
                     )
 
                     if current_bookings_count + 1 > effective_limit:
@@ -327,7 +321,6 @@ class BookingValidationCreationService(BaseService):
                         )
                 logger.info(f"Booking {booking_id} passed daily booking limit check (locked).")
 
-                # 新增检查所有空间类型的每日总限制，同样需要排除当前预订
                 effective_total_daily_limit = daily_limit_service.get_effective_total_daily_limit(booking_instance.user)
                 if effective_total_daily_limit > 0:
                     current_total_bookings_count = self.booking_dao.get_user_total_bookings_count_for_date(
@@ -336,7 +329,7 @@ class BookingValidationCreationService(BaseService):
                         status_in=[Booking.BOOKING_STATUS_PENDING,
                                    Booking.BOOKING_STATUS_APPROVED,
                                    Booking.BOOKING_STATUS_CHECKED_IN],
-                        exclude_booking_id=booking_instance.pk # <--- 关键修改点
+                        exclude_booking_id=booking_instance.pk
                     )
 
                     if current_total_bookings_count + 1 > effective_total_daily_limit:
@@ -350,78 +343,88 @@ class BookingValidationCreationService(BaseService):
                         )
                 logger.info(f"Booking {booking_id} passed total daily booking limit check (locked).")
 
+                # --- 【核心逻辑优化开始】 ---
                 booking_instance.processing_status = Booking.PROCESSING_STATUS_CREATED
 
-                final_booking_status = Booking.BOOKING_STATUS_APPROVED
+                admin_notes = "深层校验通过，预订已确认。"
+                if booking_instance.status == Booking.BOOKING_STATUS_PENDING:
+                    admin_notes += " 等待管理员审批。"
 
-                if target_space.requires_approval:
-                    final_booking_status = Booking.BOOKING_STATUS_PENDING
+                booking_instance.admin_notes = admin_notes
+                booking_instance.save() # 直接调用 .save() 确保触发模型层的所有逻辑
 
-                booking_instance.status = final_booking_status
-                booking_instance.admin_notes = "深层校验通过，预订已创建。"
-                if final_booking_status == Booking.BOOKING_STATUS_PENDING:
-                    booking_instance.admin_notes += "等待管理员审批。"
-
-                self.booking_dao.update_booking(booking_instance, status=final_booking_status,
-                                                admin_notes=booking_instance.admin_notes,
-                                                processing_status=booking_instance.processing_status)
                 logger.info(
-                    f"Deep validation successful and booking ID {booking_id} confirmed to {booking_instance.status} status.")
+                    f"Deep validation successful and booking ID {booking_id} confirmed in its initial '{booking_instance.status}' status.")
+
                 return ServiceResult.success_result(
                     data=booking_instance,
-                    message="预订已成功创建。",
+                    message="预订已成功确认。",
                     status_code=http_status.HTTP_201_CREATED
                 )
+                # --- 【核心逻辑优化结束】 ---
 
         except ServiceException as e:
-            logger.warning(f"Deep validation failed (ServiceException) for booking ID {booking_id}: {e.message}")
+            current_status_message = f"深层校验失败: {e.message} (Code: {e.error_code})"
+            logger.warning(f"Deep validation failed (ServiceException) for booking ID {booking_id}: {current_status_message}")
             if booking_instance:
-                # 异步校验失败，删除初步创建的预订记录
-                self.booking_dao.delete_booking(booking_instance)
-                logger.info(f"Booking ID {booking_id} deleted due to deep validation failure (ServiceException).")
+                self.booking_dao.update_booking_processing_status(
+                    booking_id,
+                    Booking.PROCESSING_STATUS_FAILED_VALIDATION,
+                    admin_notes=current_status_message
+                )
             raise e
 
         except NotFoundException as e:
             current_status_message = f"深层校验失败: {e.detail}"
-            logger.warning(f"Deep validation failed (NotFoundException) for booking ID {booking_id}: {e.detail}")
+            logger.warning(f"Deep validation failed (NotFoundException) for booking ID {booking_id}: {current_status_message}")
             if booking_instance:
-                # 异步校验失败，删除初步创建的预订记录
-                self.booking_dao.delete_booking(booking_instance)
-                logger.info(f"Booking ID {booking_id} deleted due to deep validation failure (NotFoundException).")
+                self.booking_dao.update_booking_processing_status(
+                    booking_id,
+                    Booking.PROCESSING_STATUS_FAILED_VALIDATION,
+                    admin_notes=current_status_message
+                )
             raise e
 
         except BadRequestException as e:
             current_status_message = f"深层校验失败: {e.detail}"
-            logger.warning(f"Deep validation failed (BadRequestException) for booking ID {booking_id}: {e.detail}")
+            logger.warning(f"Deep validation failed (BadRequestException) for booking ID {booking_id}: {current_status_message}")
             if booking_instance:
-                # 异步校验失败，删除初步创建的预订记录
-                self.booking_dao.delete_booking(booking_instance)
-                logger.info(f"Booking ID {booking_id} deleted due to deep validation failure (BadRequestException).")
+                self.booking_dao.update_booking_processing_status(
+                    booking_id,
+                    Booking.PROCESSING_STATUS_FAILED_VALIDATION,
+                    admin_notes=current_status_message
+                )
             raise e
 
         except ForbiddenException as e:
             current_status_message = f"深层校验失败: {e.detail}"
-            logger.warning(f"Deep validation failed (ForbiddenException) for booking ID {booking_id}: {e.detail}")
+            logger.warning(f"Deep validation failed (ForbiddenException) for booking ID {booking_id}: {current_status_message}")
             if booking_instance:
-                # 异步校验失败，删除初步创建的预订记录
-                self.booking_dao.delete_booking(booking_instance)
-                logger.info(f"Booking ID {booking_id} deleted due to deep validation failure (ForbiddenException).")
+                self.booking_dao.update_booking_processing_status(
+                    booking_id,
+                    Booking.PROCESSING_STATUS_FAILED_VALIDATION,
+                    admin_notes=current_status_message
+                )
             raise e
 
         except ConflictException as e:
             current_status_message = f"深层校验失败: {e.detail}"
-            logger.warning(f"Deep validation failed (ConflictException) for booking ID {booking_id}: {e.detail}")
+            logger.warning(f"Deep validation failed (ConflictException) for booking ID {booking_id}: {current_status_message}")
             if booking_instance:
-                # 异步校验失败，删除初步创建的预订记录
-                self.booking_dao.delete_booking(booking_instance)
-                logger.info(f"Booking ID {booking_id} deleted due to deep validation failure (ConflictException).")
+                self.booking_dao.update_booking_processing_status(
+                    booking_id,
+                    Booking.PROCESSING_STATUS_FAILED_VALIDATION,
+                    admin_notes=current_status_message
+                )
             raise e
 
         except Exception as e:
             current_status_message = f"深层校验运行时错误: {str(e)}"
             logger.exception(f"Unhandled error during deep booking validation for booking ID {booking_id}: {e}")
             if booking_instance:
-                # 异步校验失败，删除初步创建的预订记录
-                self.booking_dao.delete_booking(booking_instance)
-                logger.info(f"Booking ID {booking_id} deleted due to deep validation failure (Unhandled Exception).")
+                self.booking_dao.update_booking_processing_status(
+                    booking_id,
+                    Booking.PROCESSING_STATUS_FAILED_RUNTIME,
+                    admin_notes=current_status_message
+                )
             raise InternalServerError(detail=current_status_message, code="deep_validation_runtime_error")

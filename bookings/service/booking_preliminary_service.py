@@ -374,53 +374,57 @@ class BookingPreliminaryService(BaseService):
             logger.info(f"Booking for {target_obj} passed time/capacity conflict check at preliminary stage.")
             # --- 资源冲突与容量检查 结束 ---
 
-            # --- 权限检查 ---
+            # --- 【核心修正开始】 ---
+            # 在这里就根据 target_space 的规则决定正确的初始状态
+
+            if target_space.requires_approval:
+                initial_status = Booking.BOOKING_STATUS_PENDING
+                logger.info(f"Target space '{target_space.name}' requires approval. Initial status will be PENDING.")
+            else:
+                initial_status = Booking.BOOKING_STATUS_APPROVED
+                logger.info(
+                    f"Target space '{target_space.name}' does not require approval. Initial status will be APPROVED.")
+
+            # --- 权限检查 (检查用户是否有权进行此预订) ---
             if not (user.is_superuser or user.is_system_admin):
-                if target_space_type and target_space_type.is_basic_infrastructure:
-                    pass
-                elif not target_space.permitted_groups.filter(pk__in=user.groups.all()).exists():
+                # 检查空间类型是否为基础设置
+                is_basic = target_space.space_type and target_space.space_type.is_basic_infrastructure
+                # 检查用户是否在允许的组里
+                is_in_permitted_group = target_space.permitted_groups.filter(pk__in=user.groups.all()).exists()
+
+                if not (is_basic or is_in_permitted_group):
                     raise ForbiddenException(detail="您没有权限预订此空间/设施。",
                                              code="user_unauthorized_to_book")
             logger.info(f"Booking for {target_obj} passed user group permission check.")
-
-            # --- 预期参与人数检查 ---
-            if isinstance(target_obj, Space) and request_data.get('expected_attendees') is not None:
-                expected_attendees = request_data['expected_attendees']
-                if expected_attendees <= 0:
-                    raise BadRequestException(detail="预期参与人数必须大于0。", code="invalid_expected_attendees")
-                if target_obj.capacity is not None and expected_attendees > target_obj.capacity:
-                    raise BadRequestException(
-                        detail=f"预期参与人数 {expected_attendees} 超过空间最大物理容量 {target_obj.capacity}。",
-                        code="exceeds_space_physical_capacity")
-            logger.info(f"Booking for {target_obj} passed expected attendees check.")
 
             # --- 创建初步预订实例并调度异步任务 ---
             required_booking_fields = {
                 'user': user,
                 'request_uuid': request_uuid,
-                'start_time': start_time,
-                'end_time': end_time,
+                'start_time': request_data.get('start_time'),
+                'end_time': request_data.get('end_time'),
                 'booked_quantity': request_data.get('booked_quantity', 1),
                 'purpose': request_data.get('purpose', ''),
             }
 
-            if target_obj:
-                if isinstance(target_obj, Space):
-                    required_booking_fields['space'] = target_obj
-                    # For spaces, capacity is 1 booking for the entire space, so booked_quantity for space should be 1
-                    required_booking_fields['booked_quantity'] = 1 # 强制预订空间时数量为1
-                elif isinstance(target_obj, BookableAmenity):
-                    required_booking_fields['bookable_amenity'] = target_obj
+            if isinstance(target_obj, Space):
+                required_booking_fields['space'] = target_obj
+                required_booking_fields['booked_quantity'] = 1
+            elif isinstance(target_obj, BookableAmenity):
+                required_booking_fields['bookable_amenity'] = target_obj
 
             if 'expected_attendees' in request_data and request_data['expected_attendees'] is not None:
                 required_booking_fields['expected_attendees'] = request_data['expected_attendees']
 
             with transaction.atomic():
                 initial_booking_instance = self.booking_dao.create_booking(
-                    status=Booking.BOOKING_STATUS_PENDING,
+                    # 使用我们刚刚计算出的正确初始状态
+                    status=initial_status,
                     processing_status=Booking.PROCESSING_STATUS_SUBMITTED,
                     **required_booking_fields
                 )
+
+            # --- 【核心修正结束】 ---
 
             booking_tasks.process_booking_creation_task.delay(initial_booking_instance.pk)
 

@@ -290,14 +290,31 @@ class Booking(models.Model):
         # 即使其 start_time 已经过去，也不会因为这个验证而抛出错误。
         if (is_new_booking or is_pending_and_in_review_process) and self.start_time < timezone.now():
             raise ValidationError({'start_time': '不能预订过去的时间。'})
+
     def save(self, *args, **kwargs):
         self.full_clean()
 
-        is_new = (self.check_in_qrcode  is None or self.check_in_qrcode  == '') and self.space.requires_approval==False
+        # 【修改点 1】修改 `is_new` 的判断逻辑，安全访问 `related_space` 的 `requires_approval`
+        # 优先使用 related_space，因为它总是会被填充
+        requires_approval_from_related_space = False
+        if self.related_space:
+            requires_approval_from_related_space = self.related_space.requires_approval
+
+        is_new_and_no_qrcode_and_no_approval = (
+                (self.check_in_qrcode is None or self.check_in_qrcode == '') and
+                not requires_approval_from_related_space  # 使用 related_space 的 requires_approval
+        )
+
         super().save(*args, **kwargs)  # 保存以确保 self.pk 存在
 
-        if is_new or ((self.check_in_qrcode  is None or self.check_in_qrcode  == '') and self.status == Booking.BOOKING_STATUS_APPROVED):
-            if self.related_space and self.related_space.effective_check_in_method == 'STAFF':  # 仅当签到方式为 STAFF 时自动生成
+        # 【修改点 2】修改二维码生成逻辑的触发条件
+        # 只有在 is_new_and_no_qrcode_and_no_approval 为 True
+        # 或者当前预订状态为 APPROVED 且没有二维码时才尝试生成
+        if (is_new_and_no_qrcode_and_no_approval) or \
+                ((
+                         self.check_in_qrcode is None or self.check_in_qrcode == '') and self.status == Booking.BOOKING_STATUS_APPROVED):
+            # 确保 related_space 存在且其 effective_check_in_method 为 'STAFF' 时才自动生成
+            if self.related_space and self.related_space.effective_check_in_method == 'STAFF':
                 self._generate_check_in_qrcode()
 
     def _generate_check_in_qrcode(self):

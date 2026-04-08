@@ -15,6 +15,9 @@ from spaces.models import Space, CHECK_IN_METHOD_NONE, CHECK_IN_METHOD_SELF, CHE
     CHECK_IN_METHOD_HYBRID, CHECK_IN_METHOD_LOCATION
 from users.models import CustomUser
 
+# NEW: 导入 CacheService
+from core.service.cache import CacheService
+
 logger = logging.getLogger(__name__)
 
 # 配置：定位签到的有效半径（公里）
@@ -306,13 +309,25 @@ class CheckInService(BaseService):
                 actual_check_in_time=timezone.now()
             )
 
-            # 7. 清除缓存 (未来可以通过信号处理)
-            # 签到成功意味着预订状态变化，也可能影响预订列表
-            # CacheService.invalidate_object_cache('bookings:booking', booking_pk)
-            # CacheService.invalidate_all_related_cache('bookings:booking')
+            if not updated_booking:
+                raise InternalServerError("签到后更新预订状态失败。")
 
+            # NEW: 签到成功后，立即强制使该 Booking 对象的详情缓存失效
+            CacheService.invalidate_object_cache('bookings:booking', booking_pk)
+            logger.info(f"CheckInService: Successfully invalidated cache for bookings:booking:{booking_pk} after check-in.")
+
+            # NEW: 重新获取一次最新的 booking 对象，以确保返回的数据是最新的，
+            # 并且其 to_dict() 方法能够反映最新的状态。
+            # 这通常会命中数据库，因为我们刚刚使缓存失效了。
+            latest_booking = self._booking_dao.get_booking_by_id(booking_pk)
+            if not latest_booking:
+                # 理论上不会发生，因为刚刚更新了
+                logger.error(f"CheckInService: Failed to retrieve latest booking {booking_pk} after successful check-in and cache invalidation.")
+                return ServiceResult.error_result(message="签到成功但获取最新预订信息失败。", status_code=500)
+
+            # 7. 返回更新后的预订数据
             return ServiceResult.success_result(
-                data=updated_booking.to_dict(), # 返回更新后的 booking 字典，包含 check_in_qrcode_url
+                data=latest_booking.to_dict(), # 返回最新的 booking 字典
                 message="签到成功。",
                 status_code=201
             )

@@ -340,6 +340,8 @@ class BookableAmenity(models.Model):
             'quantity': self.quantity,
             'is_bookable': self.is_bookable,
             'is_active': self.is_active,
+            'amenity_name': self.amenity.name if self.amenity else None,  # <-- 新增这一行
+
         }
         if include_related and self.amenity: # 根据 include_related 参数控制是否嵌套 amenity
             data['amenity'] = self.amenity.to_dict() # Amenity.to_dict() 应该不需要 include_related
