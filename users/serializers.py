@@ -124,6 +124,9 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 # ====================================================================
 # UserProfileUpdateSerializer (**无需修改，保持不变**)
 # ====================================================================
+# ====================================================================
+# UserProfileUpdateSerializer (主要修改这里)
+# ====================================================================
 class UserProfileUpdateSerializer(serializers.ModelSerializer):
     """
     用于更新用户个人资料的序列化器。
@@ -132,19 +135,21 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = (
-            'name', 'email', 'phone_number', 'major', 'student_class', 'gender'
+            'name', 'email', 'phone_number', 'work_id', 'major', 'student_class', 'gender' # <-- 在这里添加 'work_id'
         )
         extra_kwargs = {
             'name': {'required': False, 'allow_blank': True},
             'email': {'required': False, 'allow_blank': True},
             'phone_number': {'required': False, 'allow_blank': True},
+            'work_id': {'required': False, 'allow_blank': True}, # <-- 为 work_id 添加 extra_kwargs
             'major': {'required': False, 'allow_blank': True},
             'student_class': {'required': False, 'allow_blank': True},
             'gender': {'required': False, 'allow_blank': True},
         }
 
     def validate(self, attrs):
-        for field_name in ['name', 'email', 'phone_number', 'major', 'student_class']:
+        # <-- 在这里修改循环，添加 'work_id'
+        for field_name in ['name', 'email', 'phone_number', 'work_id', 'major', 'student_class']:
             if attrs.get(field_name) == '':
                 attrs[field_name] = None
         return attrs
@@ -159,6 +164,11 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("该手机号已被其他用户使用。")
         return value
 
+    # <-- 新增 validate_work_id 方法来处理 work_id 的唯一性校验
+    def validate_work_id(self, value):
+        if value is not None and CustomUser.objects.exclude(pk=self.instance.pk).filter(work_id=value).exists():
+            raise serializers.ValidationError("该学号/工号已被其他用户使用。")
+        return value
 
 # ====================================================================
 # AdminUserUpdateSerializer (**无需修改，保持不变**)
