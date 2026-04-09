@@ -1,7 +1,7 @@
 # check_in/api/views.py
 import logging
 
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser # <-- 导入 JSONParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from core.utils.response import success_response
@@ -22,13 +22,12 @@ class CheckInAPIView(APIView):
     - POST /api/v1/check-in/bookings/<int:booking_pk>/
     """
     permission_classes = [IsAuthenticated]
-    # 修改此处，添加 JSONParser
-    parser_classes = [JSONParser, MultiPartParser, FormParser] # <-- 确保 JSONParser 在前面，优先处理JSON
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request, booking_pk: int):
         """
         执行签到操作。
-        根据请求用户和预订信息，智能判断是否为工作人员代签。
+        根据前端提供的签到方式和数据进行签到。
         """
         serializer = QRCheckInSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
@@ -40,56 +39,23 @@ class CheckInAPIView(APIView):
         latitude = validated_data.get('latitude')
         longitude = validated_data.get('longitude')
         notes = validated_data.get('notes', '')
+        client_check_in_method = validated_data.get('client_check_in_method') # 获取前端告知的签到方式
 
         try:
             check_in_service = CheckInService.get_instance()
 
-            # --- START DYNAMIC is_staff_manual_check_in logic ---
-            is_staff_manual_check_in_param = False # 默认初始化为 False
-
-            try:
-                booking_for_lookup = Booking.objects.select_related(
-                    'user',
-                    'space',
-                    'bookable_amenity__space'
-                ).get(pk=booking_pk)
-
-                target_space = booking_for_lookup.related_space
-                if not target_space and booking_for_lookup.bookable_amenity:
-                    target_space = booking_for_lookup.bookable_amenity.space
-
-                if user.pk != booking_for_lookup.user.pk and target_space:
-                    is_current_user_staff_with_perm = (
-                        user.is_system_admin or
-                        user.is_space_manager or
-                        (user.is_check_in_staff and user.has_perm('spaces.can_check_in_real_space', target_space))
-                    )
-
-                    if is_current_user_staff_with_perm:
-                        is_staff_manual_check_in_param = True
-                        logger.debug(
-                            f"User {user.username} (PK:{user.pk}) identified as staff attempting to check-in for Booking {booking_pk} (owner: {booking_for_lookup.user.username}). Setting is_staff_manual_check_in_param to True.")
-                    else:
-                        logger.debug(
-                            f"User {user.username} (PK:{user.pk}) is not owner and not authorized staff for Booking {booking_pk}.")
-                else:
-                    logger.debug(f"User {user.username} (PK:{user.pk}) is booking owner OR booking {booking_pk} has no associated space to perform staff check for.")
-
-            except Booking.DoesNotExist:
-                logger.debug(f"Booking {booking_pk} not found during initial lookup in CheckInAPIView.")
-            except Exception as e:
-                logger.exception(
-                    f"Error during initial booking/space lookup for staff check-in decision in CheckInAPIView (Booking PK: {booking_pk}). Error: {e}")
-            # --- END DYNAMIC is_staff_manual_check_in logic ---
+            # 移除动态判断 is_staff_manual_check_in 的逻辑
+            # 后端不再根据请求用户和预订信息智能判断是否为工作人员代签
+            # 而是直接使用前端告知的签到方式和用户身份作为操作者
 
             service_result = check_in_service.perform_check_in(
-                user=user,
+                user=user, # 当前操作用户
                 booking_pk=booking_pk,
                 latitude=latitude,
                 longitude=longitude,
                 photo=photo_file,
                 notes=notes,
-                is_staff_manual_check_in=is_staff_manual_check_in_param
+                client_check_in_method=client_check_in_method # 传入前端告知的签到方式
             )
 
             if service_result.success:

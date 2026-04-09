@@ -8,16 +8,14 @@ from datetime import datetime
 from bookings.models import Booking
 from check_in.models import CheckInRecord
 from spaces.models import CHECK_IN_METHOD_SELF, CHECK_IN_METHOD_STAFF, CHECK_IN_METHOD_HYBRID, CHECK_IN_METHOD_NONE, \
-    CHECK_IN_METHOD_LOCATION
+    CHECK_IN_METHOD_LOCATION, CHECK_IN_METHOD_CHOICES # 导入 CHECK_IN_METHOD_CHOICES
 from users.models import CustomUser  # 导入 CustomUser 模型
 from spaces.models import Space  # 导入 Space 模型
-
 
 class CustomUserMinimalSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ['id', 'username', 'get_full_name']
-
 
 class BaseCheckInSerializer(serializers.Serializer):
     """
@@ -27,7 +25,7 @@ class BaseCheckInSerializer(serializers.Serializer):
     latitude = serializers.CharField(required=False, allow_null=True, allow_blank=True, help_text="签到时的地理纬度")
     longitude = serializers.CharField(required=False, allow_null=True, allow_blank=True, help_text="签到时的地理经度")
     photo = serializers.ImageField(required=False, allow_null=True,
-                                   help_text="签到时上传的照片")  # <--- 确保这里是 False 和 True
+                                   help_text="签到时上传的照片")
     notes = serializers.CharField(max_length=500, required=False, allow_blank=True, help_text="签到备注")
 
     def validate(self, data):
@@ -54,14 +52,17 @@ class BaseCheckInSerializer(serializers.Serializer):
 
         return data
 
-
 class QRCheckInSerializer(BaseCheckInSerializer):
     """
     扫码签到序列化器 (booking_pk 从 URL 路径获取)。
     继承 BaseCheckInSerializer，`photo` 字段在这里也是可选的。
+    新增 client_check_in_method 字段，用于前端告知后端实际执行的签到方式。
     """
-    pass
-
+    client_check_in_method = serializers.ChoiceField(
+        choices=CHECK_IN_METHOD_CHOICES,
+        required=True,
+        help_text="前端告知的实际签到方式（如：SELF, STAFF, LOCATION）"
+    )
 
 class ManualCheckInSerializer(BaseCheckInSerializer):
     """
@@ -71,7 +72,6 @@ class ManualCheckInSerializer(BaseCheckInSerializer):
     """
     latitude = serializers.CharField(required=True, allow_blank=False, help_text="签到时的地理纬度")
     longitude = serializers.CharField(required=True, allow_blank=False, help_text="签到时的地理经度")
-
 
 class StaffCheckInPayloadSerializer(BaseCheckInSerializer):
     """
@@ -86,7 +86,6 @@ class StaffCheckInPayloadSerializer(BaseCheckInSerializer):
     latitude = serializers.CharField(required=False, allow_null=True, allow_blank=True, help_text="签到时的地理纬度")
     longitude = serializers.CharField(required=False, allow_null=True, allow_blank=True, help_text="签到时的地理经度")
     photo = serializers.ImageField(required=False, allow_null=True, help_text="签到照片文件")
-
 
 class CheckInRecordSerializer(serializers.ModelSerializer):
     # ... (此序列化器保持不变)
