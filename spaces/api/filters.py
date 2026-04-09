@@ -1,8 +1,7 @@
 # spaces/api/filters.py
 import django_filters
 from django.db.models import Q
-from spaces.models import Space, SpaceType, Amenity, Group  # 确保所有需要的模型都已导入
-
+from spaces.models import Space, SpaceType, Amenity, Group
 
 class SpaceFilter(django_filters.FilterSet):
     """
@@ -17,8 +16,9 @@ class SpaceFilter(django_filters.FilterSet):
     min_capacity = django_filters.NumberFilter(field_name='capacity', lookup_expr='gte')
     max_capacity = django_filters.NumberFilter(field_name='capacity', lookup_expr='lte')
 
-    # 您可以把其他需要特殊逻辑的过滤器也放在这里
-    # ...
+    # NEW: 添加一个用于筛选顶级空间的过滤器
+    # 当 is_top_level_space=true 时，会筛选 parent_space 为 NULL 的空间
+    is_top_level_space = django_filters.BooleanFilter(field_name='parent_space', lookup_expr='isnull', label="是否为顶级空间")
 
     class Meta:
         model = Space
@@ -29,7 +29,7 @@ class SpaceFilter(django_filters.FilterSet):
             'parent_space': ['exact'],  # 允许 ?parent_space=10
             'is_active': ['exact'],  # 允许 ?is_active=true
             'is_bookable': ['exact'],
-            'is_container': ['exact'],
+            'is_container': ['exact'], # 允许 ?is_container=true
             'requires_approval': ['exact'],
             'managed_by': ['exact'],  # 允许 ?managed_by=5 (用户ID)
 

@@ -9,7 +9,7 @@ from core.utils.constants import HTTP_200_OK, HTTP_201_CREATED, HTTP_403_FORBIDD
 
 from check_in.api.serializers import QRCheckInSerializer, CheckInRecordSerializer
 from check_in.service.check_in_service import CheckInService
-from core.utils.exceptions import CustomAPIException, InternalServerError, ForbiddenException
+from core.utils.exceptions import CustomAPIException, InternalServerError, ForbiddenException, BadRequestException # 导入 BadRequestException
 
 from bookings.models import Booking
 
@@ -29,24 +29,20 @@ class CheckInAPIView(APIView):
         执行签到操作。
         根据前端提供的签到方式和数据进行签到。
         """
-        serializer = QRCheckInSerializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-
-        user = request.user
-        validated_data = serializer.validated_data
-
-        photo_file = validated_data.get('photo')
-        latitude = validated_data.get('latitude')
-        longitude = validated_data.get('longitude')
-        notes = validated_data.get('notes', '')
-        client_check_in_method = validated_data.get('client_check_in_method') # 获取前端告知的签到方式
-
         try:
-            check_in_service = CheckInService.get_instance()
+            serializer = QRCheckInSerializer(data=request.data, context={'request': request})
+            serializer.is_valid(raise_exception=True)
 
-            # 移除动态判断 is_staff_manual_check_in 的逻辑
-            # 后端不再根据请求用户和预订信息智能判断是否为工作人员代签
-            # 而是直接使用前端告知的签到方式和用户身份作为操作者
+            user = request.user
+            validated_data = serializer.validated_data
+
+            photo_file = validated_data.get('photo')
+            latitude = validated_data.get('latitude')
+            longitude = validated_data.get('longitude')
+            notes = validated_data.get('notes', '')
+            client_check_in_method = validated_data.get('client_check_in_method') # 获取前端告知的签到方式
+
+            check_in_service = CheckInService.get_instance()
 
             service_result = check_in_service.perform_check_in(
                 user=user, # 当前操作用户
@@ -66,6 +62,13 @@ class CheckInAPIView(APIView):
                 )
             else:
                 raise service_result.to_exception()
+        except UnicodeDecodeError as ude:
+            # 捕获 UnicodeDecodeError，通常发生在尝试将二进制数据（如图片）解码为文本时
+            logger.error(f"UnicodeDecodeError caught during check-in for booking {booking_pk}: {ude}. "
+                         f"This often happens with file uploads when raw request body is accessed as text. "
+                         f"Request content type: {request.META.get('CONTENT_TYPE')}", exc_info=True)
+            # 返回一个 BadRequestException，避免内部服务器错误，并给前端一个明确的提示
+            raise BadRequestException(detail="请求数据编码错误，请检查上传文件或请求体格式。", code="unicode_decode_error")
         except CustomAPIException as e:
             logger.warning(f"CustomAPIException caught in CheckInAPIView (post): {e.detail}")
             raise e

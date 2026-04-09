@@ -9,7 +9,7 @@ from core.service import BaseService, ServiceResult
 from core.dao import DAOFactory
 from core.utils.exceptions import NotFoundException, BadRequestException, ForbiddenException, ConflictException, \
     InternalServerError, CustomAPIException
-from check_in.models import CheckInRecord
+from check_in.models import CheckInRecord # 确保导入 CheckInRecord
 from bookings.models import Booking
 from spaces.models import Space, CHECK_IN_METHOD_NONE, CHECK_IN_METHOD_SELF, CHECK_IN_METHOD_STAFF, \
     CHECK_IN_METHOD_HYBRID, CHECK_IN_METHOD_LOCATION
@@ -20,12 +20,11 @@ from core.service.cache import CacheService
 logger = logging.getLogger(__name__)
 
 # 配置：定位签到的有效半径（公里） - 此配置在此简化后将不再被后端使用，但保留以供参考
-LOCATION_CHECK_IN_RADIUS_KM = 0.2  # 50米
+LOCATION_CHECK_IN_RADIUS_KM = 0.3  # 50米
 # 配置：允许签到的提前或滞后时间窗口（分钟） - 此配置在此简化后将不再被后端使用
 CHECK_IN_WINDOW_MINUTES = 15
 # 配置：签到后预订状态更新的缓冲时间。例如预订结束后多久还可以处理签到 - 此配置在此简化后将不再被后端使用
 CHECK_IN_GRACE_PERIOD_MINUTES = 0
-
 
 class CheckInService(BaseService):
     _dao_map = {
@@ -58,7 +57,7 @@ class CheckInService(BaseService):
                     'bookable_amenity__space__space_type',
                     'related_space',
                     'related_space__space_type'
-                ).get(pk=booking_pk)
+                ).prefetch_related('check_in_records').get(pk=booking_pk) # <--- 添加 prefetch_related
             except Booking.DoesNotExist:
                 return ServiceResult.error_result(
                     message="预订未找到。",
@@ -201,9 +200,10 @@ class CheckInService(BaseService):
                     f"CheckInService: Failed to retrieve latest booking {booking_pk} after successful check-in and cache invalidation.")
                 return ServiceResult.error_result(message="签到成功但获取最新预订信息失败。", status_code=500)
 
-            # 6. 返回更新后的预订数据
+            # 6. 返回更新后的预订数据 (包含 CheckInRecord)
+            # latest_booking.to_dict() 现在应该会包含嵌套的 check_in_record
             return ServiceResult.success_result(
-                data=latest_booking.to_dict(),
+                data=latest_booking.to_dict(include_related=True), # 确保包含关联数据
                 message="签到成功。",
                 status_code=201
             )

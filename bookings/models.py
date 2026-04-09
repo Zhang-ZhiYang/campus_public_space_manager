@@ -12,10 +12,20 @@ from datetime import datetime, timedelta, date, time  # 新增 datetime, date, t
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 import uuid  # 导入 uuid 模块
+import logging # 导入 logging
 
 # 导入外部模型
 from users.models import CustomUser
 from spaces.models import Space, BookableAmenity, SpaceType
+
+# 确保能导入 CheckInRecord。如果存在循环导入问题，可以考虑动态导入或调整应用结构
+try:
+    from check_in.models import CheckInRecord
+except ImportError:
+    CheckInRecord = None # 如果导入失败，则无法在 to_dict 中引用 CheckInRecord
+    logging.warning("Could not import CheckInRecord in bookings/models.py. Booking.to_dict will not include check_in_record data.")
+
+logger = logging.getLogger(__name__) # 初始化 logger
 
 # ====================================================================
 # Global Choices Definitions (这些元组可在文件内被模型直接引用或从其他文件导入)
@@ -354,6 +364,9 @@ class Booking(models.Model):
     def _get_related_object_dict(self, obj):
         if hasattr(obj, 'to_dict') and callable(obj.to_dict):
             return obj.to_dict(include_related=False)
+        # 对于 Group 模型，通常没有 to_dict 方法，直接返回其 id 和 name
+        if isinstance(obj, Group):
+            return {'id': obj.id, 'name': obj.name}
         return {'id': obj.id, 'name': str(obj)} if obj else None
 
     def to_dict(self, include_related: bool = True) -> dict:
@@ -370,8 +383,9 @@ class Booking(models.Model):
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
 
-            # 【新增代码】如果 check_in_qrcode 字段有值，则生成并添加它的 URL
-            'check_in_qrcode_url': self.check_in_qrcode if self.check_in_qrcode else None,
+            # --- CRITICAL FIX HERE ---
+            # 必须访问 .url 属性才能获取图片的 URL 字符串，而不是 ImageFieldFile 对象本身
+            'check_in_qrcode': self.check_in_qrcode.url if self.check_in_qrcode else None,
         }
         if include_related:
             data['user'] = self._get_related_object_dict(self.user)
@@ -380,6 +394,25 @@ class Booking(models.Model):
             data['related_space'] = self._get_related_object_dict(self.related_space)
             data['reviewed_by'] = self._get_related_object_dict(self.reviewed_by)
             if self.reviewed_at: data['reviewed_at'] = self.reviewed_at.isoformat()
+
+            # --- ADDITION FOR FRONTEND PHOTO DISPLAY ---
+            # 假设 CheckInRecord 有一个 ForeignKey 到 Booking，related_name='check_in_records'
+            # 我们需要获取最新的签到记录并将其转换为字典
+            if CheckInRecord: # 确保 CheckInRecord 类已成功导入
+                try:
+                    # 获取此预订的最新签到记录
+                    latest_check_in_record = self.check_in_records.order_by('-check_in_time').first()
+                    if latest_check_in_record:
+                        # 确保 CheckInRecord 有 to_dict 方法并返回 check_in_image.url
+                        data['check_in_record'] = latest_check_in_record.to_dict(include_related=False)
+                    else:
+                        data['check_in_record'] = None
+                except Exception as e:
+                    logger.warning(f"Error fetching or serializing check_in_record for Booking {self.pk}: {e}")
+                    data['check_in_record'] = None # 发生错误时也返回 None
+            else:
+                data['check_in_record'] = None # 如果 CheckInRecord 类未导入，则不包含此字段
+
         return data
 
 # ====================================================================
