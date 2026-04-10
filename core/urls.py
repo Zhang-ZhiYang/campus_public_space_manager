@@ -13,7 +13,11 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, Sp
 
 # 导入我们自定义的 JWT 视图
 from users.views.jwt_views import CustomTokenObtainPairView, CustomTokenRefreshView, CustomTokenBlacklistView
-
+admin.site.site_header = "校园公共空间管理"
+# 2. 浏览器标签页标题（默认是「Django 站点管理」）
+admin.site.site_title = "校园公共空间管理"
+# 3. 首页正文标题（对应图中「站点管理」）
+admin.site.index_title = "后台管理"
 urlpatterns = [
     path('admin/', admin.site.urls),
 
