@@ -200,6 +200,26 @@ class Command(BaseCommand):
             'user2', 'user234', 'user2@example.com',
             full_name='普通用户二', phone_number='13887654321'
         )
+
+        self.stdout.write(self.style.HTTP_INFO('\n[压测] 正在创建 500 个并发测试用户 (这可能需要几秒钟)...'))
+        from django.contrib.auth.hashers import make_password
+        pwd_hash = make_password("LoadTest@123")
+        locust_users_to_create = []
+        for i in range(1, 501):
+            if not CustomUser.objects.filter(username=f'locust_user_{i}').exists():
+                locust_users_to_create.append(CustomUser(
+                    username=f"locust_user_{i}",
+                    password=pwd_hash,
+                    name=f"压测学生{i}",
+                    email=f"locust{i}@example.com",
+                    is_active=True
+                ))
+        if locust_users_to_create:
+            CustomUser.objects.bulk_create(locust_users_to_create)
+            self.stdout.write(self.style.SUCCESS(f"  成功创建 {len(locust_users_to_create)} 个压测用户。"))
+        else:
+            self.stdout.write(self.style.SUCCESS("  500个压测用户已存在，跳过创建。"))
+
         banned_user = self._create_user_with_roles(
             'banneduser', 'banned123', 'banned@example.com',
             full_name='禁用用户', phone_number='13911112222'
@@ -231,6 +251,11 @@ class Command(BaseCommand):
         add_user_to_group_and_save(teacher_user, teacher_group)
         for u in [regular_user1, regular_user2, banned_user]:
             add_user_to_group_and_save(u, general_user_group)
+
+        self.stdout.write(self.style.HTTP_INFO('[压测] 将压测用户加入学生组...'))
+        locust_users = list(CustomUser.objects.filter(username__startswith='locust_user_'))
+        if locust_users:
+            student_group.customuser_set.add(*locust_users)
 
         if not superuser.is_staff:
             superuser.is_staff = True
@@ -477,11 +502,13 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(
                 f"  Daily Booking Limit for '{general_user_group.name}' (Global): 3 bookings/day (Priority:10)"))
 
-            DailyBookingLimit.objects.get_or_create(
-                group=student_group, space_type=None, defaults={'max_bookings': 5, 'priority': 20, 'is_active': True}
+            limit, _ = DailyBookingLimit.objects.get_or_create(
+                group=student_group, space_type=None, defaults={'max_bookings': 1000, 'priority': 20, 'is_active': True}
             )
+            limit.max_bookings = 1000
+            limit.save()
             self.stdout.write(self.style.SUCCESS(
-                f"  Daily Booking Limit for '{student_group.name}' (Global): 5 bookings/day (Priority:20)"))
+                f"  [压测] Daily Booking Limit for '{student_group.name}' (Global): 放宽至 1000 次/天 (Priority:20)"))
 
             DailyBookingLimit.objects.get_or_create(
                 group=teacher_group, space_type=None, defaults={'max_bookings': 10, 'priority': 30, 'is_active': True}

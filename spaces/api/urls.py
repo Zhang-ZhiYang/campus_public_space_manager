@@ -10,6 +10,8 @@ urlpatterns = [
     path('spaces/', views.SpaceListCreateAPIView.as_view(), name='space-list-create'),
     # 所有用户可查看详情 (取决于其权限)，管理员和空间管理员可修改/删除 (取决于其权限)
     path('spaces/<int:pk>/', views.SpaceRetrieveUpdateDestroyAPIView.as_view(), name='space-detail-update-delete'),
+    # 查看空间可用性
+    path('spaces/<int:pk>/availability/', views.SpaceAvailabilityAPIView.as_view(), name='space-availability'),
 
     # --- 仅管理员GET接口：管理视角下的空间列表和详情 ---
     path('managed-spaces/', views.ManagedSpaceListCreateAPIView.as_view(), name='managed-space-list'), # 仅 GET

@@ -7,10 +7,15 @@ from .views import (
     BookingCancelAPIView, BookingStatusUpdateAPIView,
     BookingMarkNoShowAPIView, BookingGetStatusAPIView
 )
+from .views.load_test_views import LoadTestBookingCreateAPIView, LoadTestUserBookingListAPIView
 
 app_name = 'bookings_api'
 
 urlpatterns = [
+    # --- Load Test Specialized Endpoints ---
+    path('load-test/bookings/', LoadTestBookingCreateAPIView.as_view(), name='load-test-booking-create'),
+    path('load-test/bookings/me/', LoadTestUserBookingListAPIView.as_view(), name='load-test-user-booking-list'),
+
     # --- Booking Views ---
     path('bookings/', BookingCreateAPIView.as_view(), name='booking-create'),
     path('bookings/me/', UserBookingListAPIView.as_view(), name='user-booking-list'),

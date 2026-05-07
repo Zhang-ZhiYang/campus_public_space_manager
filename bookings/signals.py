@@ -539,18 +539,12 @@ def violation_post_save_handler(sender, instance, created, **kwargs):
     current_target_space_type = _get_violation_target_space_type(instance)
     old_target_space_type = getattr(instance, '_old_cached_space_type_for_penalty_calc', None)
 
-    # 收集所有受影响的空间类型（当前和旧的），以便重新计算
-    # 确保 None 也被视为一个需要处理的“空间类型”维度（代表全局）
     affected_space_types: Set[Optional[SpaceType]] = set()
     if current_target_space_type: affected_space_types.add(current_target_space_type)
     if old_target_space_type: affected_space_types.add(old_target_space_type)
     affected_space_types.add(None) # MODIFICATION: 总是包含 None，以确保全局点数被重新评估
 
-    # 仅当以下任何条件发生时才需要重新评估点数和禁用策略：
-    # 1. 违规记录是新创建的
-    # 2. 解决状态改变了 (is_resolved)
-    # 3. 违约点数改变了 (penalty_points)
-    # 4. 关联的空间类型改变了 (这会影响哪个 UserPenaltyPointsPerSpaceType 记录)
+
     points_changed = instance.penalty_points != getattr(instance, '_old_penalty_points', 0)
     resolved_changed = instance.is_resolved != getattr(instance, '_old_is_resolved', False)
     space_type_changed = (current_target_space_type != old_target_space_type)
@@ -567,19 +561,13 @@ def violation_post_save_handler(sender, instance, created, **kwargs):
                     space_type=st  # 这里的 st 可能是 SpaceType 实例或 None
                 )
 
-                # --- 关键修改：强制更新 updated_at，以确保 UserPenaltyPointsPerSpaceType 的 post_save 总是触发 ---
-                # 即使 current_penalty_points 没有变化，但如果 Violation 的状态改变了，
-                # 也应该刷新 UserPenaltyPointsPerSpaceType 的 updated_at，从而触发其 post_save 重新评估禁用策略。
                 needs_explicit_save_on_penalty_record = False
                 if penalty_points_record.current_penalty_points != current_total_active_points:
                     penalty_points_record.current_penalty_points = current_total_active_points
                     penalty_points_record.last_violation_at = timezone.now()
                     needs_explicit_save_on_penalty_record = True
                 elif created or points_changed or resolved_changed or space_type_changed:
-                    # 如果 Violation 任何相关状态改变，即使总点数没变，也要更新 penalty_points_record 的 updated_at
-                    # 确保 post_save 再次触发 _apply_ban_policy
-                    # 例如：解决了某个违规，但又有新的违规，总点数不变
-                    # 或者只有描述改变，但为了健壮性，这里也触发一次。
+
                     needs_explicit_save_on_penalty_record = True
                     penalty_points_record.last_violation_at = timezone.now() # 更新最后违规时间
 

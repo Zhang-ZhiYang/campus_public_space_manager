@@ -27,12 +27,89 @@ from spaces.api.serializers import (
 from core.decorators import is_system_admin_required, is_admin_or_space_manager_required, \
     is_admin_or_space_manager_for_qs_obj
 
-from spaces.models import Amenity, Space, SpaceType
+from spaces.models import Amenity, Space, SpaceType, BookableAmenity
+from bookings.dao import BookingDAO
+from datetime import datetime, date
+import time as time_module
 
 logger = logging.getLogger(__name__)
 
 
 # --- Space API Views (通用用户和管理员都可访问其 CUD 操作，权限在 Service 和视图装饰器中控制) ---
+
+class SpaceAvailabilityAPIView(RetrieveUpdateDestroyAPIView):
+    """
+    获取空间在特定日期的可用性和占用情况。
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = Space.objects.all()
+
+    def get(self, request, *args, **kwargs):
+        space = self.get_object()
+        date_str = request.query_params.get('date')
+        
+        try:
+            if date_str:
+                target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            else:
+                target_date = date.today()
+        except ValueError:
+            raise BadRequestException(detail="日期格式错误，请使用 YYYY-MM-DD")
+
+        # 获取营业时间
+        business_hours = {
+            "start": space.available_start_time.strftime('%H:%M') if space.available_start_time else "08:00",
+            "end": space.available_end_time.strftime('%H:%M') if space.available_end_time else "22:00"
+        }
+
+        # 使用 BookingDAO 获取重叠预订
+        from django.utils import timezone
+        start_of_day = timezone.make_aware(datetime.combine(target_date, datetime.min.time()))
+        # 修正 end_time 构造方式，避免 microsecond=0 的潜在问题，直接用 max
+        end_of_day = timezone.make_aware(datetime.combine(target_date, datetime.max.time()))
+        
+        booking_dao = BookingDAO()
+        bookings = booking_dao.get_overlapping_bookings(
+            target_entity=space,
+            start_time=start_of_day,
+            end_time=end_of_day
+        )
+
+        occupations = []
+        for b in bookings:
+            occupations.append({
+                "id": b.id,
+                "start": b.start_time.isoformat(),
+                "end": b.end_time.isoformat(),
+                "status": b.status,
+                "user": b.user.get_full_name() or b.user.username,
+                "is_amenity": b.bookable_amenity is not None,
+                "amenity_name": b.bookable_amenity.amenity.name if b.bookable_amenity else None,
+                "quantity": b.booked_quantity if b.bookable_amenity else 1
+            })
+
+        # 获取设施及其剩余数量
+        amenities = []
+        for ba in space.bookable_amenities.all():
+            # 计算该设施在当日的占用情况（简化点，这里我们可以列出设施列表）
+            amenities.append({
+                "id": ba.id,
+                "name": ba.amenity.name,
+                "total_quantity": ba.quantity,
+                "is_bookable": ba.is_bookable and ba.is_active
+            })
+
+        data = {
+            "space_id": space.id,
+            "space_name": space.name,
+            "date": target_date.isoformat(),
+            "business_hours": business_hours,
+            "occupations": occupations,
+            "amenities": amenities
+        }
+        
+        return success_response(data=data)
+
 
 class SpaceListCreateAPIView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]

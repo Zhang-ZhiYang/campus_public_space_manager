@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'bookings.apps.BookingsConfig',
     'notifications.apps.NotificationsConfig',
     'check_in.apps.CheckInConfig',   # <-- NEW: 注册 check_in 应用
+    'django_extensions',  # 添加这一行
 ]
 
 MIDDLEWARE = [
