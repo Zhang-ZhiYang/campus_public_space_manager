@@ -144,6 +144,9 @@ class SpaceBaseSerializer(serializers.ModelSerializer):
 
     effective_check_in_method = serializers.SerializerMethodField()
     effective_check_in_method_display = serializers.SerializerMethodField()
+    
+    # 覆盖 image 字段已兼容字典中的字符串 URL
+    image = serializers.SerializerMethodField()
 
     class Meta:
         model = Space
